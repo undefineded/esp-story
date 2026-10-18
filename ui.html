@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小小故事盒 - 320x240 UI 原型</title>
+  <style>
+    :root {
+      --ink: #17324d;
+      --ink-soft: #5b6f82;
+      --paper: #fff2b0;
+      --coral: #f05a56;
+      --yellow: #ffc83d;
+      --aqua: #2bb7aa;
+      --blue: #3c78d8;
+      --white: #ffffff;
+      --screen-scale: 2;
+    }
+    * {
+box-sizing: border-box;
+letter-spacing: 0;
+-webkit-tap-highlight-color: transparent;
+    }
+    html,
+    body {
+min-height: 100%;
+margin: 0;
+    }
+    body {
+display: grid;
+place-items: center;
+overflow: hidden;
+background: #d8e0e5;
+font-family: "YouYuan", "幼圆", "Yuanti SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    button {
+font: inherit;
+    }
+    .screen-shell {
+position: relative;
+box-sizing: content-box;
+width: calc(320px * var(--screen-scale));
+height: calc(240px * var(--screen-scale));
+overflow: hidden;
+background: #111820;
+border: calc(5px * var(--screen-scale)) solid #111820;
+border-radius: calc(8px * var(--screen-scale));
+box-shadow: 0 12px 34px rgba(20, 35, 48, 0.24);
+    }
+    .screen {
+position: absolute;
+top: 0;
+left: 0;
+width: 320px;
+height: 240px;
+overflow: hidden;
+color: var(--ink);
+background: var(--paper);
+transform: scale(var(--screen-scale));
+transform-origin: top left;
+image-rendering: auto;
+user-select: none;
+    }
+    .topbar {
+position: relative;
+display: flex;
+align-items: center;
+height: 32px;
+padding: 0 9px;
+color: var(--white);
+background: var(--coral);
+border-bottom: 2px solid #d94343;
+font-size: 12px;
+font-weight: 700;
+line-height: 16px;
+    }
+    .brand-mark {
+position: relative;
+width: 21px;
+height: 21px;
+flex: 0 0 21px;
+margin-right: 6px;
+background: var(--yellow);
+border: 2px solid var(--white);
+border-radius: 50%;
+    }
+    .brand-mark::before,
+    .brand-mark::after {
+content: "";
+position: absolute;
+top: 6px;
+width: 3px;
+height: 3px;
+background: var(--ink);
+border-radius: 50%;
+    }
+    .brand-mark::before {
+left: 4px;
+    }
+    .brand-mark::after {
+right: 4px;
+    }
+    .brand-smile {
+position: absolute;
+left: 5px;
+bottom: 4px;
+width: 7px;
+height: 4px;
+border-bottom: 2px solid var(--ink);
+border-radius: 0 0 7px 7px;
+    }
+    .brand {
+display: block;
+height: 16px;
+font-size: inherit;
+font-weight: inherit;
+line-height: inherit;
+    }
+    .volume-text {
+margin-left: auto;
+margin-right: 10px;
+font-size: inherit;
+font-weight: inherit;
+line-height: inherit;
+white-space: nowrap;
+    }
+    .clock {
+font-size: inherit;
+font-weight: inherit;
+line-height: inherit;
+font-variant-numeric: tabular-nums;
+    }
+    .battery {
+position: relative;
+width: 19px;
+height: 10px;
+margin-left: 6px;
+border: 1px solid var(--white);
+border-radius: 2px;
+    }
+    .battery::before {
+content: "";
+position: absolute;
+top: 2px;
+left: 2px;
+width: 12px;
+height: 4px;
+background: var(--yellow);
+    }
+    .battery::after {
+content: "";
+position: absolute;
+top: 2px;
+right: -3px;
+width: 2px;
+height: 4px;
+background: var(--white);
+border-radius: 0 1px 1px 0;
+    }
+    .content {
+display: grid;
+grid-template-columns: 92px 1fr;
+gap: 10px;
+height: 156px;
+padding: 10px 10px 8px;
+    }
+    .cover-wrap {
+position: relative;
+width: 92px;
+height: 112px;
+padding: 3px;
+overflow: hidden;
+background: var(--yellow);
+border: 2px solid var(--ink);
+border-radius: 6px;
+box-shadow: 3px 3px 0 var(--ink);
+    }
+    .cover {
+position: relative;
+display: block;
+width: 82px;
+height: 84px;
+overflow: hidden;
+object-fit: cover;
+background: #7cc9dd;
+border-radius: 2px;
+    }
+    .cover img {
+display: block;
+width: 100%;
+height: 100%;
+object-fit: cover;
+    }
+    .cover-placeholder {
+position: absolute;
+inset: 0;
+background: #79c9da;
+    }
+    .cover-placeholder::before {
+content: "";
+position: absolute;
+top: 10px;
+right: 8px;
+width: 33px;
+height: 33px;
+background: #fff4a8;
+border: 2px solid var(--ink);
+border-radius: 50%;
+    }
+    .cover-placeholder::after {
+content: "";
+position: absolute;
+left: 15px;
+bottom: 12px;
+width: 48px;
+height: 30px;
+background: var(--white);
+border: 2px solid var(--ink);
+border-radius: 24px 24px 9px 9px;
+box-shadow: -16px 12px 0 -7px #2f9b68, 22px 10px 0 -6px #2f9b68;
+    }
+    .cover-caption {
+display: block;
+height: 18px;
+overflow: hidden;
+padding-top: 4px;
+color: var(--ink);
+font-size: 10px;
+font-weight: 800;
+line-height: 12px;
+text-align: center;
+white-space: nowrap;
+    }
+    .story-info {
+min-width: 0;
+padding-top: 1px;
+    }
+    .category-row {
+display: flex;
+align-items: center;
+min-height: 18px;
+    }
+    .category {
+display: inline-flex;
+align-items: center;
+height: 18px;
+padding: 0 6px;
+color: var(--white);
+background: var(--aqua);
+border: 1px solid #168f85;
+border-radius: 4px;
+font-size: 10px;
+font-weight: 700;
+line-height: 16px;
+    }
+    .episode-count {
+margin-left: auto;
+color: var(--ink-soft);
+font-size: 9px;
+font-weight: 700;
+    }
+    .title {
+height: 29px;
+margin: 6px 0 0;
+overflow: hidden;
+color: var(--ink);
+font-size: 19px;
+font-weight: 900;
+line-height: 25px;
+white-space: nowrap;
+text-overflow: ellipsis;
+    }
+    .subtitle {
+height: 17px;
+margin: 0;
+overflow: hidden;
+color: var(--ink-soft);
+font-size: 11px;
+font-weight: 700;
+line-height: 16px;
+white-space: nowrap;
+text-overflow: ellipsis;
+    }
+    .progress-area {
+margin-top: 8px;
+    }
+    .time-row {
+display: flex;
+justify-content: space-between;
+margin-bottom: 3px;
+color: var(--ink-soft);
+font-family: Arial, sans-serif;
+font-size: 9px;
+font-weight: 700;
+    }
+    .progress-track {
+position: relative;
+height: 8px;
+overflow: hidden;
+background: #d4dde1;
+border: 1px solid #a4b2b9;
+border-radius: 2px;
+    }
+    .progress-fill {
+position: relative;
+width: 38%;
+height: 100%;
+background: var(--blue);
+transition: width 160ms linear;
+    }
+    .progress-fill::after {
+content: "";
+position: absolute;
+top: 0;
+right: 0;
+width: 4px;
+height: 6px;
+background: var(--yellow);
+    }
+    .status-row {
+display: flex;
+align-items: center;
+height: 18px;
+margin-top: 7px;
+color: var(--ink-soft);
+font-size: 9px;
+font-weight: 700;
+    }
+    .playing-dot {
+width: 7px;
+height: 7px;
+margin-right: 4px;
+background: #49b95c;
+border: 1px solid #237b31;
+border-radius: 50%;
+    }
+    .sleep {
+margin-left: auto;
+color: #7255a6;
+    }
+    .controls {
+position: relative;
+display: flex;
+align-items: center;
+justify-content: center;
+height: 52px;
+padding: 0 9px;
+color: var(--white);
+background: var(--ink);
+border-top: 3px solid var(--yellow);
+    }
+    .transport {
+display: flex;
+align-items: center;
+justify-content: center;
+gap: 26px;
+    }
+    .icon-button {
+position: relative;
+display: flex;
+align-items: center;
+justify-content: center;
+width: 52px;
+height: 34px;
+padding: 0;
+color: var(--white);
+background: #315a82;
+border: 2px solid #6f95b8;
+border-radius: 10px;
+cursor: pointer;
+    }
+    .icon-button:active {
+transform: translateY(1px);
+background: #335b7d;
+    }
+    .icon-button.primary {
+gap: 8px;
+width: 82px;
+height: 40px;
+color: var(--ink);
+background: var(--yellow);
+border: 2px solid #ffe79a;
+border-radius: 12px;
+box-shadow: none;
+    }
+    .play-label {
+font-size: 12px;
+font-weight: 800;
+line-height: 16px;
+    }
+    .previous-icon,
+    .next-icon {
+position: relative;
+width: 18px;
+height: 16px;
+    }
+    .previous-icon::before,
+    .next-icon::before {
+content: "";
+position: absolute;
+top: 2px;
+width: 0;
+height: 0;
+border-top: 6px solid transparent;
+border-bottom: 6px solid transparent;
+    }
+    .previous-icon::after,
+    .next-icon::after {
+content: "";
+position: absolute;
+top: 2px;
+width: 3px;
+height: 12px;
+background: currentColor;
+    }
+    .previous-icon::before {
+left: 3px;
+border-right: 10px solid currentColor;
+    }
+    .previous-icon::after {
+left: 1px;
+    }
+    .next-icon::before {
+right: 3px;
+border-left: 10px solid currentColor;
+    }
+    .next-icon::after {
+right: 1px;
+    }
+    .play-icon {
+width: 0;
+height: 0;
+margin-left: 3px;
+border-top: 9px solid transparent;
+border-bottom: 9px solid transparent;
+border-left: 14px solid currentColor;
+    }
+    .pause-icon {
+position: relative;
+width: 15px;
+height: 18px;
+    }
+    .pause-icon::before,
+    .pause-icon::after {
+content: "";
+position: absolute;
+top: 0;
+width: 5px;
+height: 18px;
+background: currentColor;
+border-radius: 1px;
+    }
+    .pause-icon::before { left: 1px; }
+    .pause-icon::after { right: 1px; }
+    .paused .playing-dot {
+background: var(--yellow);
+border-color: #a97700;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .progress-fill {
+transition: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="screen-shell" aria-label="320 乘 240 故事机屏幕预览">
+    <section class="screen" id="screen">
+      <header class="topbar">
+        <span class="brand-mark" aria-hidden="true"><span class="brand-smile"></span></span>
+        <strong class="brand">小小故事盒</strong>
+        <span class="volume-text" aria-label="音量 10，共 21 级">音量:10</span>
+        <span class="clock" id="clock">20:36</span>
+        <span class="battery" aria-label="电量充足"></span>
+      </header>
+      <section class="content">
+        <div class="cover-wrap">
+          <div class="cover" id="cover" role="img" aria-label="月亮邮递员故事封面">
+            <span class="cover-placeholder" aria-hidden="true"></span>
+          </div>
+          <span class="cover-caption" id="coverCaption">睡前好故事</span>
+        </div>
+        <div class="story-info">
+          <div class="category-row">
+            <span class="category" id="category">晚安故事</span>
+            <span class="episode-count" id="episodeCount">03 / 24</span>
+          </div>
+          <h1 class="title" id="storyTitle">月亮邮递员</h1>
+          <p class="subtitle" id="subtitle">星星寄来了一封信</p>
+          <div class="progress-area">
+            <div class="time-row">
+              <span id="currentTime">03:18</span>
+              <span id="totalTime">08:42</span>
+            </div>
+            <div class="progress-track" aria-label="播放进度">
+              <div class="progress-fill" id="progressFill"></div>
+            </div>
+          </div>
+          <div class="status-row">
+            <span class="playing-dot"></span>
+            <span id="playState">正在播放</span>
+            <span class="sleep">月亮模式</span>
+          </div>
+        </div>
+      </section>
+      <footer class="controls">
+        <nav class="transport" aria-label="播放控制">
+          <button class="icon-button" id="previousButton" type="button" aria-label="上一个故事" title="上一个故事">
+            <span class="previous-icon" aria-hidden="true"></span>
+          </button>
+          <button class="icon-button primary" id="playButton" type="button" aria-label="暂停" title="播放或暂停">
+            <span class="pause-icon" id="playIcon" aria-hidden="true"></span>
+            <span class="play-label" id="playLabel">暂停</span>
+          </button>
+          <button class="icon-button" id="nextButton" type="button" aria-label="下一个故事" title="下一个故事">
+            <span class="next-icon" aria-hidden="true"></span>
+          </button>
+        </nav>
+      </footer>
+    </section>
+  </main>
+  <script>
+const stories = [
+      {
+        category: "晚安故事",
+        index: 3,
+        count: 24,
+        title: "月亮邮递员",
+        subtitle: "星星寄来了一封信",
+        caption: "睡前好故事",
+        duration: 522,
+        progress: 198
+      },
+      {
+        category: "经典童话",
+        index: 4,
+        count: 24,
+        title: "会唱歌的小船",
+        subtitle: "一起驶过彩虹河",
+        caption: "勇气与友情",
+        duration: 455,
+        progress: 0
+      },
+      {
+        category: "自然启蒙",
+        index: 5,
+        count: 24,
+        title: "云朵去哪儿了",
+        subtitle: "小雨滴的旅行",
+        caption: "发现大自然",
+        duration: 608,
+        progress: 0
+      }
+    ];
+let storyIndex = 0;
+let playing = true;
+let timerId = null;
+const screen = document.querySelector(".screen");
+const playButton = document.getElementById("playButton");
+const playIcon = document.getElementById("playIcon");
+const progressFill = document.getElementById("progressFill");
+const coverUrl = "https://copilot-cn.bytedance.net/api/ide/v1/text_to_image?prompt=children%27s%20storybook%20cover%2C%20friendly%20white%20rabbit%20mail%20carrier%20holding%20a%20small%20yellow%20letter%20under%20a%20large%20moon%2C%20simple%20bold%20shapes%2C%20bright%20coral%20aqua%20yellow%20and%20deep%20blue%20palette%2C%20clean%20flat%202D%20illustration%2C%20no%20text%2C%20centered%20character%2C%20high%20contrast%2C%20square%20composition&image_size=square";
+function formatTime(seconds) {
+const minutes = Math.floor(seconds / 60);
+const remainingSeconds = seconds % 60;
+      return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
+    }
+function renderStory() {
+const story = stories[storyIndex];
+      document.getElementById("category").textContent = story.category;
+      document.getElementById("episodeCount").textContent =
+        `${String(story.index).padStart(2, "0")} / ${story.count}`;
+      document.getElementById("storyTitle").textContent = story.title;
+      document.getElementById("subtitle").textContent = story.subtitle;
+      document.getElementById("coverCaption").textContent = story.caption;
+      document.getElementById("totalTime").textContent = formatTime(story.duration);
+      renderProgress();
+    }
+function renderProgress() {
+const story = stories[storyIndex];
+const percent = Math.min(100, Math.round((story.progress / story.duration) * 100));
+      document.getElementById("currentTime").textContent = formatTime(story.progress);
+      progressFill.style.width = `${percent}%`;
+    }
+function renderPlayState() {
+      screen.classList.toggle("paused", !playing);
+      playIcon.className = playing ? "pause-icon" : "play-icon";
+      playButton.setAttribute("aria-label", playing ? "暂停" : "播放");
+      document.getElementById("playLabel").textContent = playing ? "暂停" : "播放";
+      document.getElementById("playState").textContent = playing ? "正在播放" : "已经暂停";
+    }
+function togglePlay() {
+      playing = !playing;
+      renderPlayState();
+    }
+function changeStory(direction) {
+      storyIndex = (storyIndex + direction + stories.length) % stories.length;
+      playing = true;
+      renderStory();
+      renderPlayState();
+    }
+function updateClock() {
+const now = new Date();
+      document.getElementById("clock").textContent =
+        `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    }
+function fitScreen() {
+const availableWidth = Math.max(160, window.innerWidth - 24);
+const availableHeight = Math.max(120, window.innerHeight - 24);
+const scale = Math.min(2.5, availableWidth / 330, availableHeight / 250);
+      document.documentElement.style.setProperty("--screen-scale", scale.toFixed(3));
+    }
+function loadCover() {
+      if (new URLSearchParams(window.location.search).has("offline")) return;
+const image = new Image();
+      image.alt = "";
+      image.decoding = "async";
+      image.onload = () => document.getElementById("cover").replaceChildren(image);
+      image.src = coverUrl;
+    }
+    playButton.addEventListener("click", togglePlay);
+    document.getElementById("previousButton").addEventListener("click", () => changeStory(-1));
+    document.getElementById("nextButton").addEventListener("click", () => changeStory(1));
+    window.addEventListener("resize", fitScreen);
+    fitScreen();
+    updateClock();
+    renderStory();
+    renderPlayState();
+    window.addEventListener("load", loadCover, { once: true });
+    timerId = window.setInterval(() => {
+      if (!playing) return;
+const story = stories[storyIndex];
+      story.progress = (story.progress + 1) % (story.duration + 1);
+      renderProgress();
+    }, 1000);
+  </script>
+</body>
+</html>

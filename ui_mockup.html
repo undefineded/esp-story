@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>音乐播放界面设计稿 · 320×240 横屏</title>
+<style>
+  :root{
+    --bg:      #F6F8FB;   /* 屏幕底色: 近白浅灰 */
+    --surface: #FFFFFF;   /* 卡片/按钮 */
+    --line:    #E4E9F0;   /* 描边 */
+    --track:   #E6EBF1;   /* 进度/音量底槽 */
+    --ink:     #23272F;   /* 主文字 */
+    --sub:     #98A1AC;   /* 次要文字 */
+    --accent:  #14C08A;   /* 唯一主色: 薄荷绿 */
+    --accentT: #E7F8F1;   /* 主色浅底 */
+    --warn:    #F2A93B;   /* 暂停/待机 */
+    --warnT:   #FBF1DE;
+    --warnTxt: #C07A10;   /* 暂停态文字 */
+    --dotOff:  #C7CFD9;   /* 熄灭指示点 */
+  }
+  /* ---------- 夜间模式 ---------- */
+  .screen.dark{
+    --bg:      #10151C;
+    --surface: #1B222D;
+    --line:    #2C3542;
+    --track:   #26303D;
+    --ink:     #E8EDF4;
+    --sub:     #7E8898;
+    --accent:  #19D89B;
+    --accentT: #123028;
+    --warnT:   #3A2F18;
+    --warnTxt: #E7B45C;
+    --dotOff:  #49535F;
+  }
+  *{ margin:0; padding:0; box-sizing:border-box; }
+  body{
+    background:#2A2F3A;
+    min-height:100vh;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:18px; padding:32px 16px;
+    font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  }
+  h1{ color:#8E97A6; font-size:13px; font-weight:500; letter-spacing:1px; }
+  h1 b{ color:#D7DEE8; }
+
+  /* ---------- 缩放工具条 ---------- */
+  .toolbar{ display:flex; gap:8px; }
+  .toolbar button{
+    background:#3A4150; color:#C9D1DC; border:0; border-radius:6px;
+    padding:6px 14px; font-size:12px; cursor:pointer;
+  }
+  .toolbar button.on{ background:var(--accent); color:#fff; }
+
+  /* ---------- 设备外壳 ---------- */
+  .shell{ padding:12px; background:#12151C; border-radius:16px; }
+  .screen{
+    width:320px; height:240px;
+    background:var(--bg);
+    border-radius:4px;
+    position:relative; overflow:hidden;
+    transform-origin:top center;
+    color:var(--ink);
+    user-select:none;
+  }
+
+  /* ---------- 顶部栏 ---------- */
+  .topbar{
+    position:absolute; left:16px; right:16px; top:12px;
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  .np{
+    display:flex; align-items:center; gap:6px;
+    font-size:9px; font-weight:700; letter-spacing:2.5px; color:var(--sub);
+  }
+  .np i{ width:5px; height:5px; border-radius:50%; background:var(--accent); }
+  .topright{ display:flex; align-items:center; gap:8px; }
+  .trk{ font-size:10px; font-weight:600; color:var(--sub); font-variant-numeric:tabular-nums; }
+  .hall{
+    display:flex; align-items:center; gap:4px;
+    font-size:8px; font-weight:700; letter-spacing:1px; color:var(--sub);
+    border:1px solid var(--line); border-radius:8px; padding:2px 7px;
+    background:var(--surface); cursor:pointer;
+  }
+  .hall i{ width:4px; height:4px; border-radius:50%; background:var(--dotOff); }
+  .hall.on{ color:var(--accent); }
+  .hall.on i{ background:var(--accent); }
+
+  /* ---------- 封面 ---------- */
+  .art{
+    position:absolute; left:16px; top:44px; width:88px; height:88px;
+    background:var(--surface); border:1px solid var(--line); border-radius:18px;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .art .disc{
+    width:56px; height:56px; border-radius:50%;
+    background:var(--accentT);
+    display:flex; align-items:center; justify-content:center;
+  }
+  .art .disc i{
+    width:12px; height:12px; border-radius:50%;
+    background:var(--accent);
+  }
+
+  /* ---------- 曲目信息 ---------- */
+  .info{ position:absolute; left:122px; top:48px; width:182px; }
+  .title{
+    font-size:20px; font-weight:700; letter-spacing:.5px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .chip{
+    margin-top:9px;
+    display:inline-flex; align-items:center; gap:5px;
+    font-size:10px; font-weight:600;
+    color:var(--accent); background:var(--accentT);
+    border-radius:9px; padding:3px 9px;
+  }
+  .chip i{ width:5px; height:5px; border-radius:50%; background:var(--accent); }
+  .chip.pause{ color:var(--warnTxt); background:var(--warnT); }
+  .chip.pause i{ background:var(--warn); }
+  .meta{ margin-top:9px; font-size:10px; color:var(--sub); font-variant-numeric:tabular-nums; }
+  .meta + .meta{ margin-top:5px; }
+
+  /* ---------- 进度条 ---------- */
+  .bar{
+    position:absolute; left:16px; right:16px; top:158px; height:5px;
+    border-radius:3px; background:var(--track); cursor:pointer;
+  }
+  .bar .fill{ height:100%; border-radius:3px; background:var(--accent); }
+  .bar .knob{
+    position:absolute; top:50%; width:11px; height:11px;
+    border-radius:50%; background:var(--surface);
+    border:2.5px solid var(--accent);
+    transform:translate(-50%,-50%);
+  }
+  .time{
+    position:absolute; left:16px; right:16px; top:169px;
+    display:flex; justify-content:space-between;
+    font-size:10px; color:var(--sub); font-variant-numeric:tabular-nums;
+  }
+
+  /* ---------- 播放控制 ---------- */
+  .btn{
+    position:absolute; border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    background:var(--surface); border:1.5px solid var(--line);
+    cursor:pointer;
+  }
+  .btn svg{ display:block; }
+  .btn.small{ width:34px; height:34px; top:191px; }
+  .btn.small:active{ background:var(--track); }
+  #btnPrev{ left:39px; }
+  #btnNext{ left:135px; }
+  .btn.play{
+    left:80px; top:184px; width:48px; height:48px;
+    background:var(--accent); border:none;
+  }
+  .btn.play:active{ filter:brightness(.92); }
+
+  /* ---------- 音量 + EQ ---------- */
+  .volwrap{
+    position:absolute; left:196px; right:16px; top:197px;
+    display:flex; align-items:center; gap:7px;
+  }
+  .volwrap .lb{ font-size:8px; font-weight:700; letter-spacing:1px; color:var(--sub); }
+  .volbar{ flex:1; height:5px; border-radius:3px; background:var(--track); cursor:pointer; }
+  .volbar div{ height:100%; border-radius:3px; background:var(--accent); }
+  .volwrap .num{ font-size:10px; color:var(--sub); width:16px; text-align:right; font-variant-numeric:tabular-nums; }
+  .eq{
+    position:absolute; left:196px; top:213px; height:19px;
+    display:flex; align-items:center; gap:4px;
+    padding:0 10px; border-radius:10px;
+    background:var(--surface); border:1.5px solid var(--line);
+    font-size:9px; font-weight:600; letter-spacing:1px; color:var(--sub);
+    cursor:pointer;
+  }
+  .eq b{ color:var(--accent); font-weight:700; }
+
+  .note{ color:#6E7787; font-size:11px; line-height:1.8; text-align:center; max-width:560px; }
+</style>
+</head>
+<body>
+
+<h1>音乐播放界面设计稿 · <b>320 × 240</b> 横屏 · 清爽浅色</h1>
+
+<div class="toolbar">
+  <button data-z="1" onclick="setZoom(1)">1×</button>
+  <button data-z="2" class="on" onclick="setZoom(2)">2×</button>
+  <button data-z="3" onclick="setZoom(3)">3×</button>
+  <button id="themeBtn" onclick="toggleTheme()">夜间模式</button>
+</div>
+
+<div class="shell">
+  <div class="screen" id="screen">
+
+    <!-- 顶部栏 -->
+    <div class="topbar">
+      <div class="np"><i></i>NOW PLAYING</div>
+      <div class="topright">
+        <span class="trk" id="trk">3 / 5</span>
+        <span class="hall on" id="hall" onclick="hall=!hall;render()"><i></i>HALL</span>
+      </div>
+    </div>
+
+    <!-- 封面 -->
+    <div class="art"><div class="disc"><i></i></div></div>
+
+    <!-- 曲目信息 -->
+    <div class="info">
+      <div class="title" id="title">夜空中最亮的星</div>
+      <div class="chip" id="chip"><i></i><span id="stateTxt">正在播放</span></div>
+      <div class="meta" id="meta1">MP3 · 320 kbps</div>
+      <div class="meta" id="meta2">44.1 kHz · 16 bit</div>
+    </div>
+
+    <!-- 进度 -->
+    <div class="bar" id="bar">
+      <div class="fill" id="fill"></div>
+      <div class="knob" id="knob"></div>
+    </div>
+    <div class="time"><span id="tCur">1:24</span><span id="tDur">4:46</span></div>
+
+    <!-- 控制 -->
+    <div class="btn small" id="btnPrev" onclick="prev()">
+      <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 1h2v10H2z M11 1v10L4.5 6z" fill="#98A1AC"/></svg>
+    </div>
+    <div class="btn play" id="btnPlay" onclick="toggle()">
+      <svg id="icoPause" width="16" height="18" viewBox="0 0 16 18"><path d="M2 1h4v16H2z M10 1h4v16h-4z" fill="#fff"/></svg>
+      <svg id="icoPlay" width="16" height="18" viewBox="0 0 16 18" style="display:none"><path d="M2 1l13 8-13 8z" fill="#fff"/></svg>
+    </div>
+    <div class="btn small" id="btnNext" onclick="next()">
+      <svg width="12" height="12" viewBox="0 0 12 12"><path d="M8 1h2v10H8z M1 1v10l6.5-5z" fill="#98A1AC"/></svg>
+    </div>
+
+    <!-- 音量 + EQ -->
+    <div class="volwrap">
+      <span class="lb">VOL</span>
+      <div class="volbar" id="volbar"><div id="volfill"></div></div>
+      <span class="num" id="volnum">15</span>
+    </div>
+    <div class="eq" onclick="cycleEq()">EQ · <b id="eqName">VOCAL</b></div>
+
+  </div>
+</div>
+
+<p class="note">
+  可交互预览：播放/暂停、上一首/下一首、点击进度条跳转、点击 VOL 条调音量、点击 EQ 徽章切换预设、点击 HALL 切换状态，右上角按钮切换日间/夜间主题。<br>
+  全部元素为纯色圆角矩形 + 圆形 + 三角形，无渐变无阴影，可直接用 LovyanGFX（fillRoundRect / fillCircle / fillTriangle）在 ST7789 上实现。
+</p>
+
+<script>
+const tracks = [
+  { name:"城里的月光",     dur:255 },
+  { name:"海阔天空",       dur:322 },
+  { name:"夜空中最亮的星", dur:286 },
+  { name:"Lemon",          dur:255 },
+  { name:"起风了",         dur:327 },
+];
+const EQS = ["VOCAL","POP","BASS","FLAT"];
+const VOLMAX = 21;
+
+let idx = 2, playing = true, cur = 84, vol = 15, hall = true, eqi = 0;
+
+const $ = id => document.getElementById(id);
+const fmt = s => { s = Math.floor(s); return (s/60|0) + ":" + String(s%60).padStart(2,"0"); };
+
+function render(){
+  const t = tracks[idx];
+  $("title").textContent = t.name;
+  $("trk").textContent   = (idx+1) + " / " + tracks.length;
+  $("tCur").textContent  = fmt(cur);
+  $("tDur").textContent  = fmt(t.dur);
+
+  const pct = Math.min(100, cur / t.dur * 100);
+  $("fill").style.width = pct + "%";
+  $("knob").style.left  = pct + "%";
+
+  $("stateTxt").textContent = playing ? "正在播放" : "已暂停";
+  $("chip").classList.toggle("pause", !playing);
+  $("icoPlay").style.display  = playing ? "none" : "block";
+  $("icoPause").style.display = playing ? "block" : "none";
+
+  $("volfill").style.width = (vol / VOLMAX * 100) + "%";
+  $("volnum").textContent  = vol;
+  $("eqName").textContent  = EQS[eqi];
+  $("hall").classList.toggle("on", hall);
+}
+
+function toggle(){ playing = !playing; render(); }
+function next(){ idx = (idx+1) % tracks.length; cur = 0; render(); }
+function prev(){ idx = (idx-1+tracks.length) % tracks.length; cur = 0; render(); }
+function cycleEq(){ eqi = (eqi+1) % EQS.length; render(); }
+
+$("bar").addEventListener("click", e => {
+  const r = e.currentTarget.getBoundingClientRect();
+  cur = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * tracks[idx].dur;
+  render();
+});
+$("volbar").addEventListener("click", e => {
+  const r = e.currentTarget.getBoundingClientRect();
+  vol = Math.round(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * VOLMAX);
+  render();
+});
+
+setInterval(() => {
+  if (!playing) return;
+  if (++cur >= tracks[idx].dur) { next(); } else { render(); }
+}, 1000);
+
+function toggleTheme(){
+  const dark = $("screen").classList.toggle("dark");
+  $("themeBtn").textContent = dark ? "日间模式" : "夜间模式";
+}
+
+function setZoom(z){
+  $("screen").style.zoom = z;
+  document.querySelectorAll(".toolbar button").forEach(b =>
+    b.classList.toggle("on", b.dataset.z == z));
+}
+setZoom(2);
+
+render();
+</script>
+</body>
+</html>
