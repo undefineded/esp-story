@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小小故事盒 · 字体实验室</title>
+<style>
+:root{color-scheme:light;font-family:system-ui,"Noto Sans CJK SC",sans-serif;color:#203c47;background:#f4f3ee}
+*{box-sizing:border-box}body{margin:0}main{max-width:1180px;margin:auto;padding:42px 28px 60px}
+.eyebrow{font:11px ui-monospace,monospace;letter-spacing:3px;color:#55786e}.intro{display:flex;align-items:end;justify-content:space-between;gap:30px}h1{font-size:36px;letter-spacing:-1.5px;margin:12px 0}p{line-height:1.8;color:#61716f;font-size:14px;margin:6px 0}.tag{background:#e2ebe3;color:#39634b;padding:7px 12px;border-radius:20px;white-space:nowrap;font-size:12px}
+.controls{display:flex;gap:20px;flex-wrap:wrap;align-items:center;background:#fff;padding:18px 20px;border:1px solid #dfe4dc;border-radius:14px;margin:26px 0 12px}label{font-size:13px;color:#526762;display:flex;gap:8px;align-items:center}select,input,button{font:inherit;border:1px solid #d3dcd5;border-radius:7px;padding:7px 10px;background:#fff;color:#203c47}input[type=text]{width:190px}button{cursor:pointer}button.active,button:hover{background:#244b41;color:white}.note{font-size:12px;margin:10px 0 24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px}.card{background:#fff;border:1px solid #dfe4dc;border-radius:16px;overflow:hidden;min-width:0}.head{padding:20px 22px 15px}.head h2{font-size:18px;margin:7px 0}.num{font:11px ui-monospace,monospace;color:#698078;letter-spacing:1px}.head p{font-size:12px;min-height:43px}.stage{background:#e8ebe5;padding:24px 12px;overflow:auto;text-align:center}.screen{display:block;margin:auto;image-rendering:pixelated;box-shadow:0 0 0 6px #233b3d,0 10px 22px #233b3d26;border-radius:2px}.detail{padding:18px 22px;border-top:1px solid #edf0ea}.detail-top{display:flex;justify-content:space-between;font-size:11px;color:#76837c;margin-bottom:12px}.zoom{display:block;image-rendering:pixelated;max-width:100%;height:auto}.meta{font-size:11px;color:#738079;line-height:1.8;margin-top:12px}.local{margin-top:26px;padding:24px;border:1px dashed #9cae9c;border-radius:14px;background:#eeefe7}.local h2{font-size:18px;margin:0 0 8px}.local-row{display:flex;flex-wrap:wrap;align-items:center;gap:18px;margin-top:16px}.local canvas{background:#fff2b0;image-rendering:pixelated;width:640px;max-width:100%;height:auto}.foot{margin-top:28px;border-top:1px solid #d8dfd5;padding-top:20px}details{font-size:12px;color:#61716f}pre{white-space:pre-wrap;max-height:280px;overflow:auto}.warning{color:#a4522c}.hint{font-size:12px;color:#738079} @media(max-width:600px){main{padding:25px 14px}.intro{display:block}h1{font-size:29px}.grid{grid-template-columns:1fr}.controls{gap:12px}.tag{display:inline-block;margin-top:10px}}
+</style>
+<main>
+<div class="eyebrow">ESP-STORY / TYPE STUDY 01</div>
+<div class="intro"><div><h1>字要看得清，也要看着舒服。</h1><p>同一画面、同一基线，用实际像素比较字体。先看整体，再看笔画。</p></div><span class="tag">320 × 240 · 离线字形样本</span></div>
+<div class="controls">
+<label>显示倍率 <select id="scale"><option value="1">1× 原始像素</option><option value="2">2× 像素放大</option><option value="3">3× 像素放大</option></select></label>
+<label>背景 <select id="theme"><option value="light">暖黄 / 深色字</option><option value="dark">深蓝 / 白色字</option></select></label>
+<label>样本字号 <select id="size"><option value="16">16px</option><option value="14">14px</option></select></label>
+<label>标题 <input id="sample" type="text" maxlength="24" value="月亮邮递员"></label>
+<button id="motion" aria-pressed="false">播放滚动对比</button>
+</div>
+<p class="note" id="status">屏幕画布固定 320×240；放大只放大像素，不对文字重新平滑。颜色按 RGB565 量化。</p>
+<div class="grid" id="cards"></div>
+<section class="local"><h2>想比较「真正抗锯齿的幼圆」？</h2><p>仓库只有已生成的 VLW，没有幼圆 TTF 原文件，无法从黑白字形恢复原始轮廓。加载你电脑上的幼圆字体文件，可查看浏览器原生抗锯齿参考；文件只在当前页面读取，不上传。</p><div class="local-row"><input id="fontfile" type="file" accept=".ttf,.otf,.woff,.woff2" aria-label="选择本地幼圆字体"><span id="localStatus" class="hint">尚未加载字体，不使用其他字体冒充幼圆</span></div><div class="local-row"><canvas id="localPreview" width="320" height="80" hidden></canvas></div><p class="hint">浏览器抗锯齿结果仅用于判断风格；最终 VLW 的像素效果取决于设备字库生成器。</p></section>
+<section class="foot"><p>怎么选：正文先看「刷新列表」「均衡器」的笔画间隙，再看数字识别和整页密度。点阵更锐利，灰阶更柔和；混合方案用于判断两种风格是否协调。</p><p class="hint">A 为当前幼圆 VLW 原始像素；B 为项目内置 efont 字形；C 为 Noto Sans CJK SC Regular 经 FreeType/Pillow 生成的真实灰阶样本；D 使用当前幼圆标题配 efont 正文，幼圆标题尚未修复抗锯齿。页面滚动是浏览器演示，不代表硬件帧率。1× 是 CSS 像素，不等于实际液晶的物理尺寸。</p><details><summary>字体来源与许可</summary><pre id="licenses"></pre></details></section>
+</main>
+<script>
+const DATA = /* FONT_DATA */;
+const $ = id => document.getElementById(id);
+const specs = [
+ {id:'current',n:'A / CURRENT',title:'当前幼圆 VLW',text:'固件正在使用的字形。逐像素读取原始文件，当前样本只有黑白两级。',meta:'实际 fonts/ui14.vlw、ui16.vlw · 无灰阶'},
+ {id:'pixel',n:'B / BITMAP',title:'efont 中文点阵',text:'项目自带的点阵候选。目标尺寸直接绘制，观察笔画是否更清楚。',meta:'LovyanGFX efontCN_14 / efontCN_16 · 1-bit'},
+ {id:'smooth',n:'C / GRAYSCALE',title:'Noto 黑体 · 灰阶抗锯齿',text:'Regular 字重，按目标字号栅格化。边缘含中间灰阶，重点看小字是否发灰。',meta:'Noto Sans CJK SC Regular · FreeType 灰阶样本'},
+ {id:'mixed',n:'D / MIXED',title:'幼圆标题 ＋ 点阵正文',text:'保留标题的圆体风格，正文和数字使用 efont；标题仍是当前黑白字形。',meta:'标题：当前 VLW · 正文/数字：efont'}
+];
+for(const spec of specs){const el=document.createElement('article');el.className='card';el.innerHTML=`<div class="head"><span class="num">${spec.n}</span><h2>${spec.title}</h2><p>${spec.text}</p></div><div class="stage"><canvas class="screen" width="320" height="240" aria-label="${spec.title}设备界面对比"></canvas></div><div class="detail"><div class="detail-top"><span>刷新列表 · 笔画细节</span><span>4× 最近邻放大</span></div><canvas class="zoom" width="288" height="88" aria-label="${spec.title}字形放大"></canvas><div class="meta">${spec.meta}</div></div>`;$('cards').append(el);spec.el=el;spec.screen=el.querySelector('.screen');spec.zoom=el.querySelector('.zoom');}
+const glyphCache=new Map();
+function font(id,size){return DATA.fonts[id][size];}
+function width(text,id,size){return [...text].reduce((n,ch)=>n+(font(id,size).glyphs[ch]?.[4]??size),0);}
+function text(ctx,str,x,baseline,id,size,color){ctx.fillStyle=color;for(const ch of str){const g=font(id,size).glyphs[ch];if(!g){ctx.strokeStyle='#c55640';ctx.strokeRect(x+1,baseline-size+2,size-3,size-3);x+=size;continue;}const [w,h,dx,dy,advance,raw]=g;if(w&&h){const key=`${id}/${size}/${ch}/${color}`;let stamp=glyphCache.get(key);if(!stamp){stamp=document.createElement('canvas');stamp.width=w;stamp.height=h;const sc=stamp.getContext('2d'),img=sc.createImageData(w,h),alpha=atob(raw),rgb=color.match(/\w\w/g).map(v=>parseInt(v,16));for(let i=0;i<alpha.length;i++){img.data[i*4]=rgb[0];img.data[i*4+1]=rgb[1];img.data[i*4+2]=rgb[2];img.data[i*4+3]=alpha.charCodeAt(i);}sc.putImageData(img,0,0);glyphCache.set(key,stamp);}ctx.drawImage(stamp,x+dx,baseline+dy);}x+=advance;}return x;}
+function quantize(ctx,w,h){const img=ctx.getImageData(0,0,w,h),d=img.data;for(let i=0;i<d.length;i+=4){d[i]=Math.round((d[i]>>3)*255/31);d[i+1]=Math.round((d[i+1]>>2)*255/63);d[i+2]=Math.round((d[i+2]>>3)*255/31);}ctx.putImageData(img,0,0);}
+let running=false,epoch=0,localFace=null;
+function draw(spec,elapsed=0){const c=spec.screen,ctx=c.getContext('2d'),size=Number($('size').value),dark=$('theme').value==='dark',bg=dark?'#17324d':'#fff2b0',fg=dark?'#ffffff':'#17324d',muted=dark?'#b9c9ce':'#5b6f82',titleFont=spec.id==='mixed'?'current':spec.id,bodyFont=spec.id==='mixed'?'pixel':spec.id;
+ctx.imageSmoothingEnabled=false;ctx.fillStyle=bg;ctx.fillRect(0,0,320,240);ctx.fillStyle='#f05a56';ctx.fillRect(0,0,320,34);text(ctx,'小小故事盒',12,24,bodyFont,size,'#ffffff');text(ctx,'音量 08',240,24,bodyFont,size,'#ffffff');
+let title=$('sample').value||'月亮邮递员';if(running)title+=' / 森林里的朋友';const tw=width(title,titleFont,size),distance=Math.max(0,tw-288),travel=distance/28*1000,phase=elapsed%(travel+4000),offset=distance?Math.min(distance,Math.max(0,(phase-2000)*.028)):0;
+ctx.save();ctx.beginPath();ctx.rect(14,42,292,28);ctx.clip();text(ctx,title,16-Math.floor(offset),65,titleFont,size,fg);ctx.restore();text(ctx,'正在播放  03 / 24',16,91,bodyFont,size,muted);ctx.fillStyle=dark?'#35546a':'#d4dde1';ctx.fillRect(16,108,288,6);ctx.fillStyle='#3c78d8';ctx.fillRect(16,108,113,6);text(ctx,'03:18',16,136,bodyFont,size,muted);text(ctx,'12:45',260,136,bodyFont,size,muted);
+ctx.fillStyle=dark?'#29485e':'#fffaf0';ctx.fillRect(12,150,296,34);text(ctx,'刷新列表',22,173,bodyFont,size,fg);text(ctx,'OK',270,173,bodyFont,size,fg);text(ctx,'均衡器   音乐分类',22,208,bodyFont,size,fg);text(ctx,'亮度 80%     暂停',22,232,bodyFont,size,muted);quantize(ctx,320,240);
+const sample=document.createElement('canvas');sample.width=72;sample.height=22;const sc=sample.getContext('2d');sc.fillStyle=bg;sc.fillRect(0,0,72,22);text(sc,'刷新列表',3,18,bodyFont,size,fg);quantize(sc,72,22);const z=spec.zoom.getContext('2d');z.imageSmoothingEnabled=false;z.clearRect(0,0,288,88);z.drawImage(sample,0,0,288,88);
+c.style.width=320*Number($('scale').value)+'px';c.style.height=240*Number($('scale').value)+'px';}
+function drawLocal(){if(!localFace)return;const c=$('localPreview'),ctx=c.getContext('2d'),size=Number($('size').value);ctx.fillStyle='#fff2b0';ctx.fillRect(0,0,320,80);ctx.fillStyle='#17324d';ctx.font=`${size}px LocalCandidate`;ctx.fillText($('sample').value,12,25);ctx.fillText('刷新列表  均衡器  音量 08',12,51);ctx.fillText('0123456789   正在播放',12,74);quantize(ctx,320,80);}
+function render(){for(const s of specs)draw(s,running?performance.now()-epoch:0);drawLocal();const unknown=[...new Set([...$('sample').value].filter(c=>!DATA.charset.includes(c)))];$('status').textContent=unknown.length?`未嵌入这些样字：${unknown.join(' ')}。缺字显示方框，不用浏览器字体替代；可试「白雪公主」「丑小鸭」「森林里的朋友」。`:'屏幕画布固定 320×240；放大只放大像素，不对文字重新平滑。颜色按 RGB565 量化。';$('status').classList.toggle('warning',!!unknown.length);}
+for(const id of ['scale','theme','size','sample'])$(id).addEventListener('input',()=>{epoch=performance.now();render();});
+$('motion').onclick=()=>{running=!running;epoch=performance.now();$('motion').textContent=running?'暂停滚动对比':'播放滚动对比';$('motion').classList.toggle('active',running);$('motion').setAttribute('aria-pressed',String(running));render();};
+let last=0;function tick(t){if(running&&t-last>=33){render();last=t;}requestAnimationFrame(tick);}requestAnimationFrame(tick);
+$('fontfile').onchange=async e=>{const file=e.target.files[0];if(!file)return;try{const face=new FontFace('LocalCandidate',await file.arrayBuffer());await face.load();if(localFace)document.fonts.delete(localFace);document.fonts.add(face);localFace=face;$('localPreview').hidden=false;$('localStatus').textContent=`已加载 ${file.name} · 请确认文件确为幼圆；下方为浏览器抗锯齿参考`;drawLocal();}catch{$('localStatus').textContent='字体加载失败，请选择有效的 TTF / OTF / WOFF 文件。';}};
+$('licenses').textContent=DATA.licenses;render();
+</script>
+</html>

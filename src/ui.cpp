@@ -5,12 +5,12 @@
 #include "config.h"
 #include "display.h"
 #include "fonts.h"
+#include "render_math.h"
 #include "storage.h"
 #include "story.h"
 #include <LovyanGFX.hpp>
 
-/* 字体: 圆体抗锯齿 (Fonts:: 模块), 回退 efontCN 点阵
-   抗锯齿字体绘制必须给 setTextColor(fg, bg) 双色, 否则边缘会用 getBaseColor 混出黑边 */
+/* 字体统一由 Fonts:: 提供原生尺寸 efont 点阵，前景/背景双色覆盖文字区域。 */
 
 namespace {
 
@@ -23,7 +23,7 @@ bool     s_palReady = false;
 void palette() {
   if (s_palReady) return;
   s_palReady = true;
-  auto& g = lcd();
+  auto& g = Display::canvas();
   cInk      = g.color565( 23,  50,  77);   // #17324d 深蓝墨色(描边/文字)
   cInkSoft  = g.color565( 91, 111, 130);   // #5b6f82 次要文字
   cPaper    = g.color565(255, 242, 176);   // #fff2b0 淡黄纸底
@@ -59,14 +59,14 @@ int      s_lastHall = -1;
 uint32_t s_lastCur = 0xFFFFFFFF, s_lastDur = 0xFFFFFFFF;
 String   s_subLast;                        // 已绘制的"编码·比特率"行内容 (比特率首帧解码后才给出, 变化时需补绘)
 
-/* 超长曲名跑马灯状态 (update 每 250ms 一帧) */
+/* 超长曲名跑马灯状态：按时间推进，与调用频率解耦 */
 String   s_ttl;                 // 完整曲名
 int16_t  s_ttlW   = 0;         // 曲名完整宽度 px
 int16_t  s_scroll = 0;         // 当前滚动偏移 px
-uint8_t  s_hold   = 0;         // 首尾停留帧计数
+uint32_t s_titleEpoch = 0;
 
 String fit(const String& s, int maxW) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   if (g.textWidth(s) <= maxW) return s;
   String t = s;
   while (t.length() > 0 && g.textWidth(t + "…") > maxW) t.remove(t.length() - 1);
@@ -81,7 +81,7 @@ String fmtSec(uint32_t s) {
 
 /* ---------------- 品牌笑脸 LOGO ---------------- */
 void drawLogo(int cx, int cy, int r) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillCircle(cx, cy, r, cYellow);
   g.drawCircle(cx, cy, r, TFT_WHITE);
   g.drawCircle(cx, cy, r - 1, TFT_WHITE);
@@ -96,7 +96,7 @@ void drawLogo(int cx, int cy, int r) {
 
 /* ---------------- 顶栏 (珊瑚红) ---------------- */
 void drawTopBarBase() {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRect(0, 0, 320, 30, cCoral);
   g.fillRect(0, 30, 320, 2, cCoralDk);
   drawLogo(19, 15, 10);
@@ -107,7 +107,7 @@ void drawTopBarBase() {
 
 /* 音量文本 "音量:10" (顶栏右侧) */
 void drawVolume(const PlayerStatus& st) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRect(238, 0, 82, 30, cCoral);
   g.setFont(Fonts::body());
   g.setTextColor(TFT_WHITE, cCoral);
@@ -118,7 +118,7 @@ void drawVolume(const PlayerStatus& st) {
 
 /* ---------------- 封面卡 (黄色相框 + 3px 硬阴影) ---------------- */
 void drawCover() {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRoundRect(13, 45, 92, 112, 6, cInk);     // 硬阴影 offset(3,3)
   g.fillRoundRect(10, 42, 92, 112, 6, cInk);     // 2px 墨色描边底
   g.fillRoundRect(12, 44, 88, 108, 5, cYellow);
@@ -141,7 +141,7 @@ void drawCover() {
 
 /* 分类徽章 (静态) */
 void drawCategory() {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRoundRect(INFO_X, 43, 76, 18, 4, cAqua);
   g.drawRoundRect(INFO_X, 43, 76, 18, 4, cAquaDk);
   g.setFont(Fonts::body());
@@ -155,7 +155,7 @@ void drawCount(const PlayerStatus& st) {
   if (cnt == s_lastCnt && idx == s_lastIdx) return;
   s_lastCnt = cnt; s_lastIdx = idx;
 
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRect(240, 43, 70, 18, cPaper);
   g.setFont(Fonts::small());
   g.setTextColor(cInkSoft, cPaper);
@@ -167,12 +167,12 @@ void drawCount(const PlayerStatus& st) {
 
 /* 曲名行: 超长时按 s_scroll 偏移绘制, 裁剪限制在信息列内 */
 const int TITLE_H     = 22;    // 曲名行高 (16px 字体)
-const int SCROLL_STEP = 7;    // 每帧前进 px
-const int SCROLL_GAP  = 48;   // 滚动首尾之间的空白
-const int SCROLL_HOLD = 8;    // 首尾停留帧数 (8x250ms = 2s)
+int scrollOffset(int width, int viewport, uint32_t epoch) {
+  return RenderMath::scrollOffset(width, viewport, millis() - epoch);
+}
 
 void drawTitleLine() {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.setFont(Fonts::title());
   g.setTextColor(cInk, cPaper);
   g.setClipRect(INFO_X, 63, INFO_W, TITLE_H);
@@ -181,15 +181,12 @@ void drawTitleLine() {
   g.clearClipRect();
 }
 
-/* 跑马灯推进: 滚到头回绕, 首尾各停留 SCROLL_HOLD 帧 */
+/* 首尾各停两秒；仅当整数像素位置变化时绘制 */
 void scrollTitle() {
   if (s_ttlW <= INFO_W || s_ttl.length() == 0) return;
-  if (s_hold > 0) { s_hold--; return; }
-  s_scroll += SCROLL_STEP;
-  if (s_scroll >= s_ttlW + SCROLL_GAP - INFO_W) {
-    s_scroll = 0;
-    s_hold = SCROLL_HOLD;
-  }
+  int offset = scrollOffset(s_ttlW, INFO_W, s_titleEpoch);
+  if (offset == s_scroll) return;
+  s_scroll = offset;
   drawTitleLine();
 }
 
@@ -205,7 +202,7 @@ String subText(const PlayerStatus& st) {
 /* 只重绘"编码·比特率"一行
    解码器要解到第一帧才知道比特率, 换曲时它通常还是 0, 因此这行需独立补绘 */
 void drawSubLine(const PlayerStatus& st) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.setFont(Fonts::body());
   s_subLast = subText(st);
   g.fillRect(INFO_X, 88, INFO_W, 24, cPaper);
@@ -215,7 +212,7 @@ void drawSubLine(const PlayerStatus& st) {
 
 /* 标题 + 副标题 (整块重绘, 曲名超长时启动跑马灯) */
 void drawTitleSub(const PlayerStatus& st) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRect(INFO_X, 63, INFO_W, 52, cPaper);
 
   g.setFont(Fonts::title());
@@ -223,7 +220,7 @@ void drawTitleSub(const PlayerStatus& st) {
   s_ttl  = nm;
   s_ttlW = g.textWidth(nm);
   s_scroll = 0;
-  s_hold = (s_ttlW > INFO_W) ? SCROLL_HOLD : 0;   // 开头先停留 2s
+  s_titleEpoch = millis();
   drawTitleLine();
 
   drawSubLine(st);
@@ -231,7 +228,7 @@ void drawTitleSub(const PlayerStatus& st) {
 
 /* 时间行 */
 void drawTimes(const PlayerStatus& st) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRect(INFO_X, 116, INFO_W, 16, cPaper);
   g.setFont(Fonts::small());
   g.setTextColor(cInkSoft, cPaper);
@@ -241,7 +238,7 @@ void drawTimes(const PlayerStatus& st) {
 
 /* 进度条: 灰槽 + 蓝色填充 + 黄色端帽 */
 void drawProgress(const PlayerStatus& st) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRect(INFO_X - 2, 132, INFO_W + 4, 12, cPaper);
   g.fillRoundRect(INFO_X, 134, INFO_W, 8, 2, cTrack);
   g.drawRoundRect(INFO_X, 134, INFO_W, 8, 2, cTrackBd);
@@ -256,7 +253,7 @@ void drawProgress(const PlayerStatus& st) {
 
 /* 状态行: 圆点 + 播放状态 + 霍尔状态(右侧调试位) */
 void drawStatus(const PlayerStatus& st) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRect(INFO_X, 142, INFO_W, 26, cPaper);
 
   uint16_t dot, border;
@@ -277,7 +274,7 @@ void drawHallText(bool detected) {
   int v = detected ? 1 : 0;
   if (v == s_lastHall) return;
   s_lastHall = v;
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRect(238, 142, 72, 26, cPaper);
   g.setFont(Fonts::body());
   g.setTextColor(detected ? cPurple : cInkSoft, cPaper);
@@ -287,7 +284,7 @@ void drawHallText(bool detected) {
 /* ---------------- 控制栏 ---------------- */
 
 void drawTransport() {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRect(0, 188, 320, 52, cInk);
   g.fillRect(0, 188, 320, 3, cYellow);
   /* 上一曲 52x34: 竖条在左 + 三角尖朝左 (|◀, 与右侧 ▶| 镜像) */
@@ -304,7 +301,7 @@ void drawTransport() {
 
 /* 主播放按钮 82x40: 黄底 + 图标 + 汉字标签 */
 void drawPlayButton(const PlayerStatus& st) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillRect(117, 192, 86, 46, cInk);
   g.fillRoundRect(119, 194, 82, 40, 12, cYellowLt);
   g.fillRoundRect(121, 196, 78, 36, 10, cYellow);
@@ -335,7 +332,7 @@ const char* eqLabelCN(EqPreset p) {
 
 /* 行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影 */
 void settingsRow(int y, const char* label, const String& value, bool selected, int barPct) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   if (selected) g.fillRoundRect(13, y + 3, 300, 44, 6, cInk);
   g.fillRoundRect(10, y, 300, 44, 6, selected ? cInk : TFT_WHITE);
   g.fillRoundRect(12, y + 2, 296, 40, 5, selected ? cYellow : TFT_WHITE);
@@ -362,7 +359,7 @@ void settingsRow(int y, const char* label, const String& value, bool selected, i
 
 /* EQ 行频响示意 (蓝=提升 黄=衰减) */
 void settingsBands(int y, EqPreset eq) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   EqBands b = eqBands(eq);
   int v[3] = { b.low, b.peak, b.high };
   for (int i = 0; i < 3; i++) {
@@ -376,12 +373,15 @@ void settingsBands(int y, EqPreset eq) {
 }
 
 void settingsRows(const SettingsData& s, int selected) {
-  const int y0 = 44, rh = 44;
+  // 清除旧选中阴影；整个过程只发生在画布里。
+  Display::canvas().fillRect(8, 34, 306, 183, cPaper);
+  const int y0 = 34, rh = 44;
   settingsRow(y0, "亮度", String(s.brightness) + "%", selected == 0, s.brightness);
   settingsRow(y0 + rh, "旋转方向",
               (s.rotation == 1) ? "横屏 0°" : "横屏 180°", selected == 1, -1);
   settingsRow(y0 + rh * 2, "均衡器", eqLabelCN(s.eq), selected == 2, -1);
   settingsBands(y0 + rh * 2, s.eq);
+  settingsRow(y0 + rh * 3, "刷新列表", "单击OK", selected == 3, -1);
 }
 
 } // namespace
@@ -392,7 +392,7 @@ void begin() { palette(); }
 
 void boot(const char* line1, const char* line2) {
   palette();
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
   drawLogo(160, 84, 12);
@@ -408,7 +408,7 @@ void boot(const char* line1, const char* line2) {
 
 void drawStatic() {
   palette();
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
   drawCover();
@@ -424,7 +424,8 @@ void update(const PlayerStatus& st, bool hallDetected) {
 
   /* 先取旧状态, drawCount 会更新 idx/cnt 缓存 */
   int state = (st.playing ? 2 : 0) | (st.paused ? 1 : 0) | (st.hasTrack ? 4 : 0);
-  bool trackChanged = (st.index != s_lastIdx) || (st.count != s_lastCnt) || !st.hasTrack;
+  bool trackChanged = (st.index != s_lastIdx) || (st.count != s_lastCnt)
+                   || ((state ^ s_lastState) & 4);
   drawCount(st);
 
   if (trackChanged) drawTitleSub(st);
@@ -432,6 +433,7 @@ void update(const PlayerStatus& st, bool hallDetected) {
   if (state != s_lastState) {
     s_lastState = state;
     drawStatus(st);
+    s_lastHall = -1;  // 状态区域清除也覆盖了 HALL 文本
     drawPlayButton(st);
   }
   if (st.curSec != s_lastCur || st.durSec != s_lastDur) {
@@ -452,7 +454,7 @@ void update(const PlayerStatus& st, bool hallDetected) {
 
 void drawSettings(const SettingsData& s, int selected) {
   palette();
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
 
@@ -460,7 +462,15 @@ void drawSettings(const SettingsData& s, int selected) {
 
   g.setFont(Fonts::body());
   g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("编码:调整  NEXT/LAST:选择  双击OK:保存", 160, 210);
+  g.drawCenterString("上下选择  旋钮调整  OK执行", 160, 220);
+}
+
+void settingsMessage(const char* message) {
+  auto& g = Display::canvas();
+  g.fillRect(0, 218, SCR_W, 22, cPaper);
+  g.setFont(Fonts::body());
+  g.setTextColor(cInkSoft, cPaper);
+  g.drawCenterString(fit(String(message), 304).c_str(), 160, 220);
 }
 
 void refreshSettings(const SettingsData& s, int selected) {
@@ -477,7 +487,7 @@ namespace {
 
   /* ♪ 音符图标 (全部歌曲行): 约 20x20 @ (x,y) */
   void iconNote(int x, int y, uint16_t c) {
-    auto& g = lcd();
+    auto& g = Display::canvas();
     g.fillCircle(x + 6, y + 14, 5, c);
     g.drawCircle(x + 6, y + 14, 5, cInk);
     g.fillRect(x + 10, y + 2, 3, 14, cInk);
@@ -486,7 +496,7 @@ namespace {
 
   /* 文件夹图标: 约 22x18 @ (x,y) */
   void iconFolder(int x, int y, uint16_t c) {
-    auto& g = lcd();
+    auto& g = Display::canvas();
     g.fillRect(x, y + 2, 10, 5, c);
     g.drawRect(x, y + 2, 10, 5, cInk);
     g.fillRoundRect(x, y + 5, 22, 15, 3, c);
@@ -495,7 +505,7 @@ namespace {
 
   /* 分类行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影 */
   void musicRow(int y, const char* name, int i, bool selected) {
-    auto& g = lcd();
+    auto& g = Display::canvas();
     if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
     g.fillRoundRect(10, y, 300, 38, 6, selected ? cInk : TFT_WHITE);
     g.fillRoundRect(12, y + 2, 296, 34, 5, selected ? cYellow : TFT_WHITE);
@@ -527,7 +537,7 @@ namespace {
   /* 只重绘一行槽位: 先清掉本行的卡片 + 3px 硬阴影, 再按当前状态重画该行。
      不清整屏, 所以没有"先刷底色再画回来"的中间态 => 不闪动 */
   void musicRepaintRow(int r, int top, int count, int selected) {
-    auto& g = lcd();
+    auto& g = Display::canvas();
     int y = MUSIC_Y0 + r * MUSIC_RH;
     g.fillRect(8, y, 306, MUSIC_RH, cPaper);
     int i = top + r;
@@ -545,14 +555,14 @@ namespace {
 
 void drawMusicList(int count, int selected) {
   palette();
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
   musicRows(count, selected);
 
   g.setFont(Fonts::body());
   g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("编码/NEXT/LAST:选择  OK:播放  长按SET:故事", 160, 212);
+  g.drawCenterString("OK播放 双击设置 长按SET切换", 160, 212);
 
   s_mlTop   = musicTop(selected, count);
   s_mlCount = count;
@@ -588,7 +598,7 @@ namespace {
 
   /* 曲目行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影 */
   void trackRow(int y, const char* name, bool playing, bool selected) {
-    auto& g = lcd();
+    auto& g = Display::canvas();
     if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
     g.fillRoundRect(10, y, 300, 38, 6, selected ? cInk : TFT_WHITE);
     g.fillRoundRect(12, y + 2, 296, 34, 5, selected ? cYellow : TFT_WHITE);
@@ -617,7 +627,7 @@ namespace {
 
   /* 只重绘一行槽位 (含清行), 说明见 musicRepaintRow */
   void trackRepaintRow(int r, int top, int count, int selected, int playing) {
-    auto& g = lcd();
+    auto& g = Display::canvas();
     int y = MUSIC_Y0 + r * MUSIC_RH;
     g.fillRect(8, y, 306, MUSIC_RH, cPaper);
     int i = top + r;
@@ -634,14 +644,14 @@ namespace {
 
 void drawTrackList(int count, int selected, int playing) {
   palette();
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
   trackRows(count, selected, playing);
 
   g.setFont(Fonts::body());
   g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("编码/NEXT/LAST:选择  OK:播放  长按:返回", 160, 212);
+  g.drawCenterString("OK播放 双击设置 长按返回", 160, 212);
 
   s_tlTop = trackTop(selected, count); s_tlCount = count;
   s_tlSel = selected;                  s_tlPlay  = playing;
@@ -658,6 +668,9 @@ void updateTrackList(int count, int selected, int playing) {
   } else {
     int idx[4] = { s_tlSel, s_tlPlay, selected, playing };
     for (int k = 0; k < 4; k++) {
+      bool duplicate = false;
+      for (int j = 0; j < k; ++j) duplicate |= idx[j] == idx[k];
+      if (duplicate) continue;
       int r = idx[k] - top;
       if (r >= 0 && r < MUSIC_VIS) trackRepaintRow(r, top, count, selected, playing);
     }
@@ -675,7 +688,7 @@ namespace {
 
   /* 故事行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影 */
   void storyRow(int y, const char* name, bool selected) {
-    auto& g = lcd();
+    auto& g = Display::canvas();
     if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
     g.fillRoundRect(10, y, 300, 38, 6, selected ? cInk : TFT_WHITE);
     g.fillRoundRect(12, y + 2, 296, 34, 5, selected ? cYellow : TFT_WHITE);
@@ -701,7 +714,7 @@ namespace {
 
   /* 只重绘一行槽位 (含清行), 说明见 musicRepaintRow */
   void storyRepaintRow(int r, int top, int count, int selected) {
-    auto& g = lcd();
+    auto& g = Display::canvas();
     int y = STORY_Y0 + r * STORY_RH;
     g.fillRect(8, y, 306, STORY_RH, cPaper);
     int i = top + r;
@@ -718,14 +731,14 @@ namespace {
 
 void drawStoryList(int count, int selected) {
   palette();
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
   storyRows(count, selected);
 
   g.setFont(Fonts::body());
   g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("编码/NEXT/LAST:选择  OK:播放  长按SET:音乐", 160, 212);
+  g.drawCenterString("OK播放 双击设置 长按SET切换", 160, 212);
 
   s_slTop   = storyTop(selected, count);
   s_slCount = count;
@@ -755,7 +768,7 @@ const int SL_CX = 160, SL_CY = 102;
 /* 8 点旋转圆环: 珊瑚作头, 黄/青为尾, 其余灰点
    半径固定为 5, 每帧只把新颜色原位覆盖到旧圆点上 => 无需清屏, 完全没有闪动 */
 void drawStoryLoadingSpin(int step) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   static const int8_t DX[8] = { 30, 21,  0, -21, -30, -21,  0, 21 };
   static const int8_t DY[8] = {  0, 21, 30,  21,   0, -21, -30, -21 };
   for (int i = 0; i < 8; i++) {
@@ -767,7 +780,7 @@ void drawStoryLoadingSpin(int step) {
 
 void drawStoryLoadingBegin(const char* title) {
   palette();
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
   drawStoryLoadingSpin(0);
@@ -791,7 +804,7 @@ void drawStoryLoadingBegin(const char* title) {
 
 void drawStoryFrame(const char* imgPath) {
   palette();
-  auto& g = lcd();
+  auto& g = Display::canvas();
   if (!imgPath) return;
   if (!g.drawJpgFile(SD_MMC, imgPath, 0, 0, SCR_W, SCR_H)) {
     g.fillScreen(TFT_BLACK);
@@ -821,13 +834,12 @@ bool     s_sbVolShown = false;                             // 文本槽当前是
 /* 故事名跑马灯 */
 String   s_stName;                                         // 当前故事名
 int16_t  s_stW = 0, s_stScroll = 0;
-uint8_t  s_stHold = 0;
 bool     s_stDirty = true;
 uint32_t s_stTick = 0;
 
 /* 播放按钮图标: 播放中显示暂停双竖条, 暂停时显示播放三角 */
 void storyBtnIcon(bool paused) {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   int cx = SB_BTN_X + SB_BTN_W / 2, cy = SB_BTN_Y + SB_BTN_H / 2;
   g.fillRoundRect(SB_BTN_X + 2, SB_BTN_Y + 2, SB_BTN_W - 4, SB_BTN_H - 4, 6, cYellow);
   if (paused) {
@@ -840,7 +852,7 @@ void storyBtnIcon(bool paused) {
 
 /* 故事名行: 超长时按 s_stScroll 偏移绘制, 裁剪限制在标题区内 */
 void storyTitleLine() {
-  auto& g = lcd();
+  auto& g = Display::canvas();
   g.setFont(Fonts::story());
   g.setTextColor(TFT_WHITE, cInk);
   g.fillRect(SB_TTL_X, SB_TTL_Y, SB_TTL_W, SB_TTL_H, cInk);
@@ -862,7 +874,7 @@ void setStoryTitle(const char* title) {
 void drawStoryBar(int panel, int total, uint32_t curSec, uint32_t durSec,
                   uint8_t volume, bool paused) {
   palette();
-  auto& g = lcd();
+  auto& g = Display::canvas();
   char b[24];
 
   if (!s_sbInit) {                                   // 首次(或 invalidate 后): 铺静态层
@@ -882,25 +894,18 @@ void drawStoryBar(int panel, int total, uint32_t curSec, uint32_t durSec,
     s_stTick   = millis();
   }
 
-  /* 故事名 (超长时跑马灯: 每 250ms 推进一帧, 首尾各停 2s) */
+  /* 故事名：按经过时间滚动 */
   if (s_stDirty) {
     s_stDirty  = false;
     g.setFont(Fonts::story());
     s_stW      = g.textWidth(s_stName);
     s_stScroll = 0;
-    s_stHold   = (s_stW > SB_TTL_W) ? SCROLL_HOLD : 0;
     s_stTick   = millis();
     storyTitleLine();
-  } else if (s_stW > SB_TTL_W && s_stName.length() && millis() - s_stTick >= 250) {
-    s_stTick = millis();
-    if (s_stHold > 0) {
-      s_stHold--;
-    } else {
-      s_stScroll += SCROLL_STEP;
-      if (s_stScroll >= s_stW + SCROLL_GAP - SB_TTL_W) {
-        s_stScroll = 0;
-        s_stHold   = SCROLL_HOLD;
-      }
+  } else if (s_stW > SB_TTL_W && s_stName.length()) {
+    int offset = scrollOffset(s_stW, SB_TTL_W, s_stTick);
+    if (offset != s_stScroll) {
+      s_stScroll = offset;
       storyTitleLine();
     }
   }
@@ -911,7 +916,7 @@ void drawStoryBar(int panel, int total, uint32_t curSec, uint32_t durSec,
     snprintf(b, sizeof(b), "%02d/%02d", panel + 1, total);
     g.setFont(Fonts::small());
     g.setTextColor(cYellow, cInk);
-    g.fillRect(SB_PG_X, SB_PG_Y, SB_PG_W, 12, cInk);
+    g.fillRect(SB_PG_X, SB_PG_Y, SB_PG_W, 14, cInk);
     g.drawRightString(b, 312, SB_PG_Y + 1);
   }
 

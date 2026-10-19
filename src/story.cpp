@@ -8,7 +8,9 @@ namespace {
   struct Panel { uint32_t ms; char name[28]; };
 
   String   s_dirs[MAX_STORIES];
+  String   s_audioPaths[MAX_STORIES], s_timelinePaths[MAX_STORIES];
   int      s_count = 0;
+  bool     s_scanOk = true;
 
   Panel    s_panels[MAX_PANELS];
   int      s_panelCount = 0;
@@ -33,15 +35,18 @@ namespace {
   }
 
   /* 扫描 /story 下的子目录 (每个目录 = 一个故事), 按名称排序 */
-  void scan() {
+  String findFirst(const String& dir, const char* ext);
+
+  bool scan() {
+    s_scanOk = true;
     s_count = 0;
-    if (!SD_MMC.exists(STORY_DIR)) return;
+    if (!SD_MMC.exists(STORY_DIR)) return true;
 
     File root = SD_MMC.open(STORY_DIR);
-    if (!root || !root.isDirectory()) { if (root) root.close(); return; }
+    if (!root || !root.isDirectory()) return false;
 
     File f;
-    while ((f = root.openNextFile()) && s_count < MAX_STORIES) {
+    while (s_count < MAX_STORIES && (f = root.openNextFile())) {
       if (f.isDirectory()) s_dirs[s_count++] = fullPath(STORY_DIR, f.name());
       f.close();
     }
@@ -49,13 +54,18 @@ namespace {
 
     std::sort(s_dirs, s_dirs + s_count,
               [](const String& a, const String& b) { return strcmp(a.c_str(), b.c_str()) < 0; });
+    for (int i = 0; i < s_count; ++i) {
+      s_audioPaths[i] = findFirst(s_dirs[i], ".mp3");
+      s_timelinePaths[i] = findFirst(s_dirs[i], ".lrc");
+    }
     Serial.printf("[STORY] %d story(ies) in %s\n", s_count, STORY_DIR);
+    return s_scanOk;
   }
 
   /* 目录里第一个指定后缀的文件 (完整路径), 找不到返回空串 */
   String findFirst(const String& dir, const char* ext) {
     File d = SD_MMC.open(dir);
-    if (!d || !d.isDirectory()) { if (d) d.close(); return String(); }
+    if (!d || !d.isDirectory()) { s_scanOk = false; return String(); }
 
     File f;
     String hit;
@@ -86,9 +96,8 @@ namespace {
   }
 
   /* 解析 timeline.lrc: [mm:ss.xx]NN.jpg | 摘要 */
-  bool loadTimeline(const String& dir) {
+  bool loadTimeline(const String& lrc) {
     s_panelCount = 0;
-    String lrc = findFirst(dir, ".lrc");
     if (lrc.length() == 0) return false;
 
     File f = SD_MMC.open(lrc);
@@ -125,7 +134,32 @@ namespace {
 
 namespace Story {
 
-void begin() { scan(); }
+void clear() {
+  for (auto& dir : s_dirs) dir = "";
+  for (auto& path : s_audioPaths) path = "";
+  for (auto& path : s_timelinePaths) path = "";
+  s_count = 0;
+}
+
+bool rescan() { clear(); return scan(); }
+
+bool index(CatalogArchive& archive, bool reading, bool apply) {
+  uint32_t count = s_count;
+  if (!archive.number(count) || count > MAX_STORIES) return false;
+  if (reading && apply) clear();
+  for (uint32_t i = 0; i < count; ++i) {
+    String dir = reading ? String() : s_dirs[i];
+    String audio = reading ? String() : s_audioPaths[i];
+    String timeline = reading ? String() : s_timelinePaths[i];
+    if (!archive.text(dir) || !dir.startsWith("/story/") || dir.indexOf("/../") >= 0 ||
+        !archive.text(audio) || !archive.text(timeline)) return false;
+    if ((!audio.isEmpty() && (!audio.startsWith(dir + "/") || audio.indexOf("/../") >= 0 || !hasExt(audio.c_str(), ".mp3"))) ||
+        (!timeline.isEmpty() && (!timeline.startsWith(dir + "/") || timeline.indexOf("/../") >= 0 || !hasExt(timeline.c_str(), ".lrc")))) return false;
+    if (reading && apply) { s_dirs[i] = dir; s_audioPaths[i] = audio; s_timelinePaths[i] = timeline; }
+  }
+  if (reading && apply) s_count = count;
+  return true;
+}
 
 int  count() { return s_count; }
 
@@ -140,12 +174,12 @@ bool open(int i) {
   if (i < 0 || i >= s_count) return false;
 
   s_dir   = s_dirs[i];
-  s_audio = findFirst(s_dir, ".mp3");
-  if (s_audio.length() == 0) {
+  s_audio = s_audioPaths[i];
+  if (s_audio.length() == 0 || !SD_MMC.exists(s_audio)) {
     Serial.printf("[STORY] no mp3 in %s\n", s_dir.c_str());
     return false;
   }
-  if (!loadTimeline(s_dir)) {
+  if (!loadTimeline(s_timelinePaths[i])) {
     Serial.printf("[STORY] no timeline in %s\n", s_dir.c_str());
     return false;
   }

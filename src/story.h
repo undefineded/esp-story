@@ -5,9 +5,12 @@
      /story/<故事名>/timeline.lrc   ([mm:ss.xx]NN.jpg | 摘要) */
 #pragma once
 #include <Arduino.h>
+#include "catalog.h"
 
 namespace Story {
-  void begin();                    // 扫描 /story, 建立故事列表
+  bool rescan();
+  void clear();
+  bool index(CatalogArchive& archive, bool reading, bool apply = true);
   int  count();                    // 故事数量
   const char* title(int i);        // 故事名 (文件夹名, UTF-8; 越界返回 "")
 

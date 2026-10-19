@@ -67,14 +67,17 @@ enum class Screen : uint8_t { MusicList, TrackList, Main, Settings, StoryList, S
 
 static Screen s_screen   = Screen::MusicList;
 static Screen s_settingsBack = Screen::Main;   // 设置界面来源屏 (保存后返回该屏)
-static int    s_sel      = 0;      // 设置界面当前选中项 0..2
+static int    s_sel      = 0;      // 设置界面当前选中项 0..3
 static int    s_musicSel = 0;      // 音乐分类列表当前选中项
 static int    s_trackSel = 0;      // 当前歌曲列表选中项
 static int    s_trackPlaying = 0;  // 当前歌曲列表中"正在播放"的曲目下标
 static int    s_storySel = 0;      // 故事列表当前选中项
 static bool   s_storyRedraw = false;  // 从设置返回故事页: 置位以强制整体重绘
 
-static const int SETTINGS_ITEMS = 3;   // 亮度 / 旋转 / EQ
+static const int SETTINGS_ITEMS = 4;   // 亮度 / 旋转 / EQ / 刷新列表
+static void showMusicList();
+static void showTrackList();
+static void showStoryList();
 
 static void applySettings() {
   SettingsData& s = Settings::data();
@@ -88,13 +91,20 @@ static void enterSettings() {
   s_screen = Screen::Settings;
   s_sel    = 0;
   Ui::drawSettings(Settings::data(), s_sel);
+  Ui::settingsMessage("双击OK返回  刷新会停止播放");
 }
 
 static void exitSettings() {
-  Settings::save();                 // 保存到 NVS
+  Settings::save();                 // 保存到 FRAM
   if (s_settingsBack == Screen::StoryPlay) {
     s_screen      = Screen::StoryPlay;   // 返回故事播放页
     s_storyRedraw = true;                // 插画+信息条由下一帧整体重绘
+  } else if (s_settingsBack == Screen::MusicList) {
+    showMusicList();
+  } else if (s_settingsBack == Screen::TrackList) {
+    showTrackList();
+  } else if (s_settingsBack == Screen::StoryList || s_settingsBack == Screen::StoryError) {
+    showStoryList();
   } else {
     s_screen = Screen::Main;
     Ui::drawStatic();
@@ -115,11 +125,45 @@ static void adjustSetting(int item, int delta) {
     s.rotation = (s.rotation == 1) ? 3 : 1;
     Display::setRotation(s.rotation);
     Ui::drawSettings(s, item);      // 旋转改变了显示方向, 需整屏重绘
-  } else {
+  } else if (item == 2) {
     int e = ((int)s.eq + (delta >= 0 ? 1 : -1) + (int)EqPreset::COUNT) % (int)EqPreset::COUNT;
     s.eq = (EqPreset)e;
     Player::setEq(s.eq);
     Ui::refreshSettings(s, item);
+  }
+}
+
+static void refreshCatalog() {
+  Ui::boot("正在刷新列表", "将停止播放，请勿拔卡");
+  Display::present(true);
+  Story::stop();
+  // STOP acknowledgement also drains earlier playback commands. Do not mutate
+  // Storage's String arrays while the audio task may still hold their pointers.
+  if (!Player::stopAndWait()) {
+    s_settingsBack = Screen::MusicList;
+    Ui::drawSettings(Settings::data(), s_sel);
+    Ui::settingsMessage("停止播放失败，请重试");
+    return;
+  }
+  auto result = Catalog::refresh();
+  s_musicSel = s_trackSel = s_storySel = 0;
+  s_trackPlaying = -1;
+  s_settingsBack = Screen::MusicList;
+  Input::encoderSteps(); // 丢弃扫描期间积累的旋钮步数
+  Ui::drawSettings(Settings::data(), s_sel);
+  if (result == Catalog::Result::Saved) {
+    if (Storage::totalCount() >= MAX_TRACKS || Story::count() >= MAX_STORIES ||
+        Storage::catCount() - 1 >= MAX_CATEGORIES) {
+      Ui::settingsMessage("已保存，列表数量已达上限");
+      return;
+    }
+    char message[80];
+    snprintf(message, sizeof(message), "已保存：音乐%d 故事%d", Storage::totalCount(), Story::count());
+    Ui::settingsMessage(message);
+  } else if (result == Catalog::Result::SaveFailed) {
+    Ui::settingsMessage("列表已更新，索引保存失败");
+  } else {
+    Ui::settingsMessage("扫描失败，请检查SD卡");
   }
 }
 
@@ -189,7 +233,6 @@ static void showStoryList() {
 
 static void enterStoryMode() {
   Story::stop();                    // 切换模式: 停掉音乐/上一个故事
-  Story::begin();                   // 重新扫描 /story
   s_storySel = 0;
   showStoryList();
 }
@@ -205,14 +248,11 @@ static void startStory(int i) {
   String name = Story::title(i);
   Ui::setStoryTitle(name.c_str());          // 控制条显示的故事名
   Ui::drawStoryLoadingBegin(name.c_str());
+  Display::present(true);          // 在同步读取目录前提交加载页
   if (!Story::open(i)) {
     s_screen = Screen::StoryError;
-    Ui::boot("STORY CANNOT PLAY", "Missing mp3 or timeline.lrc");
+    Ui::boot("故事文件不可用", "双击OK进入设置刷新列表");
     return;
-  }
-  for (int f = 1; f < 14; f++) {            // 圆环继续转约 1.6 圈
-    Ui::drawStoryLoadingSpin(f);
-    delay(55);
   }
 
   Story::start();
@@ -239,20 +279,29 @@ void setup() {
   Settings::load();                 // 读取掉电保存的配置
   applySettings();
 
-  Fonts::begin();                   // 加载圆体抗锯齿字库 (失败自动回退点阵)
+  Fonts::begin();                   // 内置 efont 中文点阵字体
   Ui::begin();
   Ui::boot("MUSIC PLAYER", "Mounting TF card ...");
+  Display::present(true);
 
   Input::begin();
   Hall::begin();
 
   if (!Storage::begin()) {
     Ui::boot("SD CARD ERROR", "Insert TF card then reset");
-  } else if (Storage::totalCount() == 0) {
-    Ui::boot("NO MUSIC FOUND", "Copy MP3 folders to /music");
   } else {
-    Ui::boot("MUSIC PLAYER", "Ready - press OK to select");
+    auto result = Catalog::begin();
+    if (result == Catalog::Result::ScanFailed) {
+      Ui::boot("列表读取失败", "请在设置中刷新列表");
+    } else if (result == Catalog::Result::SaveFailed) {
+      Ui::boot("索引保存失败", "本次列表可用，请检查SD卡");
+    } else if (Storage::totalCount() == 0) {
+      Ui::boot("NO MUSIC FOUND", "Copy MP3 folders to /music");
+    } else {
+      Ui::boot("MUSIC PLAYER", "Ready - press OK to select");
+    }
   }
+  Display::present(true);
   delay(600);
 
   Player::begin();
@@ -268,6 +317,10 @@ void setup() {
 }
 
 void loop() {
+  // 即使页面处理提前 return，也在所有绘制完成后提交；输入仍可高速轮询。
+  struct PresentOnExit {
+    ~PresentOnExit() { Display::present(); }
+  } presentOnExit;
   /* 解码在独立 FreeRTOS 音频任务里持续运行, 这里只处理界面与输入 */
 
   switch (s_screen) {
@@ -289,7 +342,9 @@ void loop() {
       return;
     }
 
-    if (Input::okEvent() == 1) { startMusicCategory(s_musicSel); return; }
+    int8_t ok = Input::okEvent();
+    if (ok == 2) { enterSettings(); return; }
+    if (ok == 1) { startMusicCategory(s_musicSel); return; }
     break;
   }
 
@@ -319,6 +374,7 @@ void loop() {
 
     switch (Input::okEvent()) {
       case 1: playMusicIndex(s_trackSel); return;               // 单击: 播放选中曲目
+      case 2: enterSettings(); return;
       case 3:                                                   // 长按: 返回播放界面(保持播放)
         s_screen = Screen::Main;
         Ui::drawStatic();
@@ -364,7 +420,7 @@ void loop() {
     if (steps) Player::adjustVolume(steps);
 
     static uint32_t lastUi = 0;
-    if (millis() - lastUi > 250) {
+    if (millis() - lastUi >= 33) {
       lastUi = millis();
       Ui::update(Player::status(), Hall::detected());
     }
@@ -377,7 +433,9 @@ void loop() {
     if (Input::prevEvent() == 1) { s_sel = (s_sel - 1 + SETTINGS_ITEMS) % SETTINGS_ITEMS; Ui::refreshSettings(Settings::data(), s_sel); }
 
     switch (Input::okEvent()) {
-      case 1: adjustSetting(s_sel, +1); break;   // 单击: 递增
+      case 1:
+        if (s_sel == 3) { refreshCatalog(); return; }
+        adjustSetting(s_sel, +1); break;
       case 2: exitSettings();           return;  // 双击: 保存返回
       default: break;
     }
@@ -404,7 +462,9 @@ void loop() {
       return;
     }
 
-    if (Input::okEvent() == 1) { startStory(s_storySel); return; }
+    int8_t ok = Input::okEvent();
+    if (ok == 2) { enterSettings(); return; }
+    if (ok == 1) { startStory(s_storySel); return; }
     break;
   }
 
@@ -450,10 +510,10 @@ void loop() {
 
     bool back = (enc == 1) || Input::nextEvent() == 1 || Input::prevEvent() == 1;
     int8_t ok = Input::okEvent();
-    if (ok == 1 || ok == 2) back = true;
+    if (ok == 2) { enterSettings(); return; }
+    if (ok == 1) back = true;
 
     if (back) {
-      Story::begin();
       s_storySel = 0;
       showStoryList();
     }

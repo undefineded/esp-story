@@ -51,13 +51,14 @@ namespace {
   bool      s_eqDirty     = true;   // 仅任务: 采样率就绪后应用 EQ
   bool      s_autoNext    = true;   // 仅任务: 音乐模式结束自动下一曲
   bool      s_pendingNext = false;  // 仅任务: EOF 后延迟换曲
+  uint32_t  s_stopRequest = 0, s_stopAck = 0;
   EqPreset  s_eqBoot      = EqPreset::Vocal;  // begin() 之前的初始 EQ
 
   /* 命令 (UI -> 音频任务) */
   enum Cmd : uint8_t {
     CMD_PLAY_INDEX, CMD_PLAY_PATH, CMD_NEXT, CMD_PREV,
     CMD_TOGGLE, CMD_STOP, CMD_VOL_SET, CMD_VOL_ADJ,
-    CMD_EQ_SET, CMD_EQ_CYCLE, CMD_AUTONEXT
+    CMD_EQ_SET, CMD_EQ_CYCLE, CMD_AUTONEXT, CMD_STOP_SYNC
   };
   struct Msg {
     uint8_t cmd;
@@ -139,10 +140,17 @@ namespace {
         break;
 
       case CMD_STOP:
+      case CMD_STOP_SYNC:
         s_audio.stopSong();
+        s_pendingNext = false;
         s_st.connected = false;
         s_st.paused    = true;
+        if (m.cmd == CMD_STOP_SYNC) s_st.index = -1;
         eofSet(false);
+        if (m.cmd == CMD_STOP_SYNC) {
+          publish();
+          lock(); s_stopAck = uint32_t(m.arg); unlock();
+        }
         break;
 
       case CMD_VOL_SET:
@@ -212,6 +220,22 @@ void next()                                    { enqueue(CMD_NEXT); }
 void prev()                                    { enqueue(CMD_PREV); }
 void toggle()                                  { enqueue(CMD_TOGGLE); }
 void stop()                                    { enqueue(CMD_STOP); }
+
+bool stopAndWait(uint32_t timeoutMs) {
+  if (!s_task || !s_q) return false;
+  const uint32_t token = ++s_stopRequest;
+  Msg message{};
+  message.cmd = CMD_STOP_SYNC;
+  message.arg = int32_t(token);
+  if (xQueueSend(s_q, &message, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
+  uint32_t started = millis();
+  do {
+    lock(); bool done = s_stopAck == token; unlock();
+    if (done) return true;
+    delay(1);
+  } while (millis() - started < timeoutMs);
+  return false;
+}
 
 void setAutoNext(bool on)                      { enqueue(CMD_AUTONEXT, 0, on); }
 

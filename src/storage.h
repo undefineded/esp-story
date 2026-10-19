@@ -3,9 +3,13 @@
               (每个子文件夹含其子目录内的全部 mp3, 如 /music/1-2岁/) */
 #pragma once
 #include <Arduino.h>
+#include "catalog.h"
 
 namespace Storage {
-  bool        begin();          // 挂载 TF 卡并扫描, 返回是否成功
+  bool        begin();          // 仅挂载；Catalog::begin 加载列表
+  bool        rescan();
+  void        clear();
+  bool        index(CatalogArchive& archive, bool reading, bool apply = true);
   bool        ready();          // 卡是否挂载成功
 
   int         totalCount();     // /music 下 mp3 总数 (递归)

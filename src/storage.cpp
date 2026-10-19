@@ -18,6 +18,7 @@ namespace {
   int     s_curCount = 0;
 
   bool    s_ready = false;
+  bool    s_scanOk = true;
 
   bool isMp3(const char* n) {
     String s(n);
@@ -36,29 +37,13 @@ namespace {
     return (k >= 0) ? path.substring(k + 1) : path;
   }
 
-  /* 目录(含子目录)内是否存在 mp3 */
-  bool hasMp3Deep(const String& dir) {
-    File d = SD_MMC.open(dir);
-    if (!d || !d.isDirectory()) { if (d) d.close(); return false; }
-
-    bool found = false;
-    File f;
-    while (!found && (f = d.openNextFile())) {
-      if (f.isDirectory()) found = hasMp3Deep(fullPath(dir, f.name()));
-      else                 found = isMp3(f.name());
-      f.close();
-    }
-    d.close();
-    return found;
-  }
-
   /* 递归收集 dir(含子目录)内的 mp3, 全部归入分类 cat */
   void collectDeep(const String& dir, int cat) {
     File d = SD_MMC.open(dir);
-    if (!d || !d.isDirectory()) { if (d) d.close(); return; }
+    if (!d || !d.isDirectory()) { s_scanOk = false; return; }
 
     File f;
-    while ((f = d.openNextFile()) && s_total < MAX_TRACKS) {
+    while (s_total < MAX_TRACKS && (f = d.openNextFile())) {
       if (f.isDirectory())        collectDeep(fullPath(dir, f.name()), cat);
       else if (isMp3(f.name()))   {
         s_tracks[s_total].path = fullPath(dir, f.name());
@@ -79,31 +64,33 @@ namespace {
     }
   }
 
-  void scan() {
+  bool scan() {
+    s_scanOk = true;
     s_total    = 0;
     s_catCount = 0;
 
     if (!SD_MMC.exists(MUSIC_DIR)) {
-      SD_MMC.mkdir(MUSIC_DIR);          // 不存在则创建, 方便用户放文件
+      if (!SD_MMC.mkdir(MUSIC_DIR)) return false;
       Serial.println("[SD ] /music not found, created it");
       buildPlaylist(0);
-      return;
+      return true;
     }
     File root = SD_MMC.open(MUSIC_DIR);
     if (!root || !root.isDirectory()) {
       if (root) root.close();
       buildPlaylist(0);
-      return;
+      return false;
     }
 
     File f;
-    while ((f = root.openNextFile())) {
+    while (s_total < MAX_TRACKS && (f = root.openNextFile())) {
       if (f.isDirectory()) {
         String dir = fullPath(MUSIC_DIR, f.name());
-        if (s_catCount < MAX_CATEGORIES && hasMp3Deep(dir)) {
+        if (s_catCount < MAX_CATEGORIES) {
+          int before = s_total;
           s_cats[s_catCount] = baseName(dir);      // 一级子文件夹 = 一个分类
           collectDeep(dir, s_catCount);
-          s_catCount++;
+          if (s_total > before) s_catCount++;
         }
       } else if (isMp3(f.name()) && s_total < MAX_TRACKS) {
         s_tracks[s_total].path = fullPath(MUSIC_DIR, f.name());
@@ -119,6 +106,7 @@ namespace {
 
     buildPlaylist(0);
     Serial.printf("[SD ] %d MP3, %d category(ies) in %s\n", s_total, s_catCount, MUSIC_DIR);
+    return s_scanOk;
   }
 }
 
@@ -132,7 +120,40 @@ bool begin() {
     return false;
   }
   Serial.printf("[SD ] mounted, type=%d\n", (int)SD_MMC.cardType());
-  scan();
+  return true;
+}
+
+void clear() {
+  for (auto& track : s_tracks) { track.path = ""; track.cat = -1; }
+  for (auto& cat : s_cats) cat = "";
+  s_total = s_catCount = 0;
+  buildPlaylist(0);
+}
+
+bool rescan() { clear(); return scan(); }
+
+bool index(CatalogArchive& archive, bool reading, bool apply) {
+  uint32_t cats = s_catCount, tracks = s_total;
+  if (!archive.number(cats) || cats > MAX_CATEGORIES ||
+      !archive.number(tracks) || tracks > MAX_TRACKS) return false;
+  if (reading && apply) clear();
+  for (uint32_t i = 0; i < cats; ++i) {
+    String name = reading ? String() : s_cats[i];
+    if (!archive.text(name) || name.isEmpty() || name.indexOf('/') >= 0) return false;
+    if (reading && apply) s_cats[i] = name;
+  }
+  for (uint32_t i = 0; i < tracks; ++i) {
+    String path = reading ? String() : s_tracks[i].path;
+    uint32_t cat = reading ? 0 : s_tracks[i].cat + 1;
+    if (!archive.text(path) || !path.startsWith("/music/") || path.indexOf("/../") >= 0 ||
+        !isMp3(path.c_str()) || !archive.number(cat) || cat > cats) return false;
+    if (reading && apply) { s_tracks[i].path = path; s_tracks[i].cat = int(cat) - 1; }
+  }
+  if (reading && apply) {
+    s_catCount = cats;
+    s_total = tracks;
+    buildPlaylist(0);
+  }
   return true;
 }
 
