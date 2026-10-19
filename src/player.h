@@ -54,6 +54,7 @@ namespace Player {
   void        begin();                      // 启动音频任务 (只需调用一次)
 
   void        playIndex(int i, bool autoStart = true);
+                                 // autoStart=false: 只载入并暂停 (开机恢复上次曲目用)
   void        playPath(const char* path, bool autoStart = true);  // 播放任意文件 (故事模式)
   void        next();
   void        prev();

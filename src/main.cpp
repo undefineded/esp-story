@@ -18,6 +18,7 @@
  *    Hall     - 霍尔开关状态
  *    Fram     - I2C 铁电存储器 (U2 MB85RC16, 配置持久化)
  *    Settings - 亮度/旋转/EQ 配置 (掉电保存到 FRAM)
+ *    Session  - 上次的分类/曲目/音量记忆 (掉电保存到 FRAM)
  *    Ui       - 自绘主界面 + 设置界面 + 故事模式界面
  *
  *  两种模式 (长按编码器 SET 切换):
@@ -27,6 +28,8 @@
  *  音乐分类列表操作 (开机默认界面):
  *    编码器/NEXT/LAST: 选择分类        OK 单击: 播放该分类
  *    SET 短按 : 播放当前分类           SET 长按: 进入故事模式
+ *  开机记忆: 有上次收听记录时直接回到播放页, 曲目已载入但暂停, 连同音量一起恢复,
+ *            按 OK 即接着听; 记录失效(换卡/删歌)则照常进分类列表。
  *  音乐播放操作:
  *    OK 单击  : 播放 / 暂停           OK 双击 : 进入设置
  *    NEXT/LAST: 下一曲 / 上一曲
@@ -58,6 +61,7 @@
 #include "hall.h"
 #include "fram.h"
 #include "settings.h"
+#include "session.h"
 #include "fonts.h"
 #include "ui.h"
 
@@ -84,6 +88,24 @@ static void applySettings() {
   Display::setBrightness(s.brightness);
   Display::setRotation(s.rotation);
   Player::setEq(s.eq);
+}
+
+/* ---------------- 会话记忆 (FRAM) ---------------- */
+
+/* 音量: Session 是唯一真值源 (开机从 FRAM 恢复), 用绝对值下发避免与异步状态漂移 */
+static void changeVolume(int delta) {
+  uint8_t v = (uint8_t)constrain((int)Session::volume() + delta, 0, VOL_MAX);
+  Player::setVolume(v);
+  Session::setVolume(v);            // 变化时落盘 (3 字节小记录, 拧旋钮也不拖慢 UI)
+}
+
+/* 把"当前分类 + 当前曲目"写进 FRAM; 内容未变时 Session 内部直接跳过 */
+static void rememberPosition() {
+  PlayerStatus st = Player::status();
+  int ci = Storage::currentCategory();
+  const char* cat  = (ci > 0) ? Storage::catName(ci) : "";   // 0 = 全部歌曲, 存空串
+  const char* path = (st.index >= 0) ? Storage::path(st.index) : "";
+  Session::setPosition(cat, path, st.index);
 }
 
 static void enterSettings() {
@@ -207,6 +229,48 @@ static void startMusicCategory(int ci) {
   playMusicIndex(0);
 }
 
+/* ---------------- 开机恢复上次收听位置 ---------------- */
+
+/* 按 FRAM 记忆还原分类与曲目: 分类按名称、曲目按完整路径匹配 (换卡/增删歌后下标会错位)。
+   成功则停在播放页并把该曲目载入为"暂停"状态, 按 OK 才出声; 返回 false 表示应回分类列表。 */
+static bool restoreSession() {
+  const char* cat = Session::category();
+  int ci = 0;
+  if (cat[0]) {
+    ci = -1;
+    for (int i = 1; i < Storage::catCount(); i++) {
+      if (strcmp(Storage::catName(i), cat) == 0) { ci = i; break; }
+    }
+    if (ci < 0) return false;                    // 记住的分类已不存在 (改名/删目录)
+  }
+  if (!Storage::selectCategory(ci)) return false;
+
+  s_musicSel = ci;                               // 列表光标也停在记住的分类上
+
+  int n  = Storage::count();
+  int ti = -1;
+  const char* path = Session::trackPath();
+  if (path[0]) {
+    for (int i = 0; i < n; i++) {
+      if (strcmp(Storage::path(i), path) == 0) { ti = i; break; }
+    }
+  }
+  if (ti < 0) {                                  // 路径没命中: 退回下标, 再不行就不恢复曲目
+    int idx = Session::trackIndex();
+    if (idx >= 0 && idx < n) ti = idx;
+  }
+  if (ti < 0) return false;                      // 只记住了分类, 由调用方显示分类列表
+
+  s_trackSel     = ti;
+  s_trackPlaying = ti;
+  Player::playIndex(ti, false);                  // 载入但不自动播放
+  Serial.printf("[SES] resume cat=\"%s\" #%d %s\n", cat, ti, Storage::path(ti));
+  s_screen = Screen::Main;
+  Ui::drawStatic();
+  Ui::update(Player::status(), Hall::detected());
+  return true;
+}
+
 /* ---------------- 故事模式 ---------------- */
 
 static int s_storyPanel = -1;            // 已绘制的插画下标
@@ -277,6 +341,12 @@ void setup() {
   Fram::begin();                    // I2C FRAM (设置持久化)
   Serial.printf("[SYS] FRAM %s\n", Fram::ok() ? "OK" : "NOT FOUND");
   Settings::load();                 // 读取掉电保存的配置
+  Session::load();                  // 读取掉电保存的音量/上次播放位置
+#ifdef SESSION_SELFTEST
+  Session::selfTest();              // 临时自检开关: -DSESSION_SELFTEST
+#endif
+  Serial.printf("[SES] FRAM 记忆: volume=%u, cat=\"%s\"\n",
+                Session::volume(), Session::category());
   applySettings();
 
   Fonts::begin();                   // 内置 efont 中文点阵字体
@@ -286,6 +356,9 @@ void setup() {
 
   Input::begin();
   Hall::begin();
+  Serial.printf("[SYS] HALL level=%d (%s)\n",
+                Hall::level(), Hall::detected() ? "card in" : "card out");
+  Ui::setHall(Hall::detected());     // 顶栏通知位: 卡片插入状态
 
   if (!Storage::begin()) {
     Ui::boot("SD CARD ERROR", "Insert TF card then reset");
@@ -306,13 +379,14 @@ void setup() {
 
   Player::begin();
   Player::setEq(Settings::data().eq);
+  Player::setVolume(Session::volume());   // 恢复上次音量
 
-  if (Storage::totalCount() > 0) {
-    showMusicList();                // 有音乐: 开机进入分类列表
-  } else {
+  if (Storage::totalCount() == 0) {
     s_screen = Screen::Main;
     Ui::drawStatic();
     Ui::update(Player::status(), Hall::detected());
+  } else if (!restoreSession()) {
+    showMusicList();                // 没有记忆 / 记忆已失效: 开机进入分类列表
   }
 }
 
@@ -322,6 +396,8 @@ void loop() {
     ~PresentOnExit() { Display::present(); }
   } presentOnExit;
   /* 解码在独立 FreeRTOS 音频任务里持续运行, 这里只处理界面与输入 */
+
+  Ui::setHall(Hall::detected());    // 卡片插拔: 任意界面都即时更新顶栏通知位
 
   switch (s_screen) {
 
@@ -392,6 +468,7 @@ void loop() {
         s_trackPlaying = cur;
         Ui::updateTrackList(n, s_trackSel, s_trackPlaying);
       }
+      rememberPosition();           // 在列表页自动续播时也要更新记忆
     }
     break;
   }
@@ -417,12 +494,13 @@ void loop() {
     }
 
     int steps = Input::encoderSteps();
-    if (steps) Player::adjustVolume(steps);
+    if (steps) changeVolume(steps);
 
     static uint32_t lastUi = 0;
     if (millis() - lastUi >= 33) {
       lastUi = millis();
       Ui::update(Player::status(), Hall::detected());
+      rememberPosition();           // 换曲/自动续播/选分类都在这里落到 FRAM
     }
     break;
   }
@@ -497,7 +575,7 @@ void loop() {
     }
 
     int steps = Input::encoderSteps();
-    if (steps) Player::adjustVolume(steps);
+    if (steps) changeVolume(steps);
 
     refreshStoryBar();                              // 每帧刷新, 内部只重绘变化区域
     break;

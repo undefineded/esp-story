@@ -125,7 +125,7 @@ namespace {
   void execCmd(const Msg& m) {
     int n = Storage::count();
     switch (m.cmd) {
-      case CMD_PLAY_INDEX: playIndexTask((int)m.arg, true); break;
+      case CMD_PLAY_INDEX: playIndexTask((int)m.arg, m.flag != 0); break;
       case CMD_PLAY_PATH:  playPathTask(m.path, m.flag != 0); break;
       case CMD_NEXT:       if (n) playIndexTask((s_st.index + 1) % n, true); break;
       case CMD_PREV:       if (n) playIndexTask((s_st.index - 1 + n) % n, true); break;
