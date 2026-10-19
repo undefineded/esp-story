@@ -5,6 +5,7 @@
 
 namespace Ui {
   void begin();                                     // 初始化调色板
+  void setHall(bool detected);                      // 顶栏通知位: 卡片插入状态 (任意界面立即更新)
   void boot(const char* line1, const char* line2);  // 启动/提示页
   void drawStatic();                                // 绘制主界面静态框架
   void update(const PlayerStatus& st, bool hallDetected);  // 主界面增量刷新

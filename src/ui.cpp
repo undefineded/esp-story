@@ -17,7 +17,8 @@ namespace {
 /* ---------------- 故事盒调色板 (取自 ui.html) ---------------- */
 uint16_t cInk, cInkSoft, cPaper, cCoral, cCoralDk, cYellow, cYellowLt,
          cAqua, cAquaDk, cBlue, cTrack, cTrackBd, cBtnBlue, cBtnBlueBd,
-         cGreen, cGreenDk, cPauseBd, cPurple, cCoverBg, cMoon, cBush;
+         cGreen, cGreenDk, cPauseBd, cPurple, cCoverBg, cMoon, cBush,
+         cCardLt, cCardDk;
 bool     s_palReady = false;
 
 void palette() {
@@ -45,6 +46,9 @@ void palette() {
   cCoverBg  = g.color565(124, 201, 221);   // #7cc9dd 封面底
   cMoon     = g.color565(255, 244, 168);   // #fff4a8 月亮
   cBush     = g.color565( 47, 155, 104);   // #2f9b68 灌木
+  /* 霍尔卡片图标 (按设计稿 SVG 取色) */
+  cCardLt = g.color565(191, 244, 186);     // #bff4ba 卡片本体 / 芯片内圆孔
+  cCardDk = g.color565( 45, 206,  27);     // #2dce1b 芯片 / 右侧条
 }
 
 /* ---------------- 布局常量 (320x240, 对照 ui.html 1x) ----------------
@@ -56,6 +60,9 @@ const int INFO_X = 112, INFO_W = 198;
 int      s_lastIdx = -999, s_lastCnt = -1, s_lastVol = -1;
 int      s_lastState = -1;                 // playing/paused/hasTrack 组合键
 int      s_lastHall = -1;
+bool     s_hallNow  = false;               // 最近已知霍尔状态 (顶栏通知位, 各界面共用)
+bool     s_hallLayout = false;             // 上次"音量让位"排版所用的霍尔状态
+void     drawHallIcon(bool detected);      // 前置声明: 顶栏基础绘制里要用
 uint32_t s_lastCur = 0xFFFFFFFF, s_lastDur = 0xFFFFFFFF;
 String   s_subLast;                        // 已绘制的"编码·比特率"行内容 (比特率首帧解码后才给出, 变化时需补绘)
 
@@ -103,17 +110,20 @@ void drawTopBarBase() {
   g.setFont(Fonts::body());
   g.setTextColor(TFT_WHITE, cCoral);
   g.drawString("小小故事盒", 36, 7);
+  s_lastHall = -1;                  // 整条顶栏被重铺, 通知位图标必须重画
+  drawHallIcon(s_hallNow);          // 通知位: 卡片插入状态 (各界面常显)
 }
 
-/* 音量文本 "音量:10" (顶栏右侧) */
+/* 音量文本 "音量:10" (顶栏右侧; 检测到卡片时右缘让给通知位图标) */
 void drawVolume(const PlayerStatus& st) {
   auto& g = Display::canvas();
-  g.fillRect(238, 0, 82, 30, cCoral);
+  const bool card = s_hallNow;               // 有卡片才需要给图标让位
+  g.fillRect(card ? 228 : 238, 0, card ? 66 : 82, 30, cCoral);
   g.setFont(Fonts::body());
   g.setTextColor(TFT_WHITE, cCoral);
   char b[24];
   snprintf(b, sizeof(b), "音量:%u", (unsigned)st.volume);
-  g.drawRightString(b, 310, 7);
+  g.drawRightString(b, card ? 292 : 310, 7);
 }
 
 /* ---------------- 封面卡 (黄色相框 + 3px 硬阴影) ---------------- */
@@ -254,7 +264,7 @@ void drawProgress(const PlayerStatus& st) {
   }
 }
 
-/* 状态行: 圆点 + 播放状态 + 霍尔状态(右侧调试位) */
+/* 状态行: 圆点 + 播放状态 */
 void drawStatus(const PlayerStatus& st) {
   auto& g = Display::canvas();
   g.fillRect(INFO_X, 142, INFO_W, 26, cPaper);
@@ -273,19 +283,28 @@ void drawStatus(const PlayerStatus& st) {
   g.drawString(txt, INFO_X + 14, 146);
 }
 
-void drawHallText(bool detected) {
+/* 顶栏最右侧的霍尔图标 (卡片), 造型按设计稿 SVG 等比缩放:
+   浅绿圆角卡片 + 左侧深绿芯片 (含浅绿圆孔) + 右侧深绿条。
+   仅在检出实体卡片时显示; 没有卡片时什么都不画 (不占位, 音量文字自动回到最右缘)。
+   1x 直绘 (不做抗锯齿), 卡片 18x13 贴在顶栏右缘。 */
+void drawHallIcon(bool detected) {
   int v = detected ? 1 : 0;
-  if (v == s_lastHall) return;
+  if (v == s_lastHall) return;               // 状态未变不重绘
   s_lastHall = v;
+
   auto& g = Display::canvas();
-  g.fillRect(238, 142, 72, 26, cPaper);
-  g.setFont(Fonts::body());
-  g.setTextColor(detected ? cPurple : cInkSoft, cPaper);
-  g.drawRightString(detected ? "HALL H" : "HALL L", 310, 146);
+  const int X = 298, Y = 10;                 // 卡片左上角 (右缘留 4px)
+
+  g.fillRect(X - 2, Y - 2, 22, 17, cCoral);  // 先清掉原图标位
+  if (!detected) return;                     // 无霍尔: 不展示
+
+  g.fillRoundRect(X,      Y,     18, 13, 3, cCardLt);   // 卡片本体
+  g.fillRoundRect(X +  2, Y +  3,  8,  8, 2, cCardDk);  // 芯片
+  g.fillCircle   (X +  6, Y +  7,      2,     cCardLt); // 芯片内圆孔
+  g.fillRoundRect(X + 11, Y +  5,  5,  3, 1, cCardDk);  // 右侧条
 }
 
 /* ---------------- 控制栏 ---------------- */
-
 void drawTransport() {
   auto& g = Display::canvas();
   g.fillRect(0, 188, 320, 52, cInk);
@@ -393,6 +412,15 @@ namespace Ui {
 
 void begin() { palette(); }
 
+/* 顶栏通知位: 卡片插入状态。任意界面都能即时更新 (不依赖整屏重绘) */
+void setHall(bool detected) {
+  if (detected == s_hallNow) return;
+  s_hallNow  = detected;
+  s_lastHall = -1;                     // 强制重绘图标
+  drawHallIcon(detected);
+  Serial.printf("[HALL] %s\n", detected ? "card in" : "card out");
+}
+
 void boot(const char* line1, const char* line2) {
   palette();
   auto& g = Display::canvas();
@@ -436,7 +464,6 @@ void update(const PlayerStatus& st, bool hallDetected) {
   if (state != s_lastState) {
     s_lastState = state;
     drawStatus(st);
-    s_lastHall = -1;  // 状态区域清除也覆盖了 HALL 文本
     drawPlayButton(st);
   }
   if (st.curSec != s_lastCur || st.durSec != s_lastDur) {
@@ -452,7 +479,11 @@ void update(const PlayerStatus& st, bool hallDetected) {
   if (subText(st) != s_subLast) {
     drawSubLine(st);
   }
-  drawHallText(hallDetected);
+  setHall(hallDetected);                      // 顶栏通知位: 状态变化时显隐图标
+  if (s_hallLayout != s_hallNow) {            // 音量文字右缘随之让位 / 收回
+    s_hallLayout = s_hallNow;
+    drawVolume(st);
+  }
 }
 
 void drawSettings(const SettingsData& s, int selected) {
