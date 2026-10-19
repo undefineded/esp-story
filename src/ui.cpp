@@ -139,14 +139,17 @@ void drawCover() {
 
 /* ---------------- 信息列 ---------------- */
 
-/* 分类徽章 (静态) */
+/* 分类徽章 (静态): 宽度随文字自适应, 左右各 6px 内边距 (对照 ui.html .category 的 padding: 0 6px) */
 void drawCategory() {
   auto& g = Display::canvas();
-  g.fillRoundRect(INFO_X, 43, 76, 18, 4, cAqua);
-  g.drawRoundRect(INFO_X, 43, 76, 18, 4, cAquaDk);
+  const char* label = "音乐";
+  const int BADGE_PAD = 6;
   g.setFont(Fonts::body());
+  int w = g.textWidth(label) + BADGE_PAD * 2;
+  g.fillRoundRect(INFO_X, 43, w, 18, 4, cAqua);
+  g.drawRoundRect(INFO_X, 43, w, 18, 4, cAquaDk);
   g.setTextColor(TFT_WHITE, cAqua);
-  g.drawString("音乐", INFO_X + 6, 44);
+  g.drawString(label, INFO_X + BADGE_PAD, 44);
 }
 
 /* 集数 "03 / 24" */
