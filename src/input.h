@@ -11,4 +11,5 @@ namespace Input {
   int8_t encEvent();       // 编码器 SET: 1=短按(释放), 2=长按(达到阈值), 0=无
 
   int    encoderSteps();   // 读取并清零旋转步数 (+顺时针 / -逆时针)
+  bool   active();         // 任意按键按下或编码器发生旋转（不消费事件）
 }

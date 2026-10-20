@@ -59,6 +59,8 @@ static const int BL_CHANNEL = 7;
 static const int BL_FREQ    = 5000;
 static const int BL_RES     = 8;
 static bool      s_blReady  = false;
+static bool      s_screenOff = false;
+static uint8_t   s_brightness = 100;
 
 lgfx::LGFX_Device& lcd() { return s_lcd; }
 
@@ -95,12 +97,20 @@ void begin() {
 
 void setBrightness(uint8_t percent) {
   if (percent > 100) percent = 100;
+  s_brightness = percent;
+  uint8_t output = s_screenOff ? 0 : s_brightness;
   if (s_blReady) {
-    ledcWrite(BL_CHANNEL, (uint32_t)percent * ((1 << BL_RES) - 1) / 100);
+    ledcWrite(BL_CHANNEL, (uint32_t)output * ((1 << BL_RES) - 1) / 100);
   } else {                            // PWM 未就绪时退化为开关
     pinMode(TFT_BL, OUTPUT);
-    digitalWrite(TFT_BL, percent > 0 ? HIGH : LOW);
+    digitalWrite(TFT_BL, output > 0 ? HIGH : LOW);
   }
+}
+
+void setScreenOff(bool off) {
+  if (s_screenOff == off) return;
+  s_screenOff = off;
+  setBrightness(s_brightness);
 }
 
 lgfx::LGFXBase& canvas() {

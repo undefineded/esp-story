@@ -395,15 +395,22 @@ void settingsBands(int y, EqPreset eq) {
 }
 
 void settingsRows(const SettingsData& s, int selected) {
-  // 清除旧选中阴影；整个过程只发生在画布里。
+  // 四行窗口: 第五项选中时向下滚动一行，保留亮度条和 EQ 示意的原始尺寸。
   Display::canvas().fillRect(8, 34, 306, 183, cPaper);
   const int y0 = 34, rh = 44;
-  settingsRow(y0, "亮度", String(s.brightness) + "%", selected == 0, s.brightness);
-  settingsRow(y0 + rh, "旋转方向",
-              (s.rotation == 1) ? "横屏 0°" : "横屏 180°", selected == 1, -1);
-  settingsRow(y0 + rh * 2, "均衡器", eqLabelCN(s.eq), selected == 2, -1);
-  settingsBands(y0 + rh * 2, s.eq);
-  settingsRow(y0 + rh * 3, "刷新列表", "单击OK", selected == 3, -1);
+  const int top = selected >= 4 ? 1 : 0;
+  for (int row = 0; row < 4; ++row) {
+    const int item = top + row;
+    const int y = y0 + row * rh;
+    if (item == 0) settingsRow(y, "亮度", String(s.brightness) + "%", selected == item, s.brightness);
+    else if (item == 1) settingsRow(y, "旋转方向",
+                                    (s.rotation == 1) ? "横屏 0°" : "横屏 180°", selected == item, -1);
+    else if (item == 2) {
+      settingsRow(y, "均衡器", eqLabelCN(s.eq), selected == item, -1);
+      settingsBands(y, s.eq);
+    } else if (item == 3) settingsRow(y, "自动息屏", Settings::sleepTimeoutLabel(), selected == item, -1);
+    else settingsRow(y, "刷新列表", "单击OK", selected == item, -1);
+  }
 }
 
 } // namespace

@@ -17,7 +17,7 @@
  *    Input    - 按键 / 编码器 (SET 支持长按)
  *    Hall     - 霍尔开关状态
  *    Fram     - I2C 铁电存储器 (U2 MB85RC16, 配置持久化)
- *    Settings - 亮度/旋转/EQ 配置 (掉电保存到 FRAM)
+ *    Settings - 亮度/旋转/EQ/自动息屏配置 (掉电保存到 FRAM)
  *    Session  - 上次的分类/曲目/音量记忆 (掉电保存到 FRAM)
  *    Ui       - 自绘主界面 + 设置界面 + 故事模式界面
  *
@@ -71,14 +71,18 @@ enum class Screen : uint8_t { MusicList, TrackList, Main, Settings, StoryList, S
 
 static Screen s_screen   = Screen::MusicList;
 static Screen s_settingsBack = Screen::Main;   // 设置界面来源屏 (保存后返回该屏)
-static int    s_sel      = 0;      // 设置界面当前选中项 0..3
+static int    s_sel      = 0;      // 设置界面当前选中项 0..4
 static int    s_musicSel = 0;      // 音乐分类列表当前选中项
 static int    s_trackSel = 0;      // 当前歌曲列表选中项
 static int    s_trackPlaying = 0;  // 当前歌曲列表中"正在播放"的曲目下标
 static int    s_storySel = 0;      // 故事列表当前选中项
 static bool   s_storyRedraw = false;  // 从设置返回故事页: 置位以强制整体重绘
 
-static const int SETTINGS_ITEMS = 4;   // 亮度 / 旋转 / EQ / 刷新列表
+static const int SETTINGS_ITEMS = 5;   // 亮度 / 旋转 / EQ / 自动息屏 / 刷新列表
+static bool     s_screenOff = false;
+static bool     s_wakeRelease = false;
+static uint32_t s_lastActivity = 0;
+static bool     s_lastHallDetected = false;
 static void showMusicList();
 static void showTrackList();
 static void showStoryList();
@@ -103,9 +107,9 @@ static void changeVolume(int delta) {
 static void rememberPosition() {
   PlayerStatus st = Player::status();
   int ci = Storage::currentCategory();
-  const char* cat  = (ci > 0) ? Storage::catName(ci) : "";   // 0 = 全部歌曲, 存空串
+  const char* category = (ci > 0) ? Storage::catName(ci) : "";
   const char* path = (st.index >= 0) ? Storage::path(st.index) : "";
-  Session::setPosition(cat, path, st.index);
+  Session::setPosition(category, path);
 }
 
 static void enterSettings() {
@@ -134,7 +138,7 @@ static void exitSettings() {
   }
 }
 
-/* 调整设置项: item 0=亮度, 1=旋转, 2=EQ; delta 为编码器步数/单击 +1 */
+/* 调整设置项: item 0=亮度, 1=旋转, 2=EQ, 3=自动息屏; delta 为编码器步数/单击 +1 */
 static void adjustSetting(int item, int delta) {
   SettingsData& s = Settings::data();
 
@@ -151,6 +155,11 @@ static void adjustSetting(int item, int delta) {
     int e = ((int)s.eq + (delta >= 0 ? 1 : -1) + (int)EqPreset::COUNT) % (int)EqPreset::COUNT;
     s.eq = (EqPreset)e;
     Player::setEq(s.eq);
+    Ui::refreshSettings(s, item);
+  } else if (item == 3) {
+    int count = (int)SleepTimeout::COUNT;
+    int value = ((int)s.sleepTimeout + delta % count + count) % count;
+    s.sleepTimeout = (uint8_t)value;
     Ui::refreshSettings(s, item);
   }
 }
@@ -231,44 +240,38 @@ static void startMusicCategory(int ci) {
 
 /* ---------------- 开机恢复上次收听位置 ---------------- */
 
-/* 按 FRAM 记忆还原分类与曲目: 分类按名称、曲目按完整路径匹配 (换卡/增删歌后下标会错位)。
+/* 按 FRAM 记忆还原分类与曲目: 分类与完整路径均以 64 位哈希匹配，绝不使用旧下标。
    成功则停在播放页并把该曲目载入为"暂停"状态, 按 OK 才出声; 返回 false 表示应回分类列表。 */
 static bool restoreSession() {
-  const char* cat = Session::category();
+  const uint64_t hash = Session::trackHash();
+  if (!hash) return false;
+
+  const uint64_t categoryHash = Session::categoryHash();
   int ci = 0;
-  if (cat[0]) {
+  if (categoryHash) {
     ci = -1;
-    for (int i = 1; i < Storage::catCount(); i++) {
-      if (strcmp(Storage::catName(i), cat) == 0) { ci = i; break; }
+    for (int i = 1; i < Storage::catCount(); ++i) {
+      if (Session::hashPath(Storage::catName(i)) == categoryHash) { ci = i; break; }
     }
-    if (ci < 0) return false;                    // 记住的分类已不存在 (改名/删目录)
+    if (ci < 0) return false;
   }
   if (!Storage::selectCategory(ci)) return false;
 
-  s_musicSel = ci;                               // 列表光标也停在记住的分类上
-
-  int n  = Storage::count();
-  int ti = -1;
-  const char* path = Session::trackPath();
-  if (path[0]) {
-    for (int i = 0; i < n; i++) {
-      if (strcmp(Storage::path(i), path) == 0) { ti = i; break; }
-    }
+  for (int ti = 0; ti < Storage::count(); ++ti) {
+    const char* path = Storage::path(ti);
+    if (Session::hashPath(path) != hash) continue;
+    s_musicSel     = ci;
+    s_trackSel     = ti;
+    s_trackPlaying = ti;
+    Player::playIndex(ti, false);                // 载入但不自动播放
+    Serial.printf("[SES] resume cat=%d #%d %s\n", ci, ti, path);
+    s_screen = Screen::Main;
+    Ui::drawStatic();
+    Ui::update(Player::status(), Hall::detected());
+    return true;
   }
-  if (ti < 0) {                                  // 路径没命中: 退回下标, 再不行就不恢复曲目
-    int idx = Session::trackIndex();
-    if (idx >= 0 && idx < n) ti = idx;
-  }
-  if (ti < 0) return false;                      // 只记住了分类, 由调用方显示分类列表
 
-  s_trackSel     = ti;
-  s_trackPlaying = ti;
-  Player::playIndex(ti, false);                  // 载入但不自动播放
-  Serial.printf("[SES] resume cat=\"%s\" #%d %s\n", cat, ti, Storage::path(ti));
-  s_screen = Screen::Main;
-  Ui::drawStatic();
-  Ui::update(Player::status(), Hall::detected());
-  return true;
+  return false;                                  // 不按旧下标兜底，避免换卡后误播
 }
 
 /* ---------------- 故事模式 ---------------- */
@@ -345,8 +348,8 @@ void setup() {
 #ifdef SESSION_SELFTEST
   Session::selfTest();              // 临时自检开关: -DSESSION_SELFTEST
 #endif
-  Serial.printf("[SES] FRAM 记忆: volume=%u, cat=\"%s\"\n",
-                Session::volume(), Session::category());
+  Serial.printf("[SES] FRAM 记忆: volume=%u, trackHash=%llx\n",
+                Session::volume(), (unsigned long long)Session::trackHash());
   applySettings();
 
   Fonts::begin();                   // 内置 efont 中文点阵字体
@@ -359,6 +362,8 @@ void setup() {
   Serial.printf("[SYS] HALL level=%d (%s)\n",
                 Hall::level(), Hall::detected() ? "card in" : "card out");
   Ui::setHall(Hall::detected());     // 顶栏通知位: 卡片插入状态
+  s_lastHallDetected = Hall::detected();
+  s_lastActivity = millis();
 
   if (!Storage::begin()) {
     Ui::boot("SD CARD ERROR", "Insert TF card then reset");
@@ -397,7 +402,37 @@ void loop() {
   } presentOnExit;
   /* 解码在独立 FreeRTOS 音频任务里持续运行, 这里只处理界面与输入 */
 
-  Ui::setHall(Hall::detected());    // 卡片插拔: 任意界面都即时更新顶栏通知位
+  const uint32_t now = millis();
+  const bool hallDetected = Hall::detected();
+  const bool hallChanged = hallDetected != s_lastHallDetected;
+  s_lastHallDetected = hallDetected;
+  const bool inputActive = Input::active();
+  Ui::setHall(hallDetected);        // 卡片插拔: 任意界面都即时更新顶栏通知位
+
+  if (s_screenOff) {
+    if (!inputActive && !hallChanged) return;
+    s_screenOff = false;
+    Display::setScreenOff(false);
+    s_lastActivity = now;
+    Input::encoderSteps();          // 唤醒用旋钮动作不影响音量/光标
+    s_wakeRelease = inputActive;    // 首次按键仅唤醒，等待松开后再接收操作
+    return;
+  }
+  if (s_wakeRelease) {
+    if (!inputActive) {
+      s_wakeRelease = false;
+      Input::encoderSteps();
+    }
+    return;
+  }
+
+  if (inputActive || hallChanged) s_lastActivity = now;
+  const uint32_t sleepMs = Settings::sleepTimeoutMs();
+  if (sleepMs && now - s_lastActivity >= sleepMs) {
+    s_screenOff = true;
+    Display::setScreenOff(true);
+    return;
+  }
 
   switch (s_screen) {
 
@@ -512,7 +547,7 @@ void loop() {
 
     switch (Input::okEvent()) {
       case 1:
-        if (s_sel == 3) { refreshCatalog(); return; }
+        if (s_sel == 4) { refreshCatalog(); return; }
         adjustSetting(s_sel, +1); break;
       case 2: exitSettings();           return;  // 双击: 保存返回
       default: break;
