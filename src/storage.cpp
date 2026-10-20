@@ -244,4 +244,31 @@ const char* name(int index) {
   return (k >= 0) ? p.c_str() + k + 1 : p.c_str();
 }
 
+int allTrackCount() { return s_total; }
+
+const char* allTrackName(int index) {
+  if (index < 0 || index >= s_total) return "";
+  const String& p = s_tracks[index].path;
+  int k = p.lastIndexOf('/');
+  return (k >= 0) ? p.c_str() + k + 1 : p.c_str();
+}
+
+int allTrackCategory(int index) {
+  if (index < 0 || index >= s_total) return 0;
+  return s_tracks[index].cat >= 0 ? s_tracks[index].cat + 1 : 0;
+}
+
+bool prepareTrack(int index, int& playlistIndex) {
+  if (index < 0 || index >= s_total) return false;
+  int ci = allTrackCategory(index);
+  if (!selectCategory(ci)) return false;
+  for (int i = 0; i < s_curCount; i++) {
+    if (s_cur[i] == index) {
+      playlistIndex = i;
+      return true;
+    }
+  }
+  return false;
+}
+
 }

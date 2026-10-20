@@ -38,6 +38,7 @@ void setRemoteLocked(bool locked);
 uint32_t revision();                // 配置版本, 供 Storage/Story 重建过滤视图
 void save();
 void factoryReset();                // 恢复默认并清空绑定/PIN/额度/白名单
+bool unbind();                      // 只解除绑定, 保留绑定码/家长配置
 
 /* ---- 时间 ---- */
 void     syncTime(uint32_t epochSec, int16_t tzOffsetMin);

@@ -546,6 +546,20 @@ static void handleBleCommand(const Ble::Command& c) {
       startStoryActual(c.value);
       break;
 
+    case Ble::Action::PlayMusic: {
+      int actual = c.value;
+      int ci = Storage::allTrackCategory(actual);
+      if (!Parental::categoryAllowed(ci)) break;
+      int playlistIndex = -1;
+      if (!Storage::prepareTrack(actual, playlistIndex)) break;
+      if (Story::active()) Story::stop();
+      for (int i = 0; i < Storage::viewCatCount(); i++) {
+        if (Storage::viewCatActual(i) == ci) { s_musicSel = i; break; }
+      }
+      playMusicIndex(playlistIndex);
+      break;
+    }
+
     default:
       break;
   }

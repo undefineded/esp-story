@@ -30,4 +30,10 @@ namespace Storage {
   int         count();          // 当前分类曲目数量
   const char* path(int index);  // 完整路径 (越界返回 nullptr)
   const char* name(int index);  // 文件名 (不含目录, UTF-8)
+
+  /* 全量曲目 (供 BLE 音乐列表使用) */
+  int         allTrackCount();
+  const char* allTrackName(int index);
+  int         allTrackCategory(int index);          // 0=根目录/全部歌曲, 1..N=分类
+  bool        prepareTrack(int index, int& playlistIndex); // 选中曲目所在分类并返回播放列表下标
 }

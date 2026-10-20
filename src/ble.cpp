@@ -209,6 +209,26 @@ void handleGet(JsonDocument& doc, int32_t id) {
     sendDoc(out);
     return;
   }
+  if (strcmp(what, "music") == 0) {
+    int total = Storage::allTrackCount();
+    int offset = 0, limit = 4;
+    getPaging(doc, total, offset, limit);
+    JsonObject data = out["data"].to<JsonObject>();
+    data["total"]  = total;
+    data["offset"] = offset;
+    JsonArray arr = data["items"].to<JsonArray>();
+    for (int i = offset; i < total && i < offset + limit; i++) {
+      int ci = Storage::allTrackCategory(i);
+      JsonObject item = arr.add<JsonObject>();
+      item["i"] = i;
+      item["n"] = Storage::allTrackName(i);
+      item["c"] = Storage::catName(ci);
+      item["ci"] = ci;
+      item["a"] = Parental::categoryAllowed(ci);
+    }
+    sendDoc(out);
+    return;
+  }
   if (strcmp(what, "cats") == 0) {
     int total = Storage::catCount() - 1;      // 不把"全部歌曲"作为可配置项
     if (total < 0) total = 0;
@@ -336,6 +356,16 @@ void handleCtrl(JsonDocument& doc, int32_t id) {
     return;
   }
 
+  if (strcmp(action, "music") == 0) {
+    if (value < 0 || value >= Storage::allTrackCount()) { sendError(id, "RANGE"); return; }
+    int ci = Storage::allTrackCategory(value);
+    if (!Parental::categoryAllowed(ci)) { sendError(id, "NOT_ALLOWED"); return; }
+    if (!Parental::canPlay()) { sendError(id, "LOCKED"); return; }
+    pushAction(Ble::Action::PlayMusic, value);
+    sendOk(id);
+    return;
+  }
+
   if (strcmp(action, "stop") == 0) {
     pushAction(Ble::Action::Stop);
     sendOk(id);
@@ -442,6 +472,13 @@ void processLine(const char* line) {
 
   if (strcmp(cmd, "reset") == 0) {
     Parental::factoryReset();
+    s_authed = false;
+    sendOk(id);
+    return;
+  }
+
+  if (strcmp(cmd, "unbind") == 0) {
+    Parental::unbind();
     s_authed = false;
     sendOk(id);
     return;

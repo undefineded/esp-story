@@ -19,7 +19,8 @@ enum class Action : uint8_t {
   Prev,
   Stop,
   Volume,
-  PlayStory
+  PlayStory,
+  PlayMusic
 };
 
 struct Command {

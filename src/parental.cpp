@@ -325,6 +325,16 @@ void factoryReset() {
   Serial.println("[PCTL] factory reset");
 }
 
+bool unbind() {
+  if (!(s_p.flags & FLAG_BOUND)) return false;
+  s_p.flags &= ~FLAG_BOUND;
+  s_p.tokenHash = 0;
+  s_rev++;
+  saveNow();
+  Serial.println("[PCTL] unbound");
+  return true;
+}
+
 void syncTime(uint32_t epochSec, int16_t tzOffsetMin) {
   if (!validTime(epochSec)) return;
   s_epochBase  = epochSec;
