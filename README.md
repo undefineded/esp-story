@@ -111,7 +111,7 @@ python3 -m platformio device monitor
 | 蓝牙广播 | 开：设备广播 `StoryBox-XXXX`，小程序可扫描/连接；关：停止广播（已建立的连接不受影响） |
 | WiFi | 开：启用 WiFi STA，使用 `src/config.h` 中的 `WIFI_STA_SSID` / `WIFI_STA_PASS` 连接；未配置时只打开射频 |
 | 热点 AP | 开：启动 SoftAP，SSID `StoryBox-XXXX`，密码 `storybox123`，默认地址 `192.168.4.1` |
-| 显示绑定码 | 在屏幕上显示 6 位首次配对码，长按 SET 返回 |
+| 显示绑定码 | 在屏幕上显示 6 位首次配对码，双击 OK 返回 |
 
 WiFi 与 AP 可同时开启（AP+STA）。三个无线开关都会写入 FRAM，重启后保持。默认：蓝牙广播开，WiFi/AP 关。
 

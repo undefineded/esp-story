@@ -606,7 +606,7 @@ void drawBindCode(const char* code) {
 
   g.setFont(Fonts::small());
   g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("首次配对时输入 · 长按SET返回", 160, 196);
+  g.drawCenterString("首次配对时输入 · 双击OK返回", 160, 196);
 }
 
 /* 家长未开放任何内容 */
