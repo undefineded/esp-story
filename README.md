@@ -6,7 +6,7 @@
 
 - 音乐模式：按分类浏览 MP3，支持播放、暂停、上一首、下一首和音量调节。
 - 故事模式：读取 `/story/<故事名>/` 中的 MP3、插画和 `timeline.lrc`，按播放进度切换画面。
-- 设置：亮度、横屏方向、EQ，以及“刷新列表”。
+- 设置：亮度、横屏方向、EQ、“刷新列表”，以及蓝牙广播 / WiFi / 热点 AP 三个无线开关。
 - efont 中文点阵字体：标题和正文 16px，故事标题 14px，辅助信息 12px，按原生尺寸绘制。
 - PSRAM 画布和局部提交：只把变化区域发送到屏幕，减少刷新闪烁和 SPI 传输。
 - SD 媒体索引：首次启动或手动刷新时扫描文件，之后启动和页面切换直接读取索引。
@@ -102,7 +102,17 @@ python3 -m platformio device monitor
 | SET 短按 | 播放选中项 | 播放或暂停 | 播放选中故事 |
 | SET 长按 | 切换音乐/故事模式 | 切换音乐/故事模式 | 切换音乐/故事模式 |
 
-在设置页使用 NEXT/LAST 选择项目，旋钮或 OK 修改；双击 OK 保存并返回。
+在设置页使用 NEXT/LAST 选择项目，旋钮或 OK 修改；双击 OK 保存并返回。设置页共 7 项，右侧滚动条表示当前窗口位置。
+
+### 无线开关
+
+| 设置项 | 行为 |
+| --- | --- |
+| 蓝牙广播 | 开：设备广播 `StoryBox-XXXX`，小程序可扫描/连接；关：停止广播（已建立的连接不受影响） |
+| WiFi | 开：启用 WiFi STA，使用 `src/config.h` 中的 `WIFI_STA_SSID` / `WIFI_STA_PASS` 连接；未配置时只打开射频 |
+| 热点 AP | 开：启动 SoftAP，SSID `StoryBox-XXXX`，密码 `storybox123`，默认地址 `192.168.4.1` |
+
+WiFi 与 AP 可同时开启（AP+STA）。三个开关都会写入 FRAM，重启后保持。默认：蓝牙广播开，WiFi/AP 关。
 
 ## 项目结构
 
@@ -114,7 +124,10 @@ src/player.*        ESP32-audioI2S 和音频 FreeRTOS 任务
 src/storage.*       音乐列表和分类
 src/story.*         故事目录、时间轴和插画切换
 src/catalog.*       SD 媒体索引加载、扫描和保存
-tools/              故事、时间轴和字体预览工具
+src/parental.*      家长控制、用量、音量范围、白名单、PIN、绑定
+src/ble.*           BLE GATT 服务、JSON 协议、广播开关
+src/network.*       WiFi STA / SoftAP 开关
+tools/              故事、时间轴、字体预览和 BLE 冒烟测试
 test/               主机端索引及渲染逻辑测试
 docs/               刷新、索引和字体对比说明
 ```

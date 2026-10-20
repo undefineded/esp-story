@@ -395,15 +395,55 @@ void settingsBands(int y, EqPreset eq) {
 }
 
 void settingsRows(const SettingsData& s, int selected) {
-  // 清除旧选中阴影；整个过程只发生在画布里。
-  Display::canvas().fillRect(8, 34, 306, 183, cPaper);
+  const int ITEMS = 7, VISIBLE = 4;
   const int y0 = 34, rh = 44;
-  settingsRow(y0, "亮度", String(s.brightness) + "%", selected == 0, s.brightness);
-  settingsRow(y0 + rh, "旋转方向",
-              (s.rotation == 1) ? "横屏 0°" : "横屏 180°", selected == 1, -1);
-  settingsRow(y0 + rh * 2, "均衡器", eqLabelCN(s.eq), selected == 2, -1);
-  settingsBands(y0 + rh * 2, s.eq);
-  settingsRow(y0 + rh * 3, "刷新列表", "单击OK", selected == 3, -1);
+  int top = selected - (VISIBLE - 1);
+  if (top > ITEMS - VISIBLE) top = ITEMS - VISIBLE;
+  if (top < 0) top = 0;
+
+  // 清除旧选中阴影；整个过程只发生在画布里。
+  Display::canvas().fillRect(8, 34, 310, 183, cPaper);
+
+  for (int r = 0; r < VISIBLE; r++) {
+    int i = top + r;
+    if (i >= ITEMS) break;
+    int y = y0 + r * rh;
+    switch (i) {
+      case 0:
+        settingsRow(y, "亮度", String(s.brightness) + "%", selected == i, s.brightness);
+        break;
+      case 1:
+        settingsRow(y, "旋转方向",
+                    (s.rotation == 1) ? "横屏 0°" : "横屏 180°", selected == i, -1);
+        break;
+      case 2:
+        settingsRow(y, "均衡器", eqLabelCN(s.eq), selected == i, -1);
+        settingsBands(y, s.eq);
+        break;
+      case 3:
+        settingsRow(y, "刷新列表", "单击OK", selected == i, -1);
+        break;
+      case 4:
+        settingsRow(y, "蓝牙广播", s.bleEnabled ? "开" : "关", selected == i, -1);
+        break;
+      case 5:
+        settingsRow(y, "WiFi", s.wifiEnabled ? "开" : "关", selected == i, -1);
+        break;
+      case 6:
+        settingsRow(y, "热点 AP", s.apEnabled ? "开" : "关", selected == i, -1);
+        break;
+      default:
+        break;
+    }
+  }
+
+  /* 右侧滚动条: 4 行窗口在 7 项中的位置 */
+  auto& g = Display::canvas();
+  const int sx = 314, sy = y0, sh = rh * VISIBLE, sw = 4;
+  int thumbH = sh * VISIBLE / ITEMS;
+  int thumbY = sy + (sh - thumbH) * top / (ITEMS - VISIBLE);
+  g.fillRoundRect(sx, sy, sw, sh, 2, cTrack);
+  g.fillRoundRect(sx, thumbY, sw, thumbH, 2, cCoral);
 }
 
 } // namespace

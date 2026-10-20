@@ -56,3 +56,17 @@
 #define ENC_LONG_MS  800          // 编码器 SET 长按判定阈值 (切换模式)
 #define OK_LONG_MS   800          // OK 键长按判定阈值 (故事播放页返回列表)
 #define NAV_LONG_MS  800          // NEXT/LAST 键长按判定阈值 (播放页进入分类列表)
+
+/* --- 无线网络 (设置页可开关) ---
+ * AP 默认 SSID: StoryBox-XXXX (XXXX 为蓝牙 MAC 后两位), 密码见 WIFI_AP_PASSWORD。
+ * WiFi STA 默认没有账号: 把下面两行改成家里的 SSID / 密码即可在设置里打开 WiFi。
+ * 也可以不修改这里, 在 platformio.ini 的 build_flags 里定义:
+ *   -DWIFI_STA_SSID=\"MyWiFi\" -DWIFI_STA_PASS=\"12345678\"
+ */
+#ifndef WIFI_STA_SSID
+#define WIFI_STA_SSID   ""
+#endif
+#ifndef WIFI_STA_PASS
+#define WIFI_STA_PASS   ""
+#endif
+#define WIFI_AP_PASSWORD "storybox123"

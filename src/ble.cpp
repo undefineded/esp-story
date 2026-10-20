@@ -32,6 +32,7 @@ volatile bool s_authed       = false;
 volatile bool s_needAdv      = false;
 volatile bool s_helloPending = false;
 volatile bool s_configDirty  = false;
+bool          s_advEnabled   = true;
 uint32_t      s_connectAt    = 0;
 uint32_t      s_lastStatus   = 0;
 char          s_name[24]     = "StoryBox";
@@ -40,6 +41,7 @@ std::string s_rx;
 bool        s_overflow = false;
 
 void startAdvertising() {
+  if (!s_advEnabled || s_connected) return;
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->start();
 }
@@ -504,10 +506,11 @@ class RxCB : public NimBLECharacteristicCallbacks {
 
 namespace Ble {
 
-void begin() {
+void begin(bool advertisingEnabled) {
   uint8_t mac[6] = {0};
   esp_read_mac(mac, ESP_MAC_BT);
   snprintf(s_name, sizeof(s_name), "StoryBox-%02X%02X", mac[4], mac[5]);
+  s_advEnabled = advertisingEnabled;
 
   s_lineQ = xQueueCreate(4, sizeof(Line));
   s_cmdQ  = xQueueCreate(8, sizeof(Command));
@@ -535,15 +538,32 @@ void begin() {
   adv->setScanResponse(true);
   adv->setMinInterval(160);
   adv->setMaxInterval(320);
-  adv->start();
-
-  Serial.printf("[BLE] %s advertising\n", s_name);
+  if (s_advEnabled) {
+    adv->start();
+    Serial.printf("[BLE] %s advertising\n", s_name);
+  } else {
+    Serial.println("[BLE] advertising disabled");
+  }
 }
+
+void setAdvertisingEnabled(bool enabled) {
+  s_advEnabled = enabled;
+  if (!enabled) {
+    s_needAdv = false;
+    if (s_server) NimBLEDevice::getAdvertising()->stop();
+    Serial.println("[BLE] advertising off");
+  } else {
+    if (!s_connected) s_needAdv = true;
+    Serial.println("[BLE] advertising on");
+  }
+}
+
+bool advertisingEnabled() { return s_advEnabled; }
 
 void loop() {
   if (s_needAdv) {
     s_needAdv = false;
-    if (!s_connected) startAdvertising();
+    if (s_advEnabled && !s_connected) startAdvertising();
   }
 
   if (s_helloPending && s_connected && millis() - s_connectAt >= 500) {

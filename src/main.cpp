@@ -66,6 +66,7 @@
 #include "ui.h"
 #include "parental.h"
 #include "ble.h"
+#include "network.h"
 
 /* ---------------- 界面状态机 ---------------- */
 
@@ -82,7 +83,7 @@ static int    s_storySel = 0;      // 故事列表当前选中项
 static bool   s_storyRedraw = false;  // 从设置返回故事页: 置位以强制整体重绘
 static Parental::Lock s_lockShown = Parental::Lock::None;
 
-static const int SETTINGS_ITEMS = 4;   // 亮度 / 旋转 / EQ / 刷新列表
+static const int SETTINGS_ITEMS = 7;   // 亮度 / 旋转 / EQ / 刷新列表 / 蓝牙 / WiFi / AP
 static void showMusicList();
 static void showTrackList();
 static void showStoryList();
@@ -171,7 +172,7 @@ static void enterSettings() {
   s_screen = Screen::Settings;
   s_sel    = 0;
   Ui::drawSettings(Settings::data(), s_sel);
-  Ui::settingsMessage("双击OK返回  刷新会停止播放");
+  Ui::settingsMessage("双击OK保存返回  刷新会停止播放");
 }
 
 static void exitSettings() {
@@ -194,7 +195,7 @@ static void exitSettings() {
   }
 }
 
-/* 调整设置项: item 0=亮度, 1=旋转, 2=EQ; delta 为编码器步数/单击 +1 */
+/* 调整设置项: 0=亮度, 1=旋转, 2=EQ; 4..6 为开关 (旋钮向上开/向下关) */
 static void adjustSetting(int item, int delta) {
   SettingsData& s = Settings::data();
 
@@ -212,7 +213,37 @@ static void adjustSetting(int item, int delta) {
     s.eq = (EqPreset)e;
     Player::setEq(s.eq);
     Ui::refreshSettings(s, item);
+  } else if (item >= 4) {
+    uint8_t on = (delta > 0) ? 1 : 0;
+    if (item == 4) {
+      s.bleEnabled = on;
+      Ble::setAdvertisingEnabled(on != 0);
+    } else if (item == 5) {
+      s.wifiEnabled = on;
+      Network::apply(s.wifiEnabled != 0, s.apEnabled != 0);
+    } else if (item == 6) {
+      s.apEnabled = on;
+      Network::apply(s.wifiEnabled != 0, s.apEnabled != 0);
+    }
+    Settings::save();               // 无线开关立即落盘
+    Ui::refreshSettings(s, item);
   }
+}
+
+static void toggleSetting(int item) {
+  SettingsData& s = Settings::data();
+  if (item == 4) {
+    s.bleEnabled = s.bleEnabled ? 0 : 1;
+    Ble::setAdvertisingEnabled(s.bleEnabled != 0);
+  } else if (item == 5) {
+    s.wifiEnabled = s.wifiEnabled ? 0 : 1;
+    Network::apply(s.wifiEnabled != 0, s.apEnabled != 0);
+  } else if (item == 6) {
+    s.apEnabled = s.apEnabled ? 0 : 1;
+    Network::apply(s.wifiEnabled != 0, s.apEnabled != 0);
+  }
+  Settings::save();
+  Ui::refreshSettings(s, item);
 }
 
 static void refreshCatalog() {
@@ -574,7 +605,21 @@ void setup() {
   Player::begin();
   Player::setEq(Settings::data().eq);
   setVolumeLimited(Session::volume());   // 恢复上次音量, 并套用家长音量范围
-  Ble::begin();
+  Ble::begin(Settings::data().bleEnabled != 0);
+  Network::begin(Settings::data().wifiEnabled != 0, Settings::data().apEnabled != 0);
+
+#ifdef RADIO_SELFTEST
+  Serial.println("[TEST] radio selftest: WiFi+AP on");
+  Network::apply(true, true);
+  delay(6000);
+  Serial.println("[TEST] radio selftest: BLE advertising off/on");
+  Ble::setAdvertisingEnabled(false);
+  delay(1000);
+  Ble::setAdvertisingEnabled(true);
+  delay(1000);
+  Network::apply(false, false);
+  Serial.println("[TEST] radio selftest done");
+#endif
 
   if (!Parental::bound()) {          // 首次启动显示绑定码, BLE 同时已可连接
     Ui::drawBindCode(Parental::bindCode());
@@ -599,6 +644,7 @@ void loop() {
   /* 解码在独立 FreeRTOS 音频任务里持续运行, 这里只处理界面与输入 */
 
   Ui::setHall(Hall::detected());    // 卡片插拔: 任意界面都即时更新顶栏通知位
+  Network::loop();                  // WiFi STA 连接状态日志
 
   /* BLE 通道: 先收包/下发动作, 再由主循环统一执行 */
   Ble::loop();
@@ -758,6 +804,7 @@ void loop() {
     switch (Input::okEvent()) {
       case 1:
         if (s_sel == 3) { refreshCatalog(); return; }
+        if (s_sel >= 4) { toggleSetting(s_sel); break; }
         adjustSetting(s_sel, +1); break;
       case 2: exitSettings();           return;  // 双击: 保存返回
       default: break;

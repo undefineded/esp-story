@@ -27,8 +27,10 @@ struct Command {
   int32_t value;
 };
 
-void begin();
+void begin(bool advertisingEnabled = true);
 void loop();
+void setAdvertisingEnabled(bool enabled);
+bool advertisingEnabled();
 
 bool takeCommand(Command& out);      // 主循环取走播放控制动作
 bool takeConfigChanged();            // 家长配置变化, 需要重建内容过滤
