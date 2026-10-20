@@ -395,7 +395,7 @@ void settingsBands(int y, EqPreset eq) {
 }
 
 void settingsRows(const SettingsData& s, int selected) {
-  const int ITEMS = 7, VISIBLE = 4;
+  const int ITEMS = 8, VISIBLE = 4;
   const int y0 = 34, rh = 44;
   int top = selected - (VISIBLE - 1);
   if (top > ITEMS - VISIBLE) top = ITEMS - VISIBLE;
@@ -431,6 +431,9 @@ void settingsRows(const SettingsData& s, int selected) {
         break;
       case 6:
         settingsRow(y, "热点 AP", s.apEnabled ? "开" : "关", selected == i, -1);
+        break;
+      case 7:
+        settingsRow(y, "显示绑定码", "单击查看", selected == i, -1);
         break;
       default:
         break;
@@ -603,7 +606,7 @@ void drawBindCode(const char* code) {
 
   g.setFont(Fonts::small());
   g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("绑定码仅在首次配对时显示", 160, 196);
+  g.drawCenterString("首次配对时输入 · 长按SET返回", 160, 196);
 }
 
 /* 家长未开放任何内容 */

@@ -70,24 +70,29 @@
 
 /* ---------------- 界面状态机 ---------------- */
 
-enum class Screen : uint8_t { MusicList, TrackList, Main, Settings, StoryList, StoryPlay, StoryError, NoContent, Locked };
+enum class Screen : uint8_t { MusicList, TrackList, Main, Settings, StoryList, StoryPlay, StoryError, NoContent, Locked, Bind };
 
 static Screen s_screen   = Screen::MusicList;
 static Screen s_settingsBack = Screen::Main;   // 设置界面来源屏 (保存后返回该屏)
 static Screen s_lockedBack   = Screen::MusicList; // 锁定前所在屏 (解锁后返回)
-static int    s_sel      = 0;      // 设置界面当前选中项 0..3
+static Screen s_bindBack     = Screen::MusicList; // 绑定码页返回屏
+static int    s_sel      = 0;      // 设置界面当前选中项
 static int    s_musicSel = 0;      // 音乐分类列表当前选中项
 static int    s_trackSel = 0;      // 当前歌曲列表选中项
 static int    s_trackPlaying = 0;  // 当前歌曲列表中"正在播放"的曲目下标
 static int    s_storySel = 0;      // 故事列表当前选中项
 static bool   s_storyRedraw = false;  // 从设置返回故事页: 置位以强制整体重绘
+static bool   s_bleWasConnected = false;
+static uint32_t s_bindUntil = 0;
 static Parental::Lock s_lockShown = Parental::Lock::None;
 
-static const int SETTINGS_ITEMS = 7;   // 亮度 / 旋转 / EQ / 刷新列表 / 蓝牙 / WiFi / AP
+static const int SETTINGS_ITEMS = 8;   // 亮度 / 旋转 / EQ / 刷新 / 蓝牙 / WiFi / AP / 绑定码
 static void showMusicList();
 static void showTrackList();
 static void showStoryList();
 static void showNoContent();
+static void showBindCode(Screen back);
+static void restoreBindBack();
 static void applyParentalConfig();
 
 static void applySettings() {
@@ -213,7 +218,7 @@ static void adjustSetting(int item, int delta) {
     s.eq = (EqPreset)e;
     Player::setEq(s.eq);
     Ui::refreshSettings(s, item);
-  } else if (item >= 4) {
+  } else if (item >= 4 && item <= 6) {
     uint8_t on = (delta > 0) ? 1 : 0;
     if (item == 4) {
       s.bleEnabled = on;
@@ -286,6 +291,45 @@ static void refreshCatalog() {
 static void showNoContent() {
   s_screen = Screen::NoContent;
   Ui::drawNoContent();
+}
+
+static void showBindCode(Screen back) {
+  s_bindBack = back;
+  s_bindUntil = millis() + 15000;
+  s_screen = Screen::Bind;
+  Ui::drawBindCode(Parental::bindCode());
+  Serial.printf("[PCTL] bind code %s\n", Parental::bindCode());
+}
+
+static void restoreBindBack() {
+  switch (s_bindBack) {
+    case Screen::Settings:
+      s_screen = Screen::Settings;
+      Ui::drawSettings(Settings::data(), s_sel);
+      break;
+    case Screen::StoryPlay:
+      s_screen = Screen::StoryPlay;
+      s_storyRedraw = true;
+      break;
+    case Screen::TrackList:
+      showTrackList();
+      break;
+    case Screen::StoryList:
+    case Screen::StoryError:
+      showStoryList();
+      break;
+    case Screen::NoContent:
+      showNoContent();
+      break;
+    case Screen::Main:
+      s_screen = Screen::Main;
+      Ui::drawStatic();
+      Ui::update(Player::status(), Hall::detected());
+      break;
+    default:
+      showMusicList();
+      break;
+  }
 }
 
 /* 绘制音乐分类列表 (置顶"全部歌曲" + /music 一级子文件夹, 受家长白名单过滤) */
@@ -621,10 +665,11 @@ void setup() {
   Serial.println("[TEST] radio selftest done");
 #endif
 
-  if (!Parental::bound()) {          // 首次启动显示绑定码, BLE 同时已可连接
+  if (!Parental::bound()) {          // 首次启动显示绑定码, 手机连接时也会再次显示
+    Serial.printf("[PCTL] bind code %s\n", Parental::bindCode());
     Ui::drawBindCode(Parental::bindCode());
     Display::present(true);
-    delay(2500);
+    delay(4000);
   }
 
   if (Storage::totalCount() == 0 && Story::count() == 0) {
@@ -668,7 +713,24 @@ void loop() {
     return;
   }
 
+  /* 手机首次连接时把绑定码显示到屏幕, 方便输入 */
+  bool bleConnected = Ble::connected();
+  if (bleConnected && !s_bleWasConnected && !Parental::bound() &&
+      s_screen != Screen::Bind && s_screen != Screen::Locked) {
+    showBindCode(s_screen);
+  }
+  s_bleWasConnected = bleConnected;
+
   switch (s_screen) {
+
+  /* ---------------- 绑定码页 ---------------- */
+  case Screen::Bind: {
+    Input::encoderSteps();                 // 丢弃绑定页上的旋钮步数
+    if (Parental::bound()) { restoreBindBack(); return; }
+    if (!Ble::connected() && millis() > s_bindUntil) { restoreBindBack(); return; }
+    if (Input::okEvent() == 2 || Input::encEvent() == 2) { restoreBindBack(); return; }
+    break;
+  }
 
   /* ---------------- 无内容 / 锁定占位 ---------------- */
   case Screen::NoContent: {
@@ -804,7 +866,8 @@ void loop() {
     switch (Input::okEvent()) {
       case 1:
         if (s_sel == 3) { refreshCatalog(); return; }
-        if (s_sel >= 4) { toggleSetting(s_sel); break; }
+        if (s_sel == 7) { showBindCode(Screen::Settings); return; }
+        if (s_sel >= 4 && s_sel <= 6) { toggleSetting(s_sel); break; }
         adjustSetting(s_sel, +1); break;
       case 2: exitSettings();           return;  // 双击: 保存返回
       default: break;
