@@ -20,6 +20,13 @@ namespace Storage {
   bool        selectCategory(int ci);  // 选定当前分类(0=全部歌曲)并构建播放列表
   int         currentCategory();       // 当前分类下标
 
+  /* 家长内容白名单视图: 实际下标与可见下标分离 */
+  void        setCategoryFilter(uint64_t mask, bool enabled);
+  int         viewCatCount();
+  int         viewCatActual(int view);
+  const char* viewCatName(int view);
+  int         viewCatTrackCount(int view);
+
   int         count();          // 当前分类曲目数量
   const char* path(int index);  // 完整路径 (越界返回 nullptr)
   const char* name(int index);  // 文件名 (不含目录, UTF-8)

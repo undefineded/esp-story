@@ -12,6 +12,13 @@ namespace {
   int      s_count = 0;
   bool     s_scanOk = true;
 
+  /* 家长白名单视图 */
+  uint64_t s_storyMask   = ~0ULL;
+  bool     s_storyFilter = false;
+  int      s_view[MAX_STORIES];
+  int      s_viewCount = 0;
+  int      s_current   = -1;       // 当前打开的故事实际下标
+
   Panel    s_panels[MAX_PANELS];
   int      s_panelCount = 0;
   int      s_panelIdx   = 0;
@@ -37,6 +44,13 @@ namespace {
   /* 扫描 /story 下的子目录 (每个目录 = 一个故事), 按名称排序 */
   String findFirst(const String& dir, const char* ext);
 
+  void rebuildView() {
+    s_viewCount = 0;
+    for (int i = 0; i < s_count && s_viewCount < MAX_STORIES; i++) {
+      if (!s_storyFilter || (s_storyMask & (1ULL << i))) s_view[s_viewCount++] = i;
+    }
+  }
+
   bool scan() {
     s_scanOk = true;
     s_count = 0;
@@ -59,6 +73,7 @@ namespace {
       s_timelinePaths[i] = findFirst(s_dirs[i], ".lrc");
     }
     Serial.printf("[STORY] %d story(ies) in %s\n", s_count, STORY_DIR);
+    rebuildView();
     return s_scanOk;
   }
 
@@ -139,6 +154,8 @@ void clear() {
   for (auto& path : s_audioPaths) path = "";
   for (auto& path : s_timelinePaths) path = "";
   s_count = 0;
+  s_current = -1;
+  rebuildView();
 }
 
 bool rescan() { clear(); return scan(); }
@@ -157,11 +174,35 @@ bool index(CatalogArchive& archive, bool reading, bool apply) {
         (!timeline.isEmpty() && (!timeline.startsWith(dir + "/") || timeline.indexOf("/../") >= 0 || !hasExt(timeline.c_str(), ".lrc")))) return false;
     if (reading && apply) { s_dirs[i] = dir; s_audioPaths[i] = audio; s_timelinePaths[i] = timeline; }
   }
-  if (reading && apply) s_count = count;
+  if (reading && apply) { s_count = count; rebuildView(); }
   return true;
 }
 
 int  count() { return s_count; }
+
+void setStoryFilter(uint64_t mask, bool enabled) {
+  s_storyMask   = mask;
+  s_storyFilter = enabled;
+  rebuildView();
+}
+
+int viewCount() { return s_viewCount; }
+
+int viewActual(int view) {
+  if (view < 0 || view >= s_viewCount) return -1;
+  return s_view[view];
+}
+
+const char* viewTitle(int view) {
+  int actual = viewActual(view);
+  return actual >= 0 ? title(actual) : "";
+}
+
+int currentIndex() { return s_current; }
+
+const char* currentTitle() {
+  return s_current >= 0 ? title(s_current) : "";
+}
 
 const char* title(int i) {
   if (i < 0 || i >= s_count) return "";
@@ -184,6 +225,7 @@ bool open(int i) {
     return false;
   }
 
+  s_current  = i;
   s_panelIdx = 0;
   s_active   = true;
   s_finished = false;
@@ -205,6 +247,7 @@ void stop() {
   s_active     = false;
   s_finished   = false;
   s_panelCount = 0;
+  s_current    = -1;
 }
 
 void loop() {

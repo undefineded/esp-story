@@ -17,7 +17,7 @@
  *    Input    - 按键 / 编码器 (SET 支持长按)
  *    Hall     - 霍尔开关状态
  *    Fram     - I2C 铁电存储器 (U2 MB85RC16, 配置持久化)
- *    Settings - 亮度/旋转/EQ/自动息屏配置 (掉电保存到 FRAM)
+ *    Settings - 亮度/旋转/EQ 配置 (掉电保存到 FRAM)
  *    Session  - 上次的分类/曲目/音量记忆 (掉电保存到 FRAM)
  *    Ui       - 自绘主界面 + 设置界面 + 故事模式界面
  *
@@ -64,28 +64,30 @@
 #include "session.h"
 #include "fonts.h"
 #include "ui.h"
+#include "parental.h"
+#include "ble.h"
 
 /* ---------------- 界面状态机 ---------------- */
 
-enum class Screen : uint8_t { MusicList, TrackList, Main, Settings, StoryList, StoryPlay, StoryError };
+enum class Screen : uint8_t { MusicList, TrackList, Main, Settings, StoryList, StoryPlay, StoryError, NoContent, Locked };
 
 static Screen s_screen   = Screen::MusicList;
 static Screen s_settingsBack = Screen::Main;   // 设置界面来源屏 (保存后返回该屏)
-static int    s_sel      = 0;      // 设置界面当前选中项 0..4
+static Screen s_lockedBack   = Screen::MusicList; // 锁定前所在屏 (解锁后返回)
+static int    s_sel      = 0;      // 设置界面当前选中项 0..3
 static int    s_musicSel = 0;      // 音乐分类列表当前选中项
 static int    s_trackSel = 0;      // 当前歌曲列表选中项
 static int    s_trackPlaying = 0;  // 当前歌曲列表中"正在播放"的曲目下标
 static int    s_storySel = 0;      // 故事列表当前选中项
 static bool   s_storyRedraw = false;  // 从设置返回故事页: 置位以强制整体重绘
+static Parental::Lock s_lockShown = Parental::Lock::None;
 
-static const int SETTINGS_ITEMS = 5;   // 亮度 / 旋转 / EQ / 自动息屏 / 刷新列表
-static bool     s_screenOff = false;
-static bool     s_wakeRelease = false;
-static uint32_t s_lastActivity = 0;
-static bool     s_lastHallDetected = false;
+static const int SETTINGS_ITEMS = 4;   // 亮度 / 旋转 / EQ / 刷新列表
 static void showMusicList();
 static void showTrackList();
 static void showStoryList();
+static void showNoContent();
+static void applyParentalConfig();
 
 static void applySettings() {
   SettingsData& s = Settings::data();
@@ -96,9 +98,61 @@ static void applySettings() {
 
 /* ---------------- 会话记忆 (FRAM) ---------------- */
 
+static void applyContentFilters() {
+  Storage::setCategoryFilter(Parental::catMask(), Parental::allowlistEnabled());
+  Story::setStoryFilter(Parental::storyMask(), Parental::allowlistEnabled());
+}
+
+static void setVolumeLimited(int v) {
+  int cv = Parental::clampVolume(v);
+  Player::setVolume(cv);
+  Session::setVolume((uint8_t)cv);
+}
+
+static bool categoryVisible(int actual) {
+  for (int i = 0; i < Storage::viewCatCount(); i++) {
+    if (Storage::viewCatActual(i) == actual) return true;
+  }
+  return false;
+}
+
+static void applyParentalConfig() {
+  applyContentFilters();
+
+  int v = Parental::clampVolume((int)Session::volume());
+  if (v != (int)Session::volume()) Session::setVolume((uint8_t)v);
+  Player::setVolume(v);
+
+  if (Parental::allowlistEnabled()) {
+    int ci = Storage::currentCategory();
+    if (!categoryVisible(ci) && s_screen != Screen::Locked) {
+      if (Story::active()) {
+        Story::stop();
+        showStoryList();
+      } else {
+        Player::stop();
+        showMusicList();
+      }
+    }
+    int si = Story::currentIndex();
+    if (si >= 0 && !Parental::storyAllowed(si)) {
+      Story::stop();
+      showStoryList();
+    }
+  }
+
+  /* 白名单变化后可见列表可能整体改变, 当前列表页需要重绘 */
+  if (s_screen == Screen::MusicList) {
+    showMusicList();
+  } else if (s_screen == Screen::StoryList || s_screen == Screen::StoryError) {
+    showStoryList();
+  }
+}
+
 /* 音量: Session 是唯一真值源 (开机从 FRAM 恢复), 用绝对值下发避免与异步状态漂移 */
 static void changeVolume(int delta) {
   uint8_t v = (uint8_t)constrain((int)Session::volume() + delta, 0, VOL_MAX);
+  v = (uint8_t)Parental::clampVolume(v);
   Player::setVolume(v);
   Session::setVolume(v);            // 变化时落盘 (3 字节小记录, 拧旋钮也不拖慢 UI)
 }
@@ -107,9 +161,9 @@ static void changeVolume(int delta) {
 static void rememberPosition() {
   PlayerStatus st = Player::status();
   int ci = Storage::currentCategory();
-  const char* category = (ci > 0) ? Storage::catName(ci) : "";
+  const char* cat  = (ci > 0) ? Storage::catName(ci) : "";   // 0 = 全部歌曲, 存空串
   const char* path = (st.index >= 0) ? Storage::path(st.index) : "";
-  Session::setPosition(category, path);
+  Session::setPosition(cat, path, st.index);
 }
 
 static void enterSettings() {
@@ -131,6 +185,8 @@ static void exitSettings() {
     showTrackList();
   } else if (s_settingsBack == Screen::StoryList || s_settingsBack == Screen::StoryError) {
     showStoryList();
+  } else if (s_settingsBack == Screen::NoContent) {
+    showNoContent();
   } else {
     s_screen = Screen::Main;
     Ui::drawStatic();
@@ -138,7 +194,7 @@ static void exitSettings() {
   }
 }
 
-/* 调整设置项: item 0=亮度, 1=旋转, 2=EQ, 3=自动息屏; delta 为编码器步数/单击 +1 */
+/* 调整设置项: item 0=亮度, 1=旋转, 2=EQ; delta 为编码器步数/单击 +1 */
 static void adjustSetting(int item, int delta) {
   SettingsData& s = Settings::data();
 
@@ -156,11 +212,6 @@ static void adjustSetting(int item, int delta) {
     s.eq = (EqPreset)e;
     Player::setEq(s.eq);
     Ui::refreshSettings(s, item);
-  } else if (item == 3) {
-    int count = (int)SleepTimeout::COUNT;
-    int value = ((int)s.sleepTimeout + delta % count + count) % count;
-    s.sleepTimeout = (uint8_t)value;
-    Ui::refreshSettings(s, item);
   }
 }
 
@@ -177,6 +228,7 @@ static void refreshCatalog() {
     return;
   }
   auto result = Catalog::refresh();
+  applyContentFilters();
   s_musicSel = s_trackSel = s_storySel = 0;
   s_trackPlaying = -1;
   s_settingsBack = Screen::MusicList;
@@ -200,16 +252,28 @@ static void refreshCatalog() {
 
 /* ---------------- 音乐分类 ---------------- */
 
-/* 绘制音乐分类列表 (置顶"全部歌曲" + /music 一级子文件夹) */
+static void showNoContent() {
+  s_screen = Screen::NoContent;
+  Ui::drawNoContent();
+}
+
+/* 绘制音乐分类列表 (置顶"全部歌曲" + /music 一级子文件夹, 受家长白名单过滤) */
 static void showMusicList() {
-  int n = Storage::catCount();
+  int n = Storage::viewCatCount();
+  if (n == 0) {
+    if (Story::viewCount() > 0) showStoryList();
+    else                        showNoContent();
+    return;
+  }
   if (s_musicSel >= n) s_musicSel = 0;
+  if (s_musicSel < 0) s_musicSel = 0;
   s_screen = Screen::MusicList;
   Ui::drawMusicList(n, s_musicSel);
 }
 
 /* 播放当前分类中的第 i 首, 并回到播放界面 */
 static void playMusicIndex(int i) {
+  if (!Parental::canPlay()) return;
   s_trackSel = i;
   Player::playIndex(i, true);
   s_screen = Screen::Main;
@@ -228,50 +292,63 @@ static void showTrackList() {
   Ui::drawTrackList(n, s_trackSel, s_trackPlaying);
 }
 
-/* 选定分类 (0=全部歌曲) 并开始播放该分类第一首 */
-static void startMusicCategory(int ci) {
+/* 选定可见分类 (0=全部歌曲) 并开始播放该分类第一首 */
+static void startMusicCategory(int viewCi) {
+  int ci = Storage::viewCatActual(viewCi);
+  if (ci < 0 || !categoryVisible(ci)) return;
   if (!Storage::selectCategory(ci)) {          // 该分类无曲目: 停留列表
     Serial.printf("[MUS] category %d has no track\n", ci);
     return;
   }
-  s_musicSel = ci;
+  s_musicSel = viewCi;
   playMusicIndex(0);
 }
 
 /* ---------------- 开机恢复上次收听位置 ---------------- */
 
-/* 按 FRAM 记忆还原分类与曲目: 分类与完整路径均以 64 位哈希匹配，绝不使用旧下标。
+/* 按 FRAM 记忆还原分类与曲目: 分类按名称、曲目按完整路径匹配 (换卡/增删歌后下标会错位)。
    成功则停在播放页并把该曲目载入为"暂停"状态, 按 OK 才出声; 返回 false 表示应回分类列表。 */
 static bool restoreSession() {
-  const uint64_t hash = Session::trackHash();
-  if (!hash) return false;
-
-  const uint64_t categoryHash = Session::categoryHash();
-  int ci = 0;
-  if (categoryHash) {
-    ci = -1;
-    for (int i = 1; i < Storage::catCount(); ++i) {
-      if (Session::hashPath(Storage::catName(i)) == categoryHash) { ci = i; break; }
+  const char* cat = Session::category();
+  int view = -1;
+  int ncat = Storage::viewCatCount();
+  for (int i = 0; i < ncat; i++) {
+    int actual = Storage::viewCatActual(i);
+    if (cat[0]) {
+      if (strcmp(Storage::viewCatName(i), cat) == 0) { view = i; break; }
+    } else if (actual == 0) {
+      view = i; break;
     }
-    if (ci < 0) return false;
   }
-  if (!Storage::selectCategory(ci)) return false;
+  if (view < 0) return false;                    // 记住的分类已不存在或被家长关闭
 
-  for (int ti = 0; ti < Storage::count(); ++ti) {
-    const char* path = Storage::path(ti);
-    if (Session::hashPath(path) != hash) continue;
-    s_musicSel     = ci;
-    s_trackSel     = ti;
-    s_trackPlaying = ti;
-    Player::playIndex(ti, false);                // 载入但不自动播放
-    Serial.printf("[SES] resume cat=%d #%d %s\n", ci, ti, path);
-    s_screen = Screen::Main;
-    Ui::drawStatic();
-    Ui::update(Player::status(), Hall::detected());
-    return true;
+  int ci = Storage::viewCatActual(view);
+  if (!categoryVisible(ci) || !Storage::selectCategory(ci)) return false;
+
+  s_musicSel = view;                             // 列表光标也停在记住的分类上
+
+  int n  = Storage::count();
+  int ti = -1;
+  const char* path = Session::trackPath();
+  if (path[0]) {
+    for (int i = 0; i < n; i++) {
+      if (strcmp(Storage::path(i), path) == 0) { ti = i; break; }
+    }
   }
+  if (ti < 0) {                                  // 路径没命中: 退回下标, 再不行就不恢复曲目
+    int idx = Session::trackIndex();
+    if (idx >= 0 && idx < n) ti = idx;
+  }
+  if (ti < 0) return false;                      // 只记住了分类, 由调用方显示分类列表
 
-  return false;                                  // 不按旧下标兜底，避免换卡后误播
+  s_trackSel     = ti;
+  s_trackPlaying = ti;
+  Player::playIndex(ti, false);                  // 载入但不自动播放
+  Serial.printf("[SES] resume cat=\"%s\" #%d %s\n", cat, ti, Storage::path(ti));
+  s_screen = Screen::Main;
+  Ui::drawStatic();
+  Ui::update(Player::status(), Hall::detected());
+  return true;
 }
 
 /* ---------------- 故事模式 ---------------- */
@@ -285,15 +362,16 @@ static void refreshStoryBar() {
                    st.curSec, st.durSec, st.volume, st.paused);
 }
 
-/* 绘制故事列表; 一个故事都没有时进入提示页 */
+/* 绘制故事列表 (受家长白名单过滤); 一个故事都没有时回音乐或提示页 */
 static void showStoryList() {
-  int n = Story::count();
+  int n = Story::viewCount();
   if (n == 0) {
-    s_screen = Screen::StoryError;
-    Ui::boot("NO STORY FOUND", "Copy story folders to /story");
+    if (Storage::viewCatCount() > 0) showMusicList();
+    else                             showNoContent();
     return;
   }
   if (s_storySel >= n) s_storySel = 0;
+  if (s_storySel < 0) s_storySel = 0;
   s_screen = Screen::StoryList;
   Ui::drawStoryList(n, s_storySel);
 }
@@ -309,14 +387,17 @@ static void exitStoryMode() {
   showMusicList();                  // 回音乐分类列表
 }
 
-static void startStory(int i) {
+static void startStory(int view) {
+  int actual = Story::viewActual(view);
+  if (actual < 0 || !Parental::storyAllowed(actual) || !Parental::canPlay()) return;
+
   /* 按下确定立刻进入加载画面; 真实的目录/时间轴读取就在加载页显示期间完成
      (此时列表页没有音频播放, 阻塞是安全的) */
-  String name = Story::title(i);
+  String name = Story::title(actual);
   Ui::setStoryTitle(name.c_str());          // 控制条显示的故事名
   Ui::drawStoryLoadingBegin(name.c_str());
   Display::present(true);          // 在同步读取目录前提交加载页
-  if (!Story::open(i)) {
+  if (!Story::open(actual)) {
     s_screen = Screen::StoryError;
     Ui::boot("故事文件不可用", "双击OK进入设置刷新列表");
     return;
@@ -328,6 +409,114 @@ static void startStory(int i) {
   Ui::drawStoryFrame(Story::panelPath());
   Ui::invalidateStoryBar();          // 插画覆盖了控制条区, 需整体重铺
   refreshStoryBar();
+}
+
+/* BLE 下发的是实际故事下标: 找到它在当前白名单视图中的位置 */
+static void startStoryActual(int actual) {
+  for (int i = 0; i < Story::viewCount(); i++) {
+    if (Story::viewActual(i) == actual) { startStory(i); return; }
+  }
+}
+
+/* BLE 下发的播放控制: 在 main loop 里执行, 保证 UI/Player 访问在同一任务 */
+static void handleBleCommand(const Ble::Command& c) {
+  switch (c.action) {
+    case Ble::Action::Volume:
+      setVolumeLimited(c.value);
+      break;
+
+    case Ble::Action::Play:
+      if (!Parental::canPlay()) break;
+      if (Player::paused()) Player::toggle();
+      break;
+
+    case Ble::Action::Pause:
+      if (!Player::paused()) Player::toggle();
+      break;
+
+    case Ble::Action::Toggle:
+      if (Parental::canPlay()) Player::toggle();
+      break;
+
+    case Ble::Action::Next:
+    case Ble::Action::Prev: {
+      if (!Parental::canPlay()) break;
+      if (Story::active()) {
+        int n = Story::viewCount();
+        if (n <= 0) break;
+        int cur = Story::currentIndex();
+        int pos = 0;
+        for (int i = 0; i < n; i++) if (Story::viewActual(i) == cur) { pos = i; break; }
+        int next = (c.action == Ble::Action::Next) ? (pos + 1) % n : (pos - 1 + n) % n;
+        startStory(next);
+      } else if (c.action == Ble::Action::Next) {
+        Player::next();
+      } else {
+        Player::prev();
+      }
+      break;
+    }
+
+    case Ble::Action::Stop:
+      if (Story::active()) {
+        Story::stop();
+        showStoryList();
+      } else {
+        Player::stop();
+        showMusicList();
+      }
+      break;
+
+    case Ble::Action::PlayStory:
+      startStoryActual(c.value);
+      break;
+
+    default:
+      break;
+  }
+}
+
+static const char* lockTitle(Parental::Lock lk) {
+  switch (lk) {
+    case Parental::Lock::DailyLimit: return "今日故事时间已用完";
+    case Parental::Lock::Bedtime:    return "该睡觉啦";
+    case Parental::Lock::Remote:     return "家长已暂停";
+    default:                         return "家长控制中";
+  }
+}
+
+static void armLock(Parental::Lock lk) {
+  if (s_screen != Screen::Locked) {
+    s_lockedBack = (s_screen == Screen::StoryPlay || s_screen == Screen::StoryList ||
+                    s_screen == Screen::StoryError)
+                       ? Screen::StoryList
+                       : Screen::MusicList;
+    if (Story::active()) Story::stop();
+    else                 Player::stop();
+    s_screen = Screen::Locked;
+  }
+  if (s_lockShown == lk) return;
+  s_lockShown = lk;
+
+  char l1[64] = {0};
+  char l2[64] = {0};
+  if (lk == Parental::Lock::DailyLimit) {
+    snprintf(l1, sizeof(l1), "今日额度已用完");
+    snprintf(l2, sizeof(l2), "明天 00:00 恢复 · 家长可调整额度");
+    Ui::drawLock(lockTitle(lk), l1, l2);
+  } else if (lk == Parental::Lock::Bedtime) {
+    snprintf(l1, sizeof(l1), "休息时间 %02u:%02u - %02u:%02u",
+             (unsigned)(Parental::bedtimeStartMin() / 60),
+             (unsigned)(Parental::bedtimeStartMin() % 60),
+             (unsigned)(Parental::bedtimeEndMin() / 60),
+             (unsigned)(Parental::bedtimeEndMin() % 60));
+    snprintf(l2, sizeof(l2), "明天早上再见");
+    Ui::drawLock(lockTitle(lk), l1, l2);
+  } else {
+    snprintf(l1, sizeof(l1), "故事机已锁定");
+    snprintf(l2, sizeof(l2), "家长可在小程序中解锁");
+    Ui::drawLock(lockTitle(lk), l1, l2);
+  }
 }
 
 /* ---------------- setup / loop ---------------- */
@@ -345,11 +534,12 @@ void setup() {
   Serial.printf("[SYS] FRAM %s\n", Fram::ok() ? "OK" : "NOT FOUND");
   Settings::load();                 // 读取掉电保存的配置
   Session::load();                  // 读取掉电保存的音量/上次播放位置
+  Parental::begin();                // 家长策略 + 今日用量 + 绑定信息
 #ifdef SESSION_SELFTEST
   Session::selfTest();              // 临时自检开关: -DSESSION_SELFTEST
 #endif
-  Serial.printf("[SES] FRAM 记忆: volume=%u, trackHash=%llx\n",
-                Session::volume(), (unsigned long long)Session::trackHash());
+  Serial.printf("[SES] FRAM 记忆: volume=%u, cat=\"%s\"\n",
+                Session::volume(), Session::category());
   applySettings();
 
   Fonts::begin();                   // 内置 efont 中文点阵字体
@@ -362,8 +552,6 @@ void setup() {
   Serial.printf("[SYS] HALL level=%d (%s)\n",
                 Hall::level(), Hall::detected() ? "card in" : "card out");
   Ui::setHall(Hall::detected());     // 顶栏通知位: 卡片插入状态
-  s_lastHallDetected = Hall::detected();
-  s_lastActivity = millis();
 
   if (!Storage::begin()) {
     Ui::boot("SD CARD ERROR", "Insert TF card then reset");
@@ -373,20 +561,28 @@ void setup() {
       Ui::boot("列表读取失败", "请在设置中刷新列表");
     } else if (result == Catalog::Result::SaveFailed) {
       Ui::boot("索引保存失败", "本次列表可用，请检查SD卡");
-    } else if (Storage::totalCount() == 0) {
+    } else if (Storage::totalCount() == 0 && Story::count() == 0) {
       Ui::boot("NO MUSIC FOUND", "Copy MP3 folders to /music");
     } else {
       Ui::boot("MUSIC PLAYER", "Ready - press OK to select");
     }
+    applyContentFilters();           // 家长白名单视图
   }
   Display::present(true);
   delay(600);
 
   Player::begin();
   Player::setEq(Settings::data().eq);
-  Player::setVolume(Session::volume());   // 恢复上次音量
+  setVolumeLimited(Session::volume());   // 恢复上次音量, 并套用家长音量范围
+  Ble::begin();
 
-  if (Storage::totalCount() == 0) {
+  if (!Parental::bound()) {          // 首次启动显示绑定码, BLE 同时已可连接
+    Ui::drawBindCode(Parental::bindCode());
+    Display::present(true);
+    delay(2500);
+  }
+
+  if (Storage::totalCount() == 0 && Story::count() == 0) {
     s_screen = Screen::Main;
     Ui::drawStatic();
     Ui::update(Player::status(), Hall::detected());
@@ -402,39 +598,53 @@ void loop() {
   } presentOnExit;
   /* 解码在独立 FreeRTOS 音频任务里持续运行, 这里只处理界面与输入 */
 
-  const uint32_t now = millis();
-  const bool hallDetected = Hall::detected();
-  const bool hallChanged = hallDetected != s_lastHallDetected;
-  s_lastHallDetected = hallDetected;
-  const bool inputActive = Input::active();
-  Ui::setHall(hallDetected);        // 卡片插拔: 任意界面都即时更新顶栏通知位
+  Ui::setHall(Hall::detected());    // 卡片插拔: 任意界面都即时更新顶栏通知位
 
-  if (s_screenOff) {
-    if (!inputActive && !hallChanged) return;
-    s_screenOff = false;
-    Display::setScreenOff(false);
-    s_lastActivity = now;
-    Input::encoderSteps();          // 唤醒用旋钮动作不影响音量/光标
-    s_wakeRelease = inputActive;    // 首次按键仅唤醒，等待松开后再接收操作
+  /* BLE 通道: 先收包/下发动作, 再由主循环统一执行 */
+  Ble::loop();
+  Ble::Command bleCmd;
+  for (int i = 0; i < 4 && Ble::takeCommand(bleCmd); i++) handleBleCommand(bleCmd);
+
+  PlayerStatus ps = Player::status();
+  Parental::tick(ps.playing && !ps.paused);
+
+  if (Ble::takeConfigChanged()) applyParentalConfig();
+
+  Parental::Lock lk = Parental::lock();
+  if (lk != Parental::Lock::None) {
+    armLock(lk);
     return;
   }
-  if (s_wakeRelease) {
-    if (!inputActive) {
-      s_wakeRelease = false;
-      Input::encoderSteps();
-    }
-    return;
-  }
-
-  if (inputActive || hallChanged) s_lastActivity = now;
-  const uint32_t sleepMs = Settings::sleepTimeoutMs();
-  if (sleepMs && now - s_lastActivity >= sleepMs) {
-    s_screenOff = true;
-    Display::setScreenOff(true);
+  if (s_screen == Screen::Locked) {
+    s_lockShown = Parental::Lock::None;
+    if (s_lockedBack == Screen::StoryList) showStoryList();
+    else                                   showMusicList();
     return;
   }
 
   switch (s_screen) {
+
+  /* ---------------- 无内容 / 锁定占位 ---------------- */
+  case Screen::NoContent: {
+    int8_t enc = Input::encEvent();
+    if (enc == 2) { enterStoryMode(); return; }
+    if (enc == 1) {
+      if (Storage::viewCatCount() > 0) showMusicList();
+      else if (Story::viewCount() > 0) showStoryList();
+      return;
+    }
+    int8_t ok = Input::okEvent();
+    if (ok == 2) { enterSettings(); return; }
+    if (ok == 1) {
+      if (Storage::viewCatCount() > 0) showMusicList();
+      else if (Story::viewCount() > 0) showStoryList();
+      return;
+    }
+    break;
+  }
+
+  case Screen::Locked:
+    break;
 
   /* ---------------- 音乐分类列表 ---------------- */
   case Screen::MusicList: {
@@ -446,7 +656,7 @@ void loop() {
     if (Input::nextEvent() == 1) move += 1;
     if (Input::prevEvent() == 1) move -= 1;
 
-    int n = Storage::catCount();
+    int n = Storage::viewCatCount();
     if (move != 0 && n > 0) {
       s_musicSel = (int)((s_musicSel + move % n + n) % n);
       Ui::updateMusicList(n, s_musicSel);
@@ -547,7 +757,7 @@ void loop() {
 
     switch (Input::okEvent()) {
       case 1:
-        if (s_sel == 4) { refreshCatalog(); return; }
+        if (s_sel == 3) { refreshCatalog(); return; }
         adjustSetting(s_sel, +1); break;
       case 2: exitSettings();           return;  // 双击: 保存返回
       default: break;
@@ -568,7 +778,7 @@ void loop() {
     if (Input::nextEvent() == 1) move += 1;
     if (Input::prevEvent() == 1) move -= 1;
 
-    int n = Story::count();
+    int n = Story::viewCount();
     if (move != 0 && n > 0) {
       s_storySel = (int)((s_storySel + move % n + n) % n);
       Ui::updateStoryList(n, s_storySel);

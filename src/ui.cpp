@@ -46,9 +46,9 @@ void palette() {
   cCoverBg  = g.color565(124, 201, 221);   // #7cc9dd 封面底
   cMoon     = g.color565(255, 244, 168);   // #fff4a8 月亮
   cBush     = g.color565( 47, 155, 104);   // #2f9b68 灌木
-  /* 顶栏故事卡图标: 暖白卡面 + 绿色角标，黄书页与整体配色呼应 */
-  cCardLt = g.color565(255, 250, 232);     // 暖白实体故事卡
-  cCardDk = g.color565( 45, 206,  27);     // #2dce1b 已插入的绿色角标
+  /* 霍尔卡片图标 (按设计稿 SVG 取色) */
+  cCardLt = g.color565(191, 244, 186);     // #bff4ba 卡片本体 / 芯片内圆孔
+  cCardDk = g.color565( 45, 206,  27);     // #2dce1b 芯片 / 右侧条
 }
 
 /* ---------------- 布局常量 (320x240, 对照 ui.html 1x) ----------------
@@ -283,8 +283,9 @@ void drawStatus(const PlayerStatus& st) {
   g.drawString(txt, INFO_X + 14, 146);
 }
 
-/* 顶栏最右侧的故事卡图标: 暖白卡面、顶部三道切口、黄色打开书、绿色角标。
-   仅在检出实体故事卡时显示; 没有卡片时什么都不画 (不占位, 音量文字自动回到最右缘)。
+/* 顶栏最右侧的霍尔图标 (卡片), 造型按设计稿 SVG 等比缩放:
+   浅绿圆角卡片 + 左侧深绿芯片 (含浅绿圆孔) + 右侧深绿条。
+   仅在检出实体卡片时显示; 没有卡片时什么都不画 (不占位, 音量文字自动回到最右缘)。
    1x 直绘 (不做抗锯齿), 卡片 18x13 贴在顶栏右缘。 */
 void drawHallIcon(bool detected) {
   int v = detected ? 1 : 0;
@@ -292,30 +293,15 @@ void drawHallIcon(bool detected) {
   s_lastHall = v;
 
   auto& g = Display::canvas();
-  const int X = 298, Y = 9;                  // 卡片左上角 (右缘留 4px)
+  const int X = 298, Y = 10;                 // 卡片左上角 (右缘留 4px)
 
   g.fillRect(X - 2, Y - 2, 22, 17, cCoral);  // 先清掉原图标位
   if (!detected) return;                     // 无霍尔: 不展示
 
-  // 18x13 像素故事卡: 用直线块而非圆角，保证小尺寸下轮廓和书页清楚。
-  g.fillRect(X,     Y + 1, 18, 11, cInk);
-  g.fillRect(X + 1, Y,     16, 13, cInk);
-  g.fillRect(X + 2, Y + 2, 14,  9, cCardLt);
-
-  // 三道顶端切口，借用实体卡的童趣轮廓，而不传达“存储卡”含义。
-  g.fillRect(X + 4,  Y + 2, 2, 3, cInk);
-  g.fillRect(X + 8,  Y + 2, 2, 3, cInk);
-  g.fillRect(X + 12, Y + 2, 2, 3, cInk);
-
-  // 迷你打开书：深蓝封边、两页暖黄纸和中间书脊。
-  g.fillRect(X + 3, Y + 6, 11, 5, cInk);
-  g.fillRect(X + 4, Y + 7,  4, 3, cYellow);
-  g.fillRect(X + 9, Y + 7,  4, 3, cYellow);
-  g.fillRect(X + 8, Y + 7,  1, 4, cInk);
-
-  // 绿色角标表示故事卡在位；避开书页，缩小后仍能辨认。
-  g.fillRect(X + 14, Y + 2, 2, 3, cCardDk);
-  g.fillRect(X + 13, Y + 2, 3, 2, cCardDk);
+  g.fillRoundRect(X,      Y,     18, 13, 3, cCardLt);   // 卡片本体
+  g.fillRoundRect(X +  2, Y +  3,  8,  8, 2, cCardDk);  // 芯片
+  g.fillCircle   (X +  6, Y +  7,      2,     cCardLt); // 芯片内圆孔
+  g.fillRoundRect(X + 11, Y +  5,  5,  3, 1, cCardDk);  // 右侧条
 }
 
 /* ---------------- 控制栏 ---------------- */
@@ -409,22 +395,15 @@ void settingsBands(int y, EqPreset eq) {
 }
 
 void settingsRows(const SettingsData& s, int selected) {
-  // 四行窗口: 第五项选中时向下滚动一行，保留亮度条和 EQ 示意的原始尺寸。
+  // 清除旧选中阴影；整个过程只发生在画布里。
   Display::canvas().fillRect(8, 34, 306, 183, cPaper);
   const int y0 = 34, rh = 44;
-  const int top = selected >= 4 ? 1 : 0;
-  for (int row = 0; row < 4; ++row) {
-    const int item = top + row;
-    const int y = y0 + row * rh;
-    if (item == 0) settingsRow(y, "亮度", String(s.brightness) + "%", selected == item, s.brightness);
-    else if (item == 1) settingsRow(y, "旋转方向",
-                                    (s.rotation == 1) ? "横屏 0°" : "横屏 180°", selected == item, -1);
-    else if (item == 2) {
-      settingsRow(y, "均衡器", eqLabelCN(s.eq), selected == item, -1);
-      settingsBands(y, s.eq);
-    } else if (item == 3) settingsRow(y, "自动息屏", Settings::sleepTimeoutLabel(), selected == item, -1);
-    else settingsRow(y, "刷新列表", "单击OK", selected == item, -1);
-  }
+  settingsRow(y0, "亮度", String(s.brightness) + "%", selected == 0, s.brightness);
+  settingsRow(y0 + rh, "旋转方向",
+              (s.rotation == 1) ? "横屏 0°" : "横屏 180°", selected == 1, -1);
+  settingsRow(y0 + rh * 2, "均衡器", eqLabelCN(s.eq), selected == 2, -1);
+  settingsBands(y0 + rh * 2, s.eq);
+  settingsRow(y0 + rh * 3, "刷新列表", "单击OK", selected == 3, -1);
 }
 
 } // namespace
@@ -528,6 +507,80 @@ void settingsMessage(const char* message) {
   g.drawCenterString(fit(String(message), 304).c_str(), 160, 220);
 }
 
+/* 家长锁定页: 所有输入由 main 屏蔽, 只显示原因与解锁提示 */
+void drawLock(const char* title, const char* line1, const char* line2) {
+  palette();
+  auto& g = Display::canvas();
+  g.fillScreen(cPaper);
+  drawTopBarBase();
+
+  const int cx = 160, y = 48;
+  g.fillRoundRect(cx - 36, y, 72, 34, 12, cCoralDk);
+  g.fillTriangle(cx - 34, y + 30, cx + 34, y + 30, cx, y + 66, cCoralDk);
+  g.fillRoundRect(cx - 32, y + 3, 64, 28, 10, cCoral);
+  g.fillTriangle(cx - 28, y + 28, cx + 28, y + 28, cx, y + 58, cCoral);
+  g.fillCircle(cx, y + 20, 13, cYellow);
+  g.setFont(Fonts::body());
+  g.setTextColor(cCoral, cYellow);
+  g.drawCenterString("护", cx, y + 12);
+
+  g.setFont(Fonts::title());
+  g.setTextColor(cInk, cPaper);
+  g.drawCenterString(fit(String(title ? title : "家长控制中"), 296).c_str(), 160, 124);
+
+  g.setFont(Fonts::body());
+  g.setTextColor(cInkSoft, cPaper);
+  if (line1) g.drawCenterString(fit(String(line1), 300).c_str(), 160, 158);
+  if (line2) g.drawCenterString(fit(String(line2), 300).c_str(), 160, 182);
+
+  g.setFont(Fonts::small());
+  g.setTextColor(cInkSoft, cPaper);
+  g.drawCenterString("家长可在小程序中解锁", 160, 214);
+}
+
+/* 首次绑定页: 显示 6 位绑定码, 供家长在小程序输入 */
+void drawBindCode(const char* code) {
+  palette();
+  auto& g = Display::canvas();
+  g.fillScreen(cPaper);
+  drawTopBarBase();
+  g.setFont(Fonts::title());
+  g.setTextColor(cInk, cPaper);
+  g.drawCenterString("故事机配对", 160, 58);
+  g.setFont(Fonts::body());
+  g.setTextColor(cInkSoft, cPaper);
+  g.drawCenterString("请在小程序中输入绑定码", 160, 92);
+
+  g.fillRoundRect(96, 118, 128, 54, 12, TFT_WHITE);
+  g.drawRoundRect(96, 118, 128, 54, 12, cTrackBd);
+  g.setFont(Fonts::title());
+  g.setTextColor(cCoral, TFT_WHITE);
+  char spaced[16];
+  snprintf(spaced, sizeof(spaced), "%c %c %c %c %c %c",
+           code ? code[0] : '0', code ? code[1] : '0', code ? code[2] : '0',
+           code ? code[3] : '0', code ? code[4] : '0', code ? code[5] : '0');
+  g.drawCenterString(spaced, 160, 132);
+
+  g.setFont(Fonts::small());
+  g.setTextColor(cInkSoft, cPaper);
+  g.drawCenterString("绑定码仅在首次配对时显示", 160, 196);
+}
+
+/* 家长未开放任何内容 */
+void drawNoContent() {
+  palette();
+  auto& g = Display::canvas();
+  g.fillScreen(cPaper);
+  drawTopBarBase();
+  g.setFont(Fonts::title());
+  g.setTextColor(cInk, cPaper);
+  g.drawCenterString("家长未开放内容", 160, 92);
+  g.setFont(Fonts::body());
+  g.setTextColor(cInkSoft, cPaper);
+  g.drawCenterString("请在家长控制中开启故事或音乐", 160, 132);
+  g.drawCenterString("保存后设备会自动刷新列表", 160, 160);
+}
+
 void refreshSettings(const SettingsData& s, int selected) {
   palette();
   settingsRows(s, selected);
@@ -576,7 +629,7 @@ namespace {
     g.drawString(fit(String(name), 206).c_str(), 54, y + 9);
 
     char b[16];
-    snprintf(b, sizeof(b), "%d首", Storage::catTrackCount(i));
+    snprintf(b, sizeof(b), "%d首", Storage::viewCatTrackCount(i));
     g.setFont(Fonts::small());
     g.setTextColor(selected ? cInk : cInkSoft, bg);
     g.drawRightString(b, 296, y + 14);
@@ -596,7 +649,7 @@ namespace {
     int y = MUSIC_Y0 + r * MUSIC_RH;
     g.fillRect(8, y, 306, MUSIC_RH, cPaper);
     int i = top + r;
-    if (i < count) musicRow(y, Storage::catName(i), i, i == selected);
+    if (i < count) musicRow(y, Storage::viewCatName(i), i, i == selected);
   }
 
   void musicRows(int count, int selected) {
@@ -773,7 +826,7 @@ namespace {
     int y = STORY_Y0 + r * STORY_RH;
     g.fillRect(8, y, 306, STORY_RH, cPaper);
     int i = top + r;
-    if (i < count) storyRow(y, Story::title(i), i == selected);
+    if (i < count) storyRow(y, Story::viewTitle(i), i == selected);
   }
 
   void storyRows(int count, int selected) {

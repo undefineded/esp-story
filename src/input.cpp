@@ -151,13 +151,4 @@ int encoderSteps() {
   return -steps;
 }
 
-bool active() {
-  if (digitalRead(BTN_OK) == LOW || digitalRead(BTN_NEXT) == LOW ||
-      digitalRead(BTN_LAST) == LOW || digitalRead(ENC_SW) == LOW) return true;
-  noInterrupts();
-  bool moved = s_encAcc != 0;
-  interrupts();
-  return moved;
-}
-
 }

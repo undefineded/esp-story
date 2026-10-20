@@ -20,6 +20,25 @@ namespace {
   bool    s_ready = false;
   bool    s_scanOk = true;
 
+  /* 家长白名单视图 */
+  uint64_t s_catMask   = ~0ULL;
+  bool     s_catFilter = false;
+  int      s_view[MAX_CATEGORIES + 1];
+  int      s_viewCount = 0;
+
+  void rebuildView() {
+    s_viewCount = 0;
+    bool allAllowed = true;
+    for (int i = 1; i <= s_catCount; i++) {
+      if (!(s_catMask & (1ULL << i))) { allAllowed = false; break; }
+    }
+    /* 白名单开启且存在被禁分类时, 隐藏聚合的"全部歌曲" */
+    if (!s_catFilter || allAllowed) s_view[s_viewCount++] = 0;
+    for (int i = 1; i <= s_catCount && s_viewCount <= MAX_CATEGORIES; i++) {
+      if (!s_catFilter || (s_catMask & (1ULL << i))) s_view[s_viewCount++] = i;
+    }
+  }
+
   bool isMp3(const char* n) {
     String s(n);
     s.toLowerCase();
@@ -73,12 +92,14 @@ namespace {
       if (!SD_MMC.mkdir(MUSIC_DIR)) return false;
       Serial.println("[SD ] /music not found, created it");
       buildPlaylist(0);
+      rebuildView();
       return true;
     }
     File root = SD_MMC.open(MUSIC_DIR);
     if (!root || !root.isDirectory()) {
       if (root) root.close();
       buildPlaylist(0);
+      rebuildView();
       return false;
     }
 
@@ -105,6 +126,7 @@ namespace {
               [](const Track& a, const Track& b) { return strcmp(a.path.c_str(), b.path.c_str()) < 0; });
 
     buildPlaylist(0);
+    rebuildView();
     Serial.printf("[SD ] %d MP3, %d category(ies) in %s\n", s_total, s_catCount, MUSIC_DIR);
     return s_scanOk;
   }
@@ -128,6 +150,7 @@ void clear() {
   for (auto& cat : s_cats) cat = "";
   s_total = s_catCount = 0;
   buildPlaylist(0);
+  rebuildView();
 }
 
 bool rescan() { clear(); return scan(); }
@@ -153,6 +176,7 @@ bool index(CatalogArchive& archive, bool reading, bool apply) {
     s_catCount = cats;
     s_total = tracks;
     buildPlaylist(0);
+    rebuildView();
   }
   return true;
 }
@@ -186,6 +210,27 @@ bool selectCategory(int ci) {
 int currentCategory() { return s_curCat; }
 
 int count() { return s_curCount; }
+
+void setCategoryFilter(uint64_t mask, bool enabled) {
+  s_catMask   = mask;
+  s_catFilter = enabled;
+  rebuildView();
+}
+
+int viewCatCount() { return s_viewCount; }
+
+int viewCatActual(int view) {
+  if (view < 0 || view >= s_viewCount) return 0;
+  return s_view[view];
+}
+
+const char* viewCatName(int view) {
+  return catName(viewCatActual(view));
+}
+
+int viewCatTrackCount(int view) {
+  return catTrackCount(viewCatActual(view));
+}
 
 const char* path(int index) {
   if (index < 0 || index >= s_curCount) return nullptr;

@@ -12,6 +12,9 @@ namespace Ui {
   void drawSettings(const SettingsData& s, int selected);  // 设置界面整屏绘制
   void refreshSettings(const SettingsData& s, int selected);  // 仅重绘设置行(避免阻塞音频)
   void settingsMessage(const char* message);
+  void drawLock(const char* title, const char* line1, const char* line2);
+  void drawBindCode(const char* code);
+  void drawNoContent();
 
   /* 音乐分类 */
   void drawMusicList(int count, int selected);      // 分类列表整屏绘制, 进入该屏时调用 (名称取自 Storage::catName)

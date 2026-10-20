@@ -14,6 +14,15 @@ namespace Story {
   int  count();                    // 故事数量
   const char* title(int i);        // 故事名 (文件夹名, UTF-8; 越界返回 "")
 
+  /* 家长内容白名单视图 */
+  void setStoryFilter(uint64_t mask, bool enabled);
+  int  viewCount();
+  const char* viewTitle(int view);
+  int  viewActual(int view);
+
+  int  currentIndex();             // 当前打开的故事实际下标 (-1 = 无)
+  const char* currentTitle();      // 当前故事名 ("" = 无)
+
   bool open(int i);                // 载入故事 i 的音频与时间轴, 失败返回 false
   void start();                    // 从第一幅插画开始播放
   void stop();                     // 停止播放并恢复音乐模式行为

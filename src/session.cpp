@@ -7,16 +7,20 @@ namespace {
   const uint16_t ADDR_POS    = 0x0020;    // 播放位置块
 
   const uint8_t VOL_MAGIC    = 'V';
-  const uint8_t POS_MAGIC[4] = { 'M', 'P', 'S', '2' };
+  const uint8_t POS_MAGIC[4] = { 'M', 'P', 'S', '1' };
+
+  /* 位置块头: magic(4) + 曲目下标(2) + 分类名长度(1) */
+  const size_t POS_HDR = 7;
 
   struct Data {
     uint8_t volume;
-    uint64_t categoryHash;
-    uint64_t trackHash;
+    int16_t index;
+    char    cat[Session::SESSION_CAT_MAX];
+    char    path[Session::SESSION_PATH_MAX];
   };
 
   /* 默认音量与 player.cpp 音频任务的初始值保持一致 */
-  Data s_data = { 4, 0, 0 };
+  Data s_data = { 4, -1, {0}, {0} };
 
   /* 已落盘内容的影子副本: 内容相同就不再写 (FRAM 寿命无限, 但 I2C 写会阻塞 loop) */
   uint8_t s_savedVolume = 0xFF;           // 0xFF = 未知, 下次必定写入
@@ -29,6 +33,11 @@ namespace {
     return s;
   }
 
+  /* 分类名合法性: 除空串外不允许含 '/' (与 Storage::index 的校验一致) */
+  bool catOk(const char* c) { return c[0] == 0 || strchr(c, '/') == nullptr; }
+
+  /* 曲目路径合法性: 空串(未播放)或以 /music/ 开头 */
+  bool pathOk(const char* p) { return p[0] == 0 || strncmp(p, "/music/", 7) == 0; }
 }
 
 namespace Session {
@@ -48,37 +57,41 @@ bool setVolume(uint8_t v) {
   return true;
 }
 
-uint64_t hashPath(const char* path) {
-  if (!path || !path[0]) return 0;
-  uint64_t hash = UINT64_C(14695981039346656037);
-  for (const uint8_t* p = (const uint8_t*)path; *p; ++p) {
-    hash ^= *p;
-    hash *= UINT64_C(1099511628211);
-  }
-  return hash;
-}
+const char* category()   { return s_data.cat; }
+const char* trackPath()  { return s_data.path; }
+int         trackIndex() { return s_data.index; }
 
-uint64_t trackHash() { return s_data.trackHash; }
-uint64_t categoryHash() { return s_data.categoryHash; }
+bool setPosition(const char* category, const char* trackPath, int trackIndex) {
+  char cat[SESSION_CAT_MAX]   = {0};
+  char path[SESSION_PATH_MAX] = {0};
+  if (category)  strncpy(cat,  category,  SESSION_CAT_MAX  - 1);
+  if (trackPath) strncpy(path, trackPath, SESSION_PATH_MAX - 1);
+  if (!catOk(cat) || !pathOk(path)) return false;
+  if (trackIndex < 0 || trackIndex >= MAX_TRACKS) trackIndex = -1;
 
-bool setPosition(const char* category, const char* trackPath) {
-  const uint64_t categoryHash = hashPath(category);
-  const uint64_t trackHash = hashPath(trackPath);
-  if (s_savedPosValid && s_savedPos.categoryHash == categoryHash &&
-      s_savedPos.trackHash == trackHash) {
+  if (s_savedPosValid && s_savedPos.index == trackIndex &&
+      strcmp(s_savedPos.cat, cat) == 0 && strcmp(s_savedPos.path, path) == 0) {
     return false;                            // 内容未变
   }
 
-  uint8_t buf[21];
-  memcpy(buf, POS_MAGIC, 4);
-  for (uint8_t i = 0; i < 8; ++i) buf[4 + i] = (uint8_t)(categoryHash >> (i * 8));
-  for (uint8_t i = 0; i < 8; ++i) buf[12 + i] = (uint8_t)(trackHash >> (i * 8));
-  buf[20] = checksum(buf, 20);
+  uint8_t buf[POS_HDR + SESSION_CAT_MAX + SESSION_PATH_MAX + 2];
+  size_t  n = 0;
+  memcpy(buf, POS_MAGIC, 4);                      n = 4;
+  buf[n++] = (uint8_t)(trackIndex & 0xFF);
+  buf[n++] = (uint8_t)((trackIndex >> 8) & 0xFF);
+  uint8_t catLen = (uint8_t)strlen(cat);
+  buf[n++] = catLen;
+  memcpy(buf + n, cat, catLen);                   n += catLen;
+  uint8_t pathLen = (uint8_t)strlen(path);
+  buf[n++] = pathLen;
+  memcpy(buf + n, path, pathLen);                 n += pathLen;
+  buf[n] = checksum(buf, n);                      n++;
 
-  Fram::write(ADDR_POS, buf, sizeof(buf));
+  Fram::write(ADDR_POS, buf, n);
 
-  s_data.categoryHash = categoryHash;
-  s_data.trackHash = trackHash;
+  s_data.index = (int16_t)trackIndex;
+  memcpy(s_data.cat,  cat,  SESSION_CAT_MAX);
+  memcpy(s_data.path, path, SESSION_PATH_MAX);
   s_savedPos      = s_data;
   s_savedPosValid = true;
   return true;
@@ -87,8 +100,8 @@ bool setPosition(const char* category, const char* trackPath) {
 void load() {
   /* 先复位成"无记忆"的默认值: 记录缺失/损坏时结果确定, 不会沿用上一次的内存值 */
   s_data.volume = 4;                 // 与 player.cpp 音频任务的初始音量一致
-  s_data.categoryHash = 0;
-  s_data.trackHash = 0;
+  s_data.index  = -1;
+  s_data.cat[0] = s_data.path[0] = 0;
   s_savedVolume   = 0xFF;            // 未知 -> 下次 setVolume 必定落盘
   s_savedPosValid = false;
 
@@ -100,14 +113,48 @@ void load() {
   }
   s_savedVolume = s_data.volume;
 
-  uint8_t buf[21] = {0};
-  Fram::read(ADDR_POS, buf, sizeof(buf));
-  if (memcmp(buf, POS_MAGIC, 4) != 0 || checksum(buf, 20) != buf[20]) return;
+  /* ---- 播放位置块: 分段读, 只读实际写过的字节 ---- */
+  uint8_t hdr[POS_HDR] = {0};
+  Fram::read(ADDR_POS, hdr, sizeof(hdr));
+  if (memcmp(hdr, POS_MAGIC, 4) != 0) return;
 
-  for (uint8_t i = 0; i < 8; ++i) {
-    s_data.categoryHash |= (uint64_t)buf[4 + i] << (i * 8);
-    s_data.trackHash |= (uint64_t)buf[12 + i] << (i * 8);
+  int16_t index  = (int16_t)(uint16_t)(hdr[4] | (hdr[5] << 8));
+  uint8_t catLen = hdr[6];
+  if (catLen >= SESSION_CAT_MAX) return;
+
+  uint8_t sum = checksum(hdr, sizeof(hdr));
+
+  char cat[SESSION_CAT_MAX] = {0};
+  if (catLen) {
+    uint8_t cbuf[SESSION_CAT_MAX];
+    Fram::read(ADDR_POS + POS_HDR, cbuf, catLen);
+    sum += checksum(cbuf, catLen);
+    memcpy(cat, cbuf, catLen);
   }
+
+  /* 分类名之后是"路径长度"字节 */
+  uint8_t pathLen = Fram::readByte((uint16_t)(ADDR_POS + POS_HDR + catLen));
+  sum += pathLen;
+  if (pathLen >= SESSION_PATH_MAX) return;
+
+  char path[SESSION_PATH_MAX] = {0};
+  if (pathLen) {
+    uint8_t pbuf[SESSION_PATH_MAX];
+    Fram::read((uint16_t)(ADDR_POS + POS_HDR + catLen + 1), pbuf, pathLen);
+    sum += checksum(pbuf, pathLen);
+    memcpy(path, pbuf, pathLen);
+  }
+
+  /* 尾部校验字节必须与逐段累加结果一致 */
+  uint8_t tail = Fram::readByte((uint16_t)(ADDR_POS + POS_HDR + catLen + 1 + pathLen));
+  if (tail != sum) return;
+
+  /* 语义校验: 记录可能来自旧固件或损坏, 不合法就整块丢弃 */
+  if (!catOk(cat) || !pathOk(path)) return;
+
+  s_data.index = (index >= 0 && index < MAX_TRACKS) ? index : -1;
+  memcpy(s_data.cat,  cat,  SESSION_CAT_MAX);
+  memcpy(s_data.path, path, SESSION_PATH_MAX);
   s_savedPos      = s_data;
   s_savedPosValid = true;
 }
@@ -126,43 +173,42 @@ void selfTest() {
   load();
   check("volume round-trip", volume() == 13);
 
-  /* 2. 位置往返 (含中文路径) */
+  /* 2. 位置往返 (含中文分类名与曲名) */
+  const char* cat  = "/music/1-2岁";                       // 故意传带前缀的名字, 应原样存
   const char* path = "/music/1-2岁/01-小星星.mp3";
-  uint64_t expectedCategoryHash = hashPath("1-2岁");
-  uint64_t expectedHash = hashPath(path);
-  setPosition("1-2岁", path);
+  setPosition("1-2岁", path, 7);
   load();
-  check("category hash round-trip", categoryHash() == expectedCategoryHash);
-  check("track hash round-trip", trackHash() == expectedHash);
+  check("category round-trip", strcmp(category(), "1-2岁") == 0);
+  check("track path round-trip", strcmp(trackPath(), path) == 0);
+  check("track index round-trip", trackIndex() == 7);
+  (void)cat;
 
   /* 3. 内容未变时不重写 */
-  check("no rewrite when unchanged", setPosition("1-2岁", path) == false);
+  check("no rewrite when unchanged", setPosition("1-2岁", path, 7) == false);
 
   /* 4. 校验和保护: 损坏一个字节后应整块丢弃 */
-  uint16_t bad = ADDR_POS + 15;
+  uint16_t bad = ADDR_POS + POS_HDR + 2;                   // 分类名中间
   Fram::writeByte(bad, (uint8_t)(Fram::readByte(bad) ^ 0xFF));
   load();
-  check("corrupt record rejected", trackHash() == 0);
+  check("corrupt record rejected", category()[0] == 0 && trackPath()[0] == 0);
 
-  /* 5. 任意长度路径均只保存固定长度哈希 */
-  char longPath[300];
-  memset(longPath, 'a', sizeof(longPath));
-  memcpy(longPath, "/music/", 7);
-  longPath[sizeof(longPath) - 5] = '.';
-  longPath[sizeof(longPath) - 4] = 'm';
-  longPath[sizeof(longPath) - 3] = 'p';
-  longPath[sizeof(longPath) - 2] = '3';
-  longPath[sizeof(longPath) - 1] = 0;
-  uint64_t longHash = hashPath(longPath);
-  setPosition("长分类", longPath);
+  /* 5. 超长名字截断后仍能往返 */
+  char longCat[80];
+  memset(longCat, 'A', sizeof(longCat));
+  longCat[sizeof(longCat) - 1] = 0;
+  setPosition(longCat, "/music/x.mp3", 1);
   load();
-  check("long path hash round-trip", trackHash() == longHash);
+  check("long name truncated", strlen(category()) == SESSION_CAT_MAX - 1);
 
-  /* 6. 收尾: 清成"无记忆"状态, 避免留下自检痕迹 */
+  /* 6. 非法内容拒绝写入 */
+  check("bad category rejected", setPosition("a/b", "/music/x.mp3", 1) == false);
+  check("bad path rejected",     setPosition("ok", "/story/x.mp3", 1) == false);
+
+  /* 7. 收尾: 清成"无记忆"状态, 避免留下自检痕迹 */
   setVolume(4);
-  setPosition("", "");
+  setPosition("", "", -1);
   load();
-  check("cleanup", volume() == 4 && trackHash() == 0);
+  check("cleanup", volume() == 4 && category()[0] == 0 && trackIndex() == -1);
 
   Serial.printf("[TEST] session selftest: %d passed, %d failed\n", pass, fail);
 }
