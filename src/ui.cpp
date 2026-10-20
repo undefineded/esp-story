@@ -46,9 +46,9 @@ void palette() {
   cCoverBg  = g.color565(124, 201, 221);   // #7cc9dd 封面底
   cMoon     = g.color565(255, 244, 168);   // #fff4a8 月亮
   cBush     = g.color565( 47, 155, 104);   // #2f9b68 灌木
-  /* 霍尔卡片图标 (按设计稿 SVG 取色) */
-  cCardLt = g.color565(191, 244, 186);     // #bff4ba 卡片本体 / 芯片内圆孔
-  cCardDk = g.color565( 45, 206,  27);     // #2dce1b 芯片 / 右侧条
+  /* 顶栏故事卡图标: 暖白卡面 + 绿色角标，黄书页与整体配色呼应 */
+  cCardLt = g.color565(255, 250, 232);     // 暖白实体故事卡
+  cCardDk = g.color565( 45, 206,  27);     // #2dce1b 已插入的绿色角标
 }
 
 /* ---------------- 布局常量 (320x240, 对照 ui.html 1x) ----------------
@@ -283,9 +283,8 @@ void drawStatus(const PlayerStatus& st) {
   g.drawString(txt, INFO_X + 14, 146);
 }
 
-/* 顶栏最右侧的霍尔图标 (卡片), 造型按设计稿 SVG 等比缩放:
-   浅绿圆角卡片 + 左侧深绿芯片 (含浅绿圆孔) + 右侧深绿条。
-   仅在检出实体卡片时显示; 没有卡片时什么都不画 (不占位, 音量文字自动回到最右缘)。
+/* 顶栏最右侧的故事卡图标: 暖白卡面、顶部三道切口、黄色打开书、绿色角标。
+   仅在检出实体故事卡时显示; 没有卡片时什么都不画 (不占位, 音量文字自动回到最右缘)。
    1x 直绘 (不做抗锯齿), 卡片 18x13 贴在顶栏右缘。 */
 void drawHallIcon(bool detected) {
   int v = detected ? 1 : 0;
@@ -293,15 +292,30 @@ void drawHallIcon(bool detected) {
   s_lastHall = v;
 
   auto& g = Display::canvas();
-  const int X = 298, Y = 10;                 // 卡片左上角 (右缘留 4px)
+  const int X = 298, Y = 9;                  // 卡片左上角 (右缘留 4px)
 
   g.fillRect(X - 2, Y - 2, 22, 17, cCoral);  // 先清掉原图标位
   if (!detected) return;                     // 无霍尔: 不展示
 
-  g.fillRoundRect(X,      Y,     18, 13, 3, cCardLt);   // 卡片本体
-  g.fillRoundRect(X +  2, Y +  3,  8,  8, 2, cCardDk);  // 芯片
-  g.fillCircle   (X +  6, Y +  7,      2,     cCardLt); // 芯片内圆孔
-  g.fillRoundRect(X + 11, Y +  5,  5,  3, 1, cCardDk);  // 右侧条
+  // 18x13 像素故事卡: 用直线块而非圆角，保证小尺寸下轮廓和书页清楚。
+  g.fillRect(X,     Y + 1, 18, 11, cInk);
+  g.fillRect(X + 1, Y,     16, 13, cInk);
+  g.fillRect(X + 2, Y + 2, 14,  9, cCardLt);
+
+  // 三道顶端切口，借用实体卡的童趣轮廓，而不传达“存储卡”含义。
+  g.fillRect(X + 4,  Y + 2, 2, 3, cInk);
+  g.fillRect(X + 8,  Y + 2, 2, 3, cInk);
+  g.fillRect(X + 12, Y + 2, 2, 3, cInk);
+
+  // 迷你打开书：深蓝封边、两页暖黄纸和中间书脊。
+  g.fillRect(X + 3, Y + 6, 11, 5, cInk);
+  g.fillRect(X + 4, Y + 7,  4, 3, cYellow);
+  g.fillRect(X + 9, Y + 7,  4, 3, cYellow);
+  g.fillRect(X + 8, Y + 7,  1, 4, cInk);
+
+  // 绿色角标表示故事卡在位；避开书页，缩小后仍能辨认。
+  g.fillRect(X + 14, Y + 2, 2, 3, cCardDk);
+  g.fillRect(X + 13, Y + 2, 3, 2, cCardDk);
 }
 
 /* ---------------- 控制栏 ---------------- */
