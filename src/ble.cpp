@@ -1,5 +1,6 @@
 #include "ble.h"
 #include "config.h"
+#include "favorites.h"
 #include "parental.h"
 #include "player.h"
 #include "story.h"
@@ -32,6 +33,7 @@ volatile bool s_authed       = false;
 volatile bool s_needAdv      = false;
 volatile bool s_helloPending = false;
 volatile bool s_configDirty  = false;
+volatile bool s_txLogged     = false;
 bool          s_advEnabled   = true;
 uint32_t      s_connectAt    = 0;
 uint32_t      s_lastStatus   = 0;
@@ -59,14 +61,39 @@ void pushAction(Ble::Action action, int32_t value = 0) {
   xQueueSend(s_cmdQ, &c, 0);
 }
 
-void sendDoc(JsonDocument& doc) {
+void sendDoc(JsonDocument& doc, bool quiet = false) {
   if (!s_tx) return;
   char buf[760];
   size_t n = serializeJson(doc, buf, sizeof(buf));
   if (n == 0) return;
   if (n < sizeof(buf) - 1) buf[n++] = '\n';
-  s_tx->setValue((uint8_t*)buf, n);
-  s_tx->notify();
+
+  /* 一个 notify 包最多只能带 MTU-3 字节, 超长会被截断/丢弃, 小程序就永远等不到 '\n'
+     而超时。这里按对端 MTU 切片发送; 小程序是按字节流拼接再找换行的, 分片不影响解析。 */
+  uint16_t mtu = 23;
+  if (s_server && s_server->getConnectedCount() > 0) {
+    mtu = s_server->getPeerInfo(0).getMTU();
+    if (mtu < 23) mtu = 23;
+  }
+  size_t chunk = (size_t)mtu - 3;
+  size_t chunks = (n + chunk - 1) / chunk;
+
+  if (!s_txLogged) {
+    s_txLogged = true;
+    Serial.printf("[BLE] tx first: %uB, mtu %u, %u chunk(s)\n",
+                  (unsigned)n, (unsigned)mtu, (unsigned)chunks);
+  } else if (!quiet) {
+    Serial.printf("[BLE] tx %uB, mtu %u%s\n",
+                  (unsigned)n, (unsigned)mtu, chunks > 1 ? " split" : "");
+  }
+
+  for (size_t off = 0; off < n; off += chunk) {
+    size_t len = n - off;
+    if (len > chunk) len = chunk;
+    s_tx->setValue((uint8_t*)(buf + off), len);
+    s_tx->notify();
+    if (off + len < n) delay(6);      // 给控制器留出发上一个包的时间
+  }
 }
 
 void sendError(int32_t id, const char* code) {
@@ -148,6 +175,7 @@ void sendHello(int32_t id) {
   doc["fw"]   = "storybox-1.0";
   doc["name"] = s_name;
   doc["bound"] = Parental::bound();
+  doc["hasPin"] = Parental::hasPin();
   doc["volMin"] = Parental::volMin();
   doc["volMax"] = Parental::volMax();
   if (!Parental::bound()) doc["code"] = Parental::bindCode();
@@ -160,7 +188,7 @@ void sendStateEvent() {
   root["v"] = 1;
   root["evt"] = "state";
   buildState(root);
-  sendDoc(doc);
+  sendDoc(doc, true);      // 每秒一条, 不刷日志
 }
 
 bool getPaging(JsonDocument& doc, int total, int& offset, int& limit) {
@@ -225,6 +253,7 @@ void handleGet(JsonDocument& doc, int32_t id) {
       item["c"] = Storage::catName(ci);
       item["ci"] = ci;
       item["a"] = Parental::categoryAllowed(ci);
+      item["f"] = Favorites::isFav(i);
     }
     sendDoc(out);
     return;
@@ -348,6 +377,20 @@ void handleCtrl(JsonDocument& doc, int32_t id) {
     return;
   }
 
+  /* 收藏/取消收藏: 故事机与小程序共用同一套全量曲目下标 */
+  if (strcmp(action, "fav") == 0) {
+    if (value < 0 || value >= Storage::allTrackCount()) { sendError(id, "RANGE"); return; }
+    bool now = Favorites::toggle(value);
+    JsonDocument out;
+    out["v"] = 1;
+    if (id) out["id"] = id;
+    out["ok"] = true;
+    out["f"]  = now;
+    out["n"]  = Favorites::count();
+    sendDoc(out);
+    return;
+  }
+
   if (strcmp(action, "story") == 0) {
     if (!Parental::storyAllowed(value)) { sendError(id, "NOT_ALLOWED"); return; }
     if (!Parental::canPlay()) { sendError(id, "LOCKED"); return; }
@@ -419,6 +462,11 @@ void processLine(const char* line) {
   int32_t id = doc["id"] | 0;
   const char* cmd = doc["cmd"] | "";
 
+  Serial.printf("[BLE] rx %s", cmd);
+  if (strcmp(cmd, "get") == 0) Serial.printf(" what=%s", (const char*)(doc["what"] | "?"));
+  if (strcmp(cmd, "ctrl") == 0) Serial.printf(" action=%s", (const char*)(doc["action"] | "?"));
+  Serial.printf(" id=%d\n", (int)id);
+
   if (strcmp(cmd, "hello") == 0) {
     sendHello(id);
     return;
@@ -449,6 +497,9 @@ void processLine(const char* line) {
       const char* pin = doc["pin"] | "";
       ok = Parental::verifyPin(pin);
     }
+    /* 已绑定但没设置家长密码: 没有可校验的秘密, 不能把换手机/清缓存的用户锁死。
+       一旦设了密码, 就必须给对 token 或 pin。 */
+    if (!ok && Parental::bound() && !Parental::hasPin()) ok = true;
     if (!ok) { sendError(id, "AUTH"); return; }
     s_authed = true;
     sendOk(id);
@@ -497,6 +548,7 @@ class ServerCB : public NimBLEServerCallbacks {
     s_lastStatus   = millis();
     s_rx.clear();
     s_overflow = false;
+    s_txLogged = false;
     NimBLEDevice::getAdvertising()->stop();
     Serial.println("[BLE] connected");
   }

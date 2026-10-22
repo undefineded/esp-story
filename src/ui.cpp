@@ -7,6 +7,7 @@
 #include "fonts.h"
 #include "render_math.h"
 #include "storage.h"
+#include "favorites.h"
 #include "story.h"
 #include <LovyanGFX.hpp>
 
@@ -747,8 +748,18 @@ namespace {
     return (k > 0) ? n.substring(0, k) : n;
   }
 
+  /* 收藏心形 (16x16) */
+  void iconFav(int x, int y, uint16_t color) {
+    auto& g = Display::canvas();
+    g.fillCircle(x + 4, y + 5, 4, color);
+    g.fillCircle(x + 11, y + 5, 4, color);
+    g.fillTriangle(x, y + 7, x + 15, y + 7, x + 7, y + 16, color);
+  }
+
   /* 曲目行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影 */
-  void trackRow(int y, const char* name, bool playing, bool selected) {
+  void trackRow(int y, int viewIndex, bool playing, bool selected) {
+    const char* name = Storage::name(viewIndex);
+    bool fav = Favorites::isFav(Storage::viewTrackGlobal(viewIndex));
     auto& g = Display::canvas();
     if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
     g.fillRoundRect(10, y, 300, 38, 6, selected ? cInk : TFT_WHITE);
@@ -756,7 +767,8 @@ namespace {
     if (!selected) g.drawRoundRect(10, y, 300, 38, 6, cTrackBd);
 
     uint16_t bg = selected ? cYellow : TFT_WHITE;
-    iconNote(24, y + 8, playing ? cCoral : cAqua);          // 正在播放: 珊瑚色 ♪ 高亮
+    if (fav) iconFav(24, y + 7, cCoral);                    // 已收藏: 珊瑚色心形
+    else     iconNote(24, y + 8, playing ? cCoral : cAqua);  // 正在播放: 珊瑚色 ♪ 高亮
 
     g.setFont(Fonts::title());
     g.setTextColor(playing ? cCoral : cInk, bg);
@@ -782,7 +794,7 @@ namespace {
     int y = MUSIC_Y0 + r * MUSIC_RH;
     g.fillRect(8, y, 306, MUSIC_RH, cPaper);
     int i = top + r;
-    if (i < count) trackRow(y, Storage::name(i), i == playing, i == selected);
+    if (i < count) trackRow(y, i, i == playing, i == selected);
   }
 
   void trackRows(int count, int selected, int playing) {
@@ -802,7 +814,7 @@ void drawTrackList(int count, int selected, int playing) {
 
   g.setFont(Fonts::body());
   g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("OK播放 双击设置 长按返回", 160, 212);
+  g.drawCenterString("OK播放 双击设置 长按收藏", 160, 212);
 
   s_tlTop = trackTop(selected, count); s_tlCount = count;
   s_tlSel = selected;                  s_tlPlay  = playing;

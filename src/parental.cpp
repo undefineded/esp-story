@@ -1,5 +1,6 @@
 #include "parental.h"
 #include "config.h"
+#include "favorites.h"
 #include "fram.h"
 #include <esp_system.h>
 #include <cstring>
@@ -153,18 +154,45 @@ void defaults() {
 }
 
 void rollDay(uint32_t newDay) {
+  if (newDay <= s_p.dayKey) return;          // 只向前换天: 时钟回跳不得清零/写历史
   if (s_p.dayKey != 0) {
-    uint8_t count = s_p.historyCount;
-    if (count < 7) count++;
-    for (int i = count - 1; i > 0; --i) s_p.history[i] = s_p.history[i - 1];
-    s_p.history[0].dayKey = s_p.dayKey;
-    s_p.history[0].usedSec = s_p.usedSec;
-    s_p.historyCount = count;
+    if (s_p.historyCount > 0 && s_p.history[0].dayKey == s_p.dayKey) {
+      /* 同一天已经在历史里: 只更新用量, 不再插入重复日期 */
+      s_p.history[0].usedSec = s_p.usedSec;
+    } else {
+      uint8_t count = s_p.historyCount;
+      if (count < 7) count++;
+      for (int i = count - 1; i > 0; --i) s_p.history[i] = s_p.history[i - 1];
+      s_p.history[0].dayKey  = s_p.dayKey;
+      s_p.history[0].usedSec = s_p.usedSec;
+      s_p.historyCount = count;
+    }
   }
   s_p.dayKey  = newDay;
   s_p.usedSec = 0;
   s_fracMs    = 0;
   s_dirty     = true;
+}
+
+/* 清理历史: 去掉重复日期、去掉"今天"和空条目 (旧固件时钟回跳会写脏) */
+void sanitizeHistory() {
+  uint8_t w = 0;
+  for (uint8_t i = 0; i < s_p.historyCount; i++) {
+    uint32_t day = s_p.history[i].dayKey;
+    if (day == 0 || day >= s_p.dayKey) continue;   // 今天/未来日期不属于历史
+    bool dup = false;
+    for (uint8_t j = 0; j < w; j++) {
+      if (s_p.history[j].dayKey == day) { dup = true; break; }
+    }
+    if (dup) continue;
+    if (w != i) s_p.history[w] = s_p.history[i];
+    w++;
+  }
+  if (w != s_p.historyCount) {
+    s_p.historyCount = w;
+    Serial.printf("[PCTL] history cleaned -> %u day(s)\n", (unsigned)w);
+    saveNow();
+  }
 }
 
 void checkDay() {
@@ -174,7 +202,7 @@ void checkDay() {
   if (s_p.dayKey == 0) {
     s_p.dayKey = dk;
     s_dirty = true;
-  } else if (dk != s_p.dayKey) {
+  } else if (dk > s_p.dayKey) {
     rollDay(dk);
   }
 }
@@ -229,6 +257,8 @@ void begin() {
     }
   }
 
+  sanitizeHistory();       // 清掉历史里的重复日期 / "今天"条目
+
   s_epochBase  = s_p.lastEpoch;
   s_millisBase = millis();
   s_lastTick   = millis();
@@ -237,14 +267,20 @@ void begin() {
   s_synced     = false;
   s_rev        = 1;
 
-  Serial.printf("[PCTL] daily=%umin vol=%u..%u bed=%s %02u:%02u-%02u:%02u bound=%d used=%us\n",
+  Serial.printf("[PCTL] daily=%umin vol=%u..%u bed=%s %02u:%02u-%02u:%02u bound=%d pin=%d used=%us\n",
                 (unsigned)s_p.dailyLimitMin,
                 (unsigned)s_p.volMin, (unsigned)s_p.volMax,
                 (s_p.flags & FLAG_BEDTIME) ? "on" : "off",
                 (unsigned)(s_p.bedStartMin / 60), (unsigned)(s_p.bedStartMin % 60),
                 (unsigned)(s_p.bedEndMin / 60), (unsigned)(s_p.bedEndMin % 60),
                 (s_p.flags & FLAG_BOUND) ? 1 : 0,
+                (s_p.flags & FLAG_HAS_PIN) ? 1 : 0,
                 (unsigned)s_p.usedSec);
+
+  Serial.printf("[PCTL] day=%u history=%u:", (unsigned)s_p.dayKey, (unsigned)s_p.historyCount);
+  for (uint8_t i = 0; i < s_p.historyCount; i++)
+    Serial.printf(" %u/%us", (unsigned)s_p.history[i].dayKey, (unsigned)s_p.history[i].usedSec);
+  Serial.println();
 }
 
 uint16_t dailyLimitMin() { return s_p.dailyLimitMin; }
@@ -315,6 +351,7 @@ void save() { saveNow(); }
 
 void factoryReset() {
   defaults();
+  Favorites::clear();
   s_epochBase  = 0;
   s_millisBase = millis();
   s_synced     = false;
@@ -346,7 +383,7 @@ void syncTime(uint32_t epochSec, int16_t tzOffsetMin) {
   if (s_p.dayKey == 0) {
     s_p.dayKey = dk;
     s_dirty = true;
-  } else if (dk != s_p.dayKey) {
+  } else if (dk > s_p.dayKey) {
     rollDay(dk);
   }
   saveNow();

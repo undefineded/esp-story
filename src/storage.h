@@ -28,6 +28,7 @@ namespace Storage {
   int         viewCatTrackCount(int view);
 
   int         count();          // 当前分类曲目数量
+  int         viewTrackGlobal(int viewIndex);   // 当前分类视图下标 -> 全量下标 (越界返回 -1)
   const char* path(int index);  // 完整路径 (越界返回 nullptr)
   const char* name(int index);  // 文件名 (不含目录, UTF-8)
 

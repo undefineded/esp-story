@@ -38,7 +38,8 @@
  *    SET 长按 : 进入故事模式
  *  当前歌曲列表操作:
  *    编码器/NEXT/LAST: 选择曲目       OK 单击 / SET 短按: 播放选中曲目
- *    长按     : 返回播放界面          SET 长按: 进入故事模式
+ *    OK 长按  : 收藏/取消收藏         NEXT/LAST 长按: 返回播放界面
+ *    SET 长按 : 进入故事模式
  *  设置界面操作:
  *    编码器   : 调整当前项             NEXT/LAST: 上下选择
  *    OK 单击  : 递增当前项             OK 双击 : 保存并返回
@@ -65,6 +66,7 @@
 #include "fonts.h"
 #include "ui.h"
 #include "parental.h"
+#include "favorites.h"
 #include "ble.h"
 #include "network.h"
 
@@ -624,6 +626,7 @@ void setup() {
   Settings::load();                 // 读取掉电保存的配置
   Session::load();                  // 读取掉电保存的音量/上次播放位置
   Parental::begin();                // 家长策略 + 今日用量 + 绑定信息
+  Favorites::begin();               // 收藏位图 (FRAM)
 #ifdef SESSION_SELFTEST
   Session::selfTest();              // 临时自检开关: -DSESSION_SELFTEST
 #endif
@@ -656,6 +659,10 @@ void setup() {
       Ui::boot("MUSIC PLAYER", "Ready - press OK to select");
     }
     applyContentFilters();           // 家长白名单视图
+    Serial.printf("[SD ] %d folder(s):", Storage::catCount() - 1);
+    for (int i = 1; i < Storage::catCount(); i++)
+      Serial.printf(" %s(%d)", Storage::catName(i), Storage::catTrackCount(i));
+    Serial.println();
   }
   Display::present(true);
   delay(600);
@@ -818,11 +825,15 @@ void loop() {
     switch (Input::okEvent()) {
       case 1: playMusicIndex(s_trackSel); return;               // 单击: 播放选中曲目
       case 2: enterSettings(); return;
-      case 3:                                                   // 长按: 返回播放界面(保持播放)
-        s_screen = Screen::Main;
-        Ui::drawStatic();
-        Ui::update(Player::status(), Hall::detected());
+      case 3: {                                                 // 长按: 收藏/取消收藏
+        int gi = Storage::viewTrackGlobal(s_trackSel);
+        if (gi >= 0) {
+          bool on = Favorites::toggle(gi);
+          Serial.printf("[FAV] track %d -> %s\n", gi, on ? "on" : "off");
+          Ui::drawTrackList(Storage::count(), s_trackSel, s_trackPlaying);
+        }
         return;
+      }
       default: break;
     }
 

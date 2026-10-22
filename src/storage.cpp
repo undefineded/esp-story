@@ -211,6 +211,11 @@ int currentCategory() { return s_curCat; }
 
 int count() { return s_curCount; }
 
+int viewTrackGlobal(int viewIndex) {
+  if (viewIndex < 0 || viewIndex >= s_curCount) return -1;
+  return s_cur[viewIndex];
+}
+
 void setCategoryFilter(uint64_t mask, bool enabled) {
   s_catMask   = mask;
   s_catFilter = enabled;
