@@ -9,6 +9,8 @@
 
 namespace FileXfer {
   bool ready();
+  bool busy();
+  uint8_t progress();
   void loop();
   bool handle(JsonDocument& req, JsonDocument& out, int32_t id);
   void abortAll();

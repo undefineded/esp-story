@@ -60,6 +60,7 @@ namespace Player {
   void        prev();
   void        toggle();                     // 播放/暂停
   void        stop();                       // 停止当前播放
+  void        inhibitPlayback(bool on);     // 文件传输期间拒绝已入队和新的播放命令
   bool        stopAndWait(uint32_t timeoutMs = 3000); // 确认音频任务停止后才可重建列表
 
   void        setAutoNext(bool on);         // 播放结束是否自动下一曲 (音乐模式 true)

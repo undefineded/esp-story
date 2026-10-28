@@ -243,6 +243,8 @@ export interface WindowControls {
 }
 
 export interface FileBridge {
+  sessionBegin(): Promise<void>;
+  sessionEnd(): Promise<void>;
   list(path: string, offset?: number, limit?: number): Promise<FsListing>;
   mkdir(path: string): Promise<void>;
   remove(path: string): Promise<void>;

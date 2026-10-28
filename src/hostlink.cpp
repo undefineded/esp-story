@@ -185,6 +185,8 @@ void sendHello(int32_t id) {
   features.add("fs.read");
   features.add("fs.write");
   features.add("fs.sd");
+  features.add("fs.session");
+  features.add("fs.window4.crc32");
   JsonObject fs = doc["fs"].to<JsonObject>();
   fs["ready"] = FileXfer::ready();
   JsonObject nfc = doc["nfc"].to<JsonObject>();
@@ -397,7 +399,10 @@ void processLine(const char* line) {
     return;
   }
 
-  if (strcmp(cmd, "nfc") == 0) { handleNfc(doc, id); return; }
+  if (strcmp(cmd, "nfc") == 0) {
+    if (FileXfer::busy()) { sendError(id, "TRANSFER_BUSY", "File transfer in progress"); return; }
+    handleNfc(doc, id); return;
+  }
 
   if (strcmp(cmd, "fs") == 0) {
     JsonDocument out;
@@ -410,8 +415,11 @@ void processLine(const char* line) {
 }
 
 void readSerial() {
-  int budget = 512;
+  int budget = 24576;
+  const uint32_t started = micros();
   while (budget-- > 0 && Serial.available() > 0) {
+    // Drain several complete frames, bounded in time so cancellation/UI still run.
+    if ((budget & 255) == 0 && (uint32_t)(micros() - started) >= 6000) break;
     int value = Serial.read();
     if (value < 0) break;
     char c = (char)value;
@@ -458,6 +466,8 @@ void begin() {
   features.add("fs.read");
   features.add("fs.write");
   features.add("fs.sd");
+  features.add("fs.session");
+  features.add("fs.window4.crc32");
   JsonObject fs = doc["fs"].to<JsonObject>();
   fs["ready"] = FileXfer::ready();
   JsonObject nfc = doc["nfc"].to<JsonObject>();
@@ -467,10 +477,14 @@ void begin() {
 }
 
 void loop() {
-  Nfc::loop();
-  flushEvents();
+  if (FileXfer::busy() && !Serial) FileXfer::abortAll();
   FileXfer::loop();
   readSerial();
+  FileXfer::loop();
+  if (!FileXfer::busy()) {
+    Nfc::loop();
+    flushEvents();
+  }
 
   /* 涓婁綅鏈洪暱鏃堕棿鏃犺姹傛椂鍋滄杞, 閬垮厤璁惧鏃犱汉浣跨敤鏃舵寔缁崰鐢?I2C */
   if (s_booted && Nfc::polling() && (millis() - s_lastHostMs > kHostIdleMs)) {

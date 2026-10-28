@@ -1,4 +1,4 @@
-/* UI 组件: 小小故事盒主页 (四宫格) + 播放/列表界面 + 设置界面 + 故事模式 */
+/* UI 组件: 故事小镇主页 + 播放/列表界面 + 设置界面 + 故事模式 */
 #include <FS.h>          // 必须在 LovyanGFX 之前: 用来启用 drawJpgFile(fs, path) 重载
 #include <SD_MMC.h>
 #include "ui.h"
@@ -9,7 +9,7 @@
 #include "storage.h"
 #include "favorites.h"
 #include "story.h"
-#include "home_icons.h"
+#include "home_scenes.h"
 #include <LovyanGFX.hpp>
 
 /* 字体统一由 Fonts:: 提供原生尺寸 efont 点阵，前景/背景双色覆盖文字区域。 */
@@ -65,6 +65,8 @@ int      s_lastHall = -1;
 bool     s_hallNow  = false;               // 最近已知霍尔状态 (顶栏通知位, 各界面共用)
 bool     s_hallLayout = false;             // 上次"音量让位"排版所用的霍尔状态
 bool     s_childLockNow = false;           // 童锁标识 (顶栏常显)
+bool     s_homeTopBar = false;
+uint16_t s_homeTopColor = 0;
 void     drawHallIcon(bool detected);      // 前置声明: 顶栏基础绘制里要用
 void     drawChildLockBadge(bool locked);  // 前置声明: 顶栏基础绘制里要用
 uint32_t s_lastCur = 0xFFFFFFFF, s_lastDur = 0xFFFFFFFF;
@@ -107,6 +109,7 @@ void drawLogo(int cx, int cy, int r) {
 
 /* ---------------- 顶栏 (珊瑚红) ---------------- */
 void drawTopBarBase() {
+  s_homeTopBar = false;
   auto& g = Display::canvas();
   g.fillRect(0, 0, 320, 30, cCoral);
   g.fillRect(0, 30, 320, 2, cCoralDk);
@@ -305,7 +308,7 @@ void drawHallIcon(bool detected) {
   auto& g = Display::canvas();
   const int X = 298, Y = 10;                 // 卡片左上角 (右缘留 4px)
 
-  g.fillRect(X - 2, Y - 2, 22, 17, cCoral);  // 先清掉原图标位
+  g.fillRect(X - 2, Y - 2, 22, 17, s_homeTopBar ? s_homeTopColor : cCoral);
   if (!detected) return;                     // 无霍尔: 不展示
 
   g.fillRoundRect(X,      Y,     18, 13, 3, cCardLt);   // 卡片本体
@@ -317,7 +320,7 @@ void drawHallIcon(bool detected) {
 /* 顶栏童锁标识: 标题与音量之间的黄色小胶囊, 关闭时只清空该区域 */
 void drawChildLockBadge(bool locked) {
   auto& g = Display::canvas();
-  g.fillRect(128, 3, 98, 24, cCoral);
+  g.fillRect(128, 3, 98, 24, s_homeTopBar ? s_homeTopColor : cCoral);
   if (!locked) return;
 
   g.fillRoundRect(130, 5, 60, 20, 8, cYellow);
@@ -477,53 +480,72 @@ void settingsRows(const SettingsData& s, int selected) {
   g.fillRoundRect(sx, thumbY, sw, thumbH, 2, cCoral);
 }
 
-/* ---------------- 主页手机桌面风格图标 ----------------
-   一排四个, 普通 60x60, 选中放大到 72x72, 无阴影。
-   图标来自 docs/icons 切图, 由 tools/build_home_icons.py 生成 RGB565。 */
-const int ICON_SIZE = 60;
-const int ICON_SIZE_SEL = 72;
-
-const int HOME_X0 = 16, HOME_Y0 = 86, HOME_GAP = 16;
-
-void homeSlot(int i, int& x, int& y) {
-  x = HOME_X0 + i * (ICON_SIZE + HOME_GAP);
-  y = HOME_Y0;
+/* ---------------- 故事小镇主页 ----------------
+   插画在构建前合成主题底色并转换 swap565，设备无需 PNG 解码或动态缩放。 */
+struct HomeTheme { const char* title; const char* subtitle; uint32_t sky, ink; };
+const HomeTheme HOME_THEMES[] = {
+  {"音乐舞台", "听见好心情", 0xf9dfad, 0x694c51},
+  {"故事森林", "打开新世界", 0xdcebd5, 0x315c52},
+  {"童谣花园", "一起唱首歌", 0xf8dfd4, 0x795e67},
+  {"工具小屋", "准备好出发", 0xe2e3f3, 0x505878},
+};
+uint16_t homeColor(uint32_t rgb) {
+  return Display::canvas().color565((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
 }
-
 void homeTile(int i, bool selected) {
   auto& g = Display::canvas();
-  static const char* TITLE[4] = { "音乐", "故事", "童谣", "设置" };
-
-  int x, y;
-  homeSlot(i, x, y);
-  g.fillRect(x - 8, y - 8, ICON_SIZE + 16, 94, cPaper);
-
-  const uint16_t* img = HOME_ICON_MUSIC;
-  const int size = selected ? ICON_SIZE_SEL : ICON_SIZE;
-  const int ix = selected ? x - 6 : x;
-  const int iy = selected ? y - 6 : y;
-  switch (i) {
-    case 0: img = selected ? HOME_ICON_MUSIC_SEL    : HOME_ICON_MUSIC;    break;
-    case 1: img = selected ? HOME_ICON_STORY_SEL    : HOME_ICON_STORY;    break;
-    case 2: img = selected ? HOME_ICON_RHYME_SEL    : HOME_ICON_RHYME;    break;
-    default: img = selected ? HOME_ICON_SETTINGS_SEL : HOME_ICON_SETTINGS; break;
+  static const char* TITLE[] = {"音乐", "故事", "童谣", "设置"};
+  static const uint32_t FILL[] = {0xf5d67f, 0xa8d7b9, 0xefb5b0, 0xc5c0e8};
+  static const uint32_t INK[] = {0x886631, 0x386a56, 0x8b5362, 0x655887};
+  const int x = 8 + i * 78, y = selected ? 176 : 182;
+  const uint16_t fill = homeColor(FILL[i]), ink = homeColor(INK[i]);
+  g.fillRoundRect(x, y + 3, 70, 34, 5, ink);
+  g.fillRoundRect(x, y, 70, 34, 5, fill);
+  g.drawRoundRect(x, y, 70, 34, 5, ink);
+  g.fillCircle(x, y + 22, 3, homeColor(0xfff5df));
+  g.fillCircle(x + 69, y + 22, 3, homeColor(0xfff5df));
+  for (int p = x + 7; p < x + 66; p += 5) g.fillRect(p, y + 26, 2, 1, ink);
+  if (i == 0) {
+    g.fillRect(x + 13, y + 7, 2, 11, ink);
+    g.drawLine(x + 13, y + 7, x + 19, y + 9, ink);
+    g.fillCircle(x + 10, y + 17, 3, ink);
+  } else if (i == 1) {
+    g.fillRect(x + 7, y + 8, 6, 11, ink);
+    g.fillRect(x + 15, y + 8, 6, 11, ink);
+    g.drawLine(x + 10, y + 20, x + 18, y + 20, ink);
+  } else if (i == 2) {
+    g.fillCircle(x + 12, y + 14, 5, ink);
+    g.fillCircle(x + 16, y + 9, 3, ink);
+    g.fillTriangle(x + 19, y + 9, x + 22, y + 11, x + 18, y + 12, ink);
+  } else {
+    g.fillCircle(x + 13, y + 13, 6, ink);
+    g.fillRect(x + 11, y + 5, 4, 16, ink);
+    g.fillRect(x + 5, y + 11, 16, 4, ink);
+    g.fillCircle(x + 13, y + 13, 3, fill);
   }
-  g.pushImage(ix, iy, size, size, img);
-
-  g.setFont(Fonts::small());
-  g.setTextColor(cText, cPaper);
-  g.drawCenterString(TITLE[i], x + ICON_SIZE / 2, y + 70);
+  g.setFont(Fonts::story());
+  g.setTextColor(ink, fill);
+  g.drawCenterString(TITLE[i], x + 43, y + 6);
+  if (selected) {
+    g.fillCircle(x + 64, y + 2, 5, ink);
+    g.drawLine(x + 61, y + 2, x + 63, y + 4, homeColor(0xfff5df));
+    g.drawLine(x + 63, y + 4, x + 67, y, homeColor(0xfff5df));
+  }
 }
 
 /* 主页顶栏音量: 始终给右侧霍尔图标留出位置, 图标后出现也不会压字 */
 void homeVolume(uint8_t volume) {
   auto& g = Display::canvas();
-  g.fillRect(230, 0, 66, 30, cCoral);
-  g.setFont(Fonts::body());
-  g.setTextColor(TFT_WHITE, cCoral);
+  const uint16_t paper = homeColor(0xfff5df), ink = homeColor(0x315c52);
+  g.fillRect(230, 0, 66, 30, s_homeTopColor);
+  g.fillRoundRect(244, 7, 48, 20, 8, paper);
+  g.fillRect(250, 14, 3, 6, ink);
+  g.fillTriangle(253, 14, 257, 11, 257, 23, ink);
+  g.setFont(Fonts::small());
+  g.setTextColor(ink, paper);
   char b[20];
-  snprintf(b, sizeof(b), "音量:%u", (unsigned)volume);
-  g.drawRightString(b, 292, 7);
+  snprintf(b, sizeof(b), "%u", (unsigned)volume);
+  g.drawRightString(b, 286, 11);
 }
 
 int s_homeSel = -1;
@@ -539,30 +561,69 @@ void begin() { palette(); }
 
 void drawHome(int selected, uint8_t volume) {
   palette();
+  selected = constrain(selected, 0, 3);
   auto& g = Display::canvas();
-  g.fillScreen(cPaper);
-  drawTopBarBase();
+  const HomeTheme& t = HOME_THEMES[selected];
+  const uint16_t paper = homeColor(0xfff5df), sky = homeColor(t.sky), ink = homeColor(t.ink);
+  s_homeTopBar = true;
+  s_homeTopColor = sky;
+  g.fillScreen(paper);
+  g.fillRect(0, 0, 320, 169, sky);
+  g.fillCircle(17, 17, 7, ink);
+  g.fillRect(14, 15, 1, 2, paper);
+  g.fillRect(19, 15, 1, 2, paper);
+  g.drawFastHLine(15, 20, 4, paper);
+  g.setFont(Fonts::story());
+  g.setTextColor(ink, sky);
+  g.drawString("小小故事盒", 31, 10);
   homeVolume(volume);
+  s_lastHall = -1;
+  drawHallIcon(s_hallNow);
+  drawChildLockBadge(s_childLockNow);
+  g.setFont(Fonts::small());
+  g.setTextColor(ink, sky);
+  char number[4];
+  snprintf(number, sizeof(number), "0%d", selected + 1);
+  g.drawString(number, 15, 45);
+  g.drawFastHLine(36, 51, 31, ink);
+  g.setFont(Fonts::title());
+  g.drawString(t.title, 14, 68);
+  g.setFont(Fonts::story());
+  g.drawString(t.subtitle, 14, 93);
+  const uint16_t yellow = homeColor(0xf6cd68);
+  g.fillRoundRect(14, 127, 113, 27, 9, ink);
+  g.fillRoundRect(14, 123, 113, 27, 9, yellow);
+  g.drawRoundRect(14, 123, 113, 27, 9, ink);
+  g.fillCircle(28, 136, 8, paper);
+  g.fillTriangle(26, 132, 26, 140, 32, 136, ink);
+  g.setTextColor(ink, yellow);
+  g.drawString("按下探索", 41, 129);
+  g.drawFastHLine(113, 129, 8, paper);
+  g.drawFastVLine(117, 125, 8, paper);
+  g.pushImage(174, 34, 128, 128, HOME_SCENES[selected]);
+  g.fillRect(0, 167, 320, 2, ink);
   for (int i = 0; i < 4; i++) homeTile(i, i == selected);
-
-  g.setFont(Fonts::body());
-  g.setTextColor(cText, cPaper);
-  g.drawCenterString("旋转选择   OK 进入", 160, 218);
+  g.setFont(Fonts::small());
+  g.setTextColor(homeColor(0x647b79), paper);
+  g.drawString("旋转选择", 12, 224);
+  g.drawRightString("OK 进入", 308, 224);
+  for (int i = 0; i < 4; i++)
+    g.fillCircle(148 + i * 8, 229, i == selected ? 3 : 2,
+                 i == selected ? ink : homeColor(0xd2cbb7));
 
   s_homeSel = selected;
   s_homeVol = (int)volume;
 }
 
-/* 选择变化只重画新旧两块, 音量变化只重画右上角 */
+/* 主题切换重绘合成画布，由 Display::present 差分提交；音量仅更新顶栏。 */
 void updateHome(int selected, uint8_t volume) {
   palette();
+  selected = constrain(selected, 0, 3);
   if (s_homeSel < 0) { drawHome(selected, volume); return; }
 
   if (selected != s_homeSel) {
-    int old = s_homeSel;
-    s_homeSel = selected;
-    homeTile(old, false);
-    homeTile(selected, true);
+    drawHome(selected, volume);
+    return;
   }
   if ((int)volume != s_homeVol) {
     s_homeVol = (int)volume;

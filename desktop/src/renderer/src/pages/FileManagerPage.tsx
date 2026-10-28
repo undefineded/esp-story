@@ -584,7 +584,10 @@ export function FileManagerPage() {
     let ok = 0
     let failed = 0
     let touchedIndex = false
+    let sessionStarted = false
     try {
+      await bridge.files.sessionBegin()
+      sessionStarted = true
       for (const source of sources) {
         try {
           await uploadSingle(source, cache, basePath)
@@ -606,7 +609,8 @@ export function FileManagerPage() {
         showToast('error', '部分文件上传失败', `${ok} 个成功，${failed} 个失败`)
       }
     } finally {
-      setBusy(false)
+      try { if (sessionStarted) await bridge.files.sessionEnd() }
+      finally { setBusy(false) }
     }
   }
 

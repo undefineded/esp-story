@@ -3,6 +3,7 @@
 #include "config.h"
 #include <Audio.h>
 #include <SD_MMC.h>
+#include <atomic>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -21,6 +22,7 @@
 namespace {
 
   Audio s_audio;
+  std::atomic<bool> s_inhibited{false};
 
   QueueHandle_t     s_q    = nullptr;   // UI -> 音频任务: 命令队列
   SemaphoreHandle_t s_mux  = nullptr;   // 保护状态快照 / EOF 标志
@@ -123,6 +125,7 @@ namespace {
   }
 
   void execCmd(const Msg& m) {
+    if (s_inhibited.load() && m.cmd <= CMD_TOGGLE) return;
     int n = Storage::count();
     switch (m.cmd) {
       case CMD_PLAY_INDEX: playIndexTask((int)m.arg, m.flag != 0); break;
@@ -196,7 +199,7 @@ namespace {
       if (s_pendingNext) {
         s_pendingNext = false;
         int n = Storage::count();
-        if (n) playIndexTask((s_st.index + 1) % n, true);
+        if (n && !s_inhibited.load()) playIndexTask((s_st.index + 1) % n, true);
       }
 
       publish();
@@ -220,6 +223,7 @@ void next()                                    { enqueue(CMD_NEXT); }
 void prev()                                    { enqueue(CMD_PREV); }
 void toggle()                                  { enqueue(CMD_TOGGLE); }
 void stop()                                    { enqueue(CMD_STOP); }
+void inhibitPlayback(bool on)                  { s_inhibited.store(on); }
 
 bool stopAndWait(uint32_t timeoutMs) {
   if (!s_task || !s_q) return false;

@@ -54,6 +54,7 @@
  */
 
 #include <Arduino.h>
+#include "filexfer.h"
 #include "config.h"
 #include "display.h"
 #include "storage.h"
@@ -607,6 +608,7 @@ static void startStoryActual(int actual) {
 
 /* BLE 下发的播放控制: 在 main loop 里执行, 保证 UI/Player 访问在同一任务 */
 static void handleBleCommand(const Ble::Command& c) {
+  if (FileXfer::busy()) return;
   switch (c.action) {
     case Ble::Action::Volume:
       setVolumeLimited(c.value);
@@ -845,6 +847,31 @@ void loop() {
   Ui::setHall(Hall::detected());    // 卡片插拔: 任意界面都即时更新顶栏通知位
   Network::loop();                  // WiFi STA 连接状态日志
   HostLink::loop();                 // USB CDC: PN532 轮询 / 上位机命令
+
+  static bool transferShown = false;
+  static uint32_t transferUiAt = 0;
+  static int transferPercent = -1;
+  if (FileXfer::busy()) {
+    Power::loop(false);
+    Ble::loop();
+    Ble::Command ignored;
+    while (Ble::takeCommand(ignored)) {}
+    Input::encoderSteps(); Input::nextEvent(); Input::prevEvent(); Input::encEvent();
+    if (Input::okEvent() == 3) { FileXfer::abortAll(); return; }
+    const int pct = FileXfer::progress();
+    if (!transferShown || (pct != transferPercent && millis() - transferUiAt >= 250)) {
+      if (!transferShown) Ui::boot("文件传输中", "长按 OK 取消");
+      auto& g = Display::canvas();
+      g.fillRect(40, 193, 240, 12, g.color565(220, 225, 220));
+      g.fillRect(40, 193, pct * 240 / 100, 12, g.color565(64, 123, 103));
+      transferShown = true; transferPercent = pct; transferUiAt = millis();
+    }
+    return;
+  }
+  if (transferShown) {
+    transferShown = false; transferPercent = -1;
+    showHome(); // 文件可能已被替换，停止后回主页，不恢复旧文件句柄。
+  }
 
   /* BLE 通道: 先收包/下发动作, 再由主循环统一执行 */
   Ble::loop();

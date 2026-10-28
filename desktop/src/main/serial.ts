@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { SerialPort } from 'serialport'
+import { crc32, transferWindow } from '@shared/transfer'
 import type {
   ConnectionStatus,
   DeviceEvent,
@@ -117,6 +118,30 @@ export class NfcSession extends EventEmitter<SessionEvents> {
   private pollSent = false
   private ready = false
   private fileBusy = 0
+  private transferSession = false
+  private transferChunk = 4096
+
+  transferWindowSize(): number {
+    return this.device?.features.includes('fs.window4.crc32') ? 4 : 1
+  }
+
+  async fsSessionBegin(): Promise<void> {
+    if (this.transferSession) throw new Error('BUSY: 已有文件传输任务')
+    this.transferSession = true
+    try {
+      if (this.device?.features.includes('fs.session')) {
+        await this.request('fs', { act: 'session_begin' }, 10000)
+      }
+    } catch (err) { this.transferSession = false; throw err }
+  }
+
+  async fsSessionEnd(): Promise<void> {
+    try {
+      if (this.transferSession && this.device?.features.includes('fs.session')) {
+        await this.request('fs', { act: 'session_end' }, 10000)
+      }
+    } finally { this.transferSession = false }
+  }
 
   constructor(private readonly settings: SettingsStore) {
     super()
@@ -633,6 +658,11 @@ export class NfcSession extends EventEmitter<SessionEvents> {
     const data = (doc.data ?? {}) as Record<string, unknown>
     const encoded = typeof data.data === 'string' ? data.data : ''
     const buffer = Buffer.from(encoded, 'base64')
+    if (Number(data.offset) !== offset || Number(data.len) !== buffer.length ||
+        (this.transferWindowSize() > 1 && typeof data.crc32 !== 'number') ||
+        (typeof data.crc32 === 'number' && crc32(buffer) !== data.crc32)) {
+      throw new Error('VERIFY: 下载块偏移、长度或校验值不匹配')
+    }
     return {
       data: new Uint8Array(buffer),
       offset: Number(data.offset) || offset,
@@ -649,6 +679,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
   async fsWriteStart(path: string, size: number, overwrite = true): Promise<FsWriteStart> {
     const doc = await this.request('fs', { act: 'write_begin', path, size, overwrite }, 30000)
     const data = (doc.data ?? {}) as Record<string, unknown>
+    this.transferChunk = Math.min(4096, Math.max(1, Number(data.chunk) || 4096))
     return {
       xid: Number(data.xid) || 0,
       path: typeof data.path === 'string' ? data.path : path,
@@ -659,43 +690,51 @@ export class NfcSession extends EventEmitter<SessionEvents> {
 
   async fsWriteChunk(xid: number, offset: number, data: Uint8Array): Promise<{ written: number }> {
     const payload = Buffer.from(data)
-    const chunkSize = 4096
+    const chunkSize = this.transferChunk
+    const window = this.transferWindowSize()
     let written = offset
-    for (let i = 0; i < payload.length; i += chunkSize) {
-      const piece = payload.subarray(i, Math.min(i + chunkSize, payload.length))
-      let doc: Record<string, unknown> | undefined
-      let lastError: Error | undefined
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          doc = await this.request(
-            'fs',
-            {
-              act: 'write_chunk',
-              xid,
-              offset: offset + i,
-              data: piece.toString('base64')
-            },
-            30000,
-            true
-          )
-          break
-        } catch (err) {
-          lastError = err instanceof Error ? err : new Error(String(err))
-          if (!/超时/.test(lastError.message)) throw lastError
-          await delay(250)
-        }
+    for (let base = 0; base < payload.length; base += chunkSize * window) {
+      const jobs: (() => Promise<number>)[] = []
+      for (let i = base; i < Math.min(payload.length, base + chunkSize * window); i += chunkSize) {
+        jobs.push(async () => {
+          const piece = payload.subarray(i, Math.min(i + chunkSize, payload.length))
+          let doc: Record<string, unknown> | undefined
+          let lastError: Error | undefined
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              doc = await this.request('fs', {
+                act: 'write_chunk', xid, offset: offset + i,
+                data: piece.toString('base64'),
+                ...(window > 1 ? { crc32: crc32(piece) } : {})
+              }, 30000, true)
+              break
+            } catch (err) {
+              lastError = err instanceof Error ? err : new Error(String(err))
+              if (!/超时/.test(lastError.message)) throw lastError
+              await delay(250)
+            }
+          }
+          if (!doc) throw lastError ?? new Error('写入超时')
+          const result = (doc.data ?? {}) as Record<string, unknown>
+          const reported = Number(result.written)
+          if (!Number.isFinite(reported) || reported < offset + i + piece.length || reported > offset + payload.length) {
+            throw new Error('VERIFY: 设备未确认完整的数据块')
+          }
+          return reported
+        })
       }
-      if (!doc) throw lastError ?? new Error('写入超时')
-      const result = (doc.data ?? {}) as Record<string, unknown>
-      const reported = Number(result.written)
-      if (Number.isFinite(reported)) written = reported
+      written = Math.max(written, ...await transferWindow(jobs))
     }
-    return { written: Math.max(written, offset + payload.length) }
+    return { written }
   }
 
   async fsWriteEnd(xid: number): Promise<{ size: number; complete: boolean }> {
     const doc = await this.request('fs', { act: 'write_end', xid }, 60000)
     const data = (doc.data ?? {}) as Record<string, unknown>
+    if (typeof data.elapsedMs === 'number' && data.elapsedMs > 0) {
+      const rate = Number(data.size) * 1000 / data.elapsedMs / 1024
+      this.log('sys', `上传完成: ${rate.toFixed(1)} KiB/s; 总耗时 ${data.elapsedMs}ms; SD写入 ${data.diskMs}ms; 最慢写入 ${data.maxDiskMs}ms`)
+    }
     return { size: Number(data.size) || 0, complete: Boolean(data.complete) }
   }
 
@@ -742,6 +781,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
   }
 
   private onClose(): void {
+    this.transferSession = false
     this.stopHeartbeat()
     this.rejectPending(new Error('设备已断开'))
     this.fileBusy = 0

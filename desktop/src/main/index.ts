@@ -1,12 +1,13 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, screen, shell } from 'electron'
 import { existsSync, mkdirSync } from 'node:fs'
-import { open, readdir, stat, unlink } from 'node:fs/promises'
+import { open, readdir, stat, unlink, rename } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { SettingsStore } from './settings'
 import { NfcSession, listPorts } from './serial'
+import { transferWindow } from '@shared/transfer'
 import type { AppSettings, FsProgress, RawReadRequest } from '@shared/types'
 
 // 独立数据目录：避免复用 Electron 默认 profile 时被旧缓存/单例锁影响。
@@ -335,6 +336,8 @@ function registerIpc(): void {
     session.fsRename(req.from, req.to)
   )
   ipcMain.handle('fs:read-start', (_event, path: string) => session.fsReadStart(path))
+  ipcMain.handle('fs:session-begin', () => session.fsSessionBegin())
+  ipcMain.handle('fs:session-end', () => session.fsSessionEnd())
   ipcMain.handle('fs:read-chunk', (_event, req: { xid: number; offset: number }) =>
     session.fsReadChunk(req.xid, req.offset)
   )
@@ -362,17 +365,20 @@ function registerIpc(): void {
     async (_event, req: { paths: string[]; remoteDir: string }) => {
       const cache = new Set<string>()
       const stats = { files: 0, failed: 0, touchedIndex: false }
-      for (const localPath of req.paths) {
-        try {
-          await uploadLocalEntry(localPath, req.remoteDir || '/', cache, stats)
-        } catch {
-          stats.failed += 1
+      await session.fsSessionBegin()
+      try {
+        for (const localPath of req.paths) {
+          try {
+            await uploadLocalEntry(localPath, req.remoteDir || '/', cache, stats)
+          } catch {
+            stats.failed += 1
+          }
         }
-      }
-      if (stats.touchedIndex) {
-        await session.fsRescan().catch(() => undefined)
-      }
-      return { files: stats.files, failed: stats.failed }
+        if (stats.touchedIndex) {
+          await session.fsRescan().catch(() => undefined)
+        }
+        return { files: stats.files, failed: stats.failed }
+      } finally { await session.fsSessionEnd() }
     }
   )
 
@@ -396,12 +402,16 @@ function registerIpc(): void {
       let xid = 0
       let written = 0
       let total = totalFallback
+      const temporaryPath = `${result.filePath}.storybox-${Date.now()}.part`
+      let temporaryCreated = false
+      await session.fsSessionBegin()
       try {
         const start = await session.fsReadStart(req.path)
         started = true
         xid = start.xid
         total = start.size
-        handle = await open(result.filePath, 'w')
+        handle = await open(temporaryPath, 'wx')
+        temporaryCreated = true
         send('fs:progress', {
           id: progressId,
           direction: 'download',
@@ -415,29 +425,45 @@ function registerIpc(): void {
         let offset = 0
         let lastProgress = 0
         while (offset < total) {
-          const chunk = await session.fsReadChunk(start.xid, offset)
-          if (chunk.len <= 0) break
-          await handle.write(chunk.data)
-          offset += chunk.len
-          written = offset
-          if (written - lastProgress >= 256 * 1024 || chunk.eof) {
-            lastProgress = written
-            send('fs:progress', {
-              id: progressId,
-              direction: 'download',
-              name: start.name,
-              path: req.path,
-              written,
-              total,
-              phase: 'progress'
-            } satisfies FsProgress)
+          const jobs: (() => ReturnType<typeof session.fsReadChunk>)[] = []
+          for (let i = 0; i < session.transferWindowSize() && offset + i * start.chunk < total; i++) {
+            const position = offset + i * start.chunk
+            jobs.push(() => session.fsReadChunk(start.xid, position))
           }
-          if (chunk.eof) break
+          const chunks = await transferWindow(jobs)
+          for (const chunk of chunks) {
+            if (chunk.offset !== offset || chunk.len !== Math.min(start.chunk, total - offset)) {
+              throw new Error('VERIFY: 下载数据不连续或长度错误')
+            }
+            let localOffset = 0
+            while (localOffset < chunk.len) {
+              const result = await handle.write(chunk.data, localOffset, chunk.len - localOffset)
+              if (!result.bytesWritten) throw new Error('IO: 本机文件写入失败')
+              localOffset += result.bytesWritten
+            }
+            offset += chunk.len
+            written = offset
+            if (written - lastProgress >= 256 * 1024 || chunk.eof) {
+              lastProgress = written
+              send('fs:progress', {
+                id: progressId,
+                direction: 'download',
+                name: start.name,
+                path: req.path,
+                written,
+                total,
+                phase: 'progress'
+              } satisfies FsProgress)
+            }
+            if (chunk.eof) break
+          }
         }
         await session.fsReadEnd(start.xid)
         started = false
         await handle.close()
         handle = undefined
+        await rename(temporaryPath, result.filePath)
+        temporaryCreated = false
         send('fs:progress', {
           id: progressId,
           direction: 'download',
@@ -451,7 +477,7 @@ function registerIpc(): void {
       } catch (err) {
         if (started) await session.fsReadEnd(xid).catch(() => undefined)
         if (handle) await handle.close().catch(() => undefined)
-        await unlink(result.filePath).catch(() => undefined)
+        if (temporaryCreated) await unlink(temporaryPath).catch(() => undefined)
         send('fs:progress', {
           id: progressId,
           direction: 'download',
@@ -463,6 +489,8 @@ function registerIpc(): void {
           message: err instanceof Error ? err.message : String(err)
         } satisfies FsProgress)
         throw err
+      } finally {
+        await session.fsSessionEnd()
       }
     }
   )

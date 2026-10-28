@@ -1,4 +1,5 @@
 #include "ble.h"
+#include "filexfer.h"
 #include "config.h"
 #include "favorites.h"
 #include "parental.h"
@@ -380,6 +381,7 @@ void handleSet(JsonDocument& doc, int32_t id) {
 }
 
 void handleCtrl(JsonDocument& doc, int32_t id) {
+  if (FileXfer::busy()) { sendError(id, "TRANSFER_BUSY"); return; }
   const char* action = doc["action"] | "";
   int value = doc["value"] | 0;
 

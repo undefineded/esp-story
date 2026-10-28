@@ -119,6 +119,8 @@ export class MockBridge implements NfcBridge {
   private fsProgressListeners = new Set<(progress: FsProgress) => void>()
 
   files: FileBridge = {
+    sessionBegin: async () => {},
+    sessionEnd: async () => {},
     list: (path, offset = 0, limit = 64) => this.fsList(path, offset, limit),
     mkdir: (path) => this.fsMkdir(path),
     remove: (path) => this.fsRemove(path),

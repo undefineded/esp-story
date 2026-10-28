@@ -1,4 +1,5 @@
 #include "power.h"
+#include "filexfer.h"
 #include "config.h"
 #include "settings.h"
 #include "input.h"
@@ -89,6 +90,11 @@ void begin() {
 
 bool loop(bool audioActive) {
   if (s_sleeping) return false;
+  if (FileXfer::busy()) {
+    s_lastAct = millis();
+    if (s_screenOff) screenOn();
+    return false;
+  }
 
   uint32_t now = millis();
 

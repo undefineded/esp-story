@@ -33,6 +33,8 @@ const appVersion =
   '1.0.0'
 
 const files: FileBridge = {
+  sessionBegin: () => ipcRenderer.invoke('fs:session-begin') as Promise<void>,
+  sessionEnd: () => ipcRenderer.invoke('fs:session-end') as Promise<void>,
   list: (path, offset = 0, limit = 64) =>
     ipcRenderer.invoke('fs:list', { path, offset, limit }) as Promise<FsListing>,
   mkdir: (path) => ipcRenderer.invoke('fs:mkdir', path) as Promise<void>,

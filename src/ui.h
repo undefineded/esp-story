@@ -8,8 +8,8 @@ namespace Ui {
   void setHall(bool detected);                      // 顶栏通知位: 卡片插入状态 (任意界面立即更新)
   void setChildLock(bool locked);                   // 顶栏童锁标识 (任意界面立即更新)
   void boot(const char* line1, const char* line2);  // 启动/提示页
-  void drawHome(int selected, uint8_t volume);      // 主页: 音乐/故事/童谣/设置 四宫格
-  void updateHome(int selected, uint8_t volume);    // 仅重绘选中变化的宫格
+  void drawHome(int selected, uint8_t volume);      // 故事小镇: 主题插画 + 四张车票导航
+  void updateHome(int selected, uint8_t volume);    // 切换主题 / 局部更新音量
   void drawNotice(const char* title, const char* line1, const char* line2); // 空列表提示页
   void drawStatic();                                // 绘制主界面静态框架
   void update(const PlayerStatus& st, bool hallDetected);  // 主界面增量刷新
