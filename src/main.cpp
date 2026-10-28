@@ -96,6 +96,8 @@ static int    s_trackPlaying = 0;  // 当前歌曲列表中"正在播放"的曲�
 static int    s_storySel = 0;      // 当前故事目录选中项
 static int    s_storyCatSel = 0;   // /story 一级分类选中项
 static String s_storyPath;         // 当前浏览的故事目录 (/story 或更深)
+static int    s_storyPlayIndex = 0;  // 当前目录播放列表中的序号
+static int    s_storyPlayCount = 1;  // 当前目录可播放条目数
 static bool   s_storyRedraw = false;  // 从设置返回故事页: 置位以强制整体重绘
 static bool   s_audioRedraw = false;  // 音频故事页: 置位以强制整页重绘
 static bool   s_bleWasConnected = false;
@@ -694,9 +696,15 @@ static void playStoryActual(int actual) {
   String parent = Story::parentOfActual(actual);
   s_storyPath = parent;
   if (Story::browse(parent)) {
+    int leafIndex = 0, leafCount = 0;
     for (int i = 0; i < Story::browseCount(); ++i) {
-      if (Story::browseIsStory(i) && Story::browseActual(i) == actual) { s_storySel = i; break; }
+      if (!Story::browseIsStory(i)) continue;
+      if (Story::browseActual(i) == actual) leafIndex = leafCount;
+      leafCount++;
+      if (Story::browseActual(i) == actual) s_storySel = i;
     }
+    s_storyPlayIndex = leafIndex;
+    s_storyPlayCount = leafCount > 0 ? leafCount : 1;
   }
 
   Story::Kind kind = Story::kind(actual);
@@ -1386,8 +1394,8 @@ void loop() {
        这里把状态映射成单曲故事信息, 避免显示上一首音乐的名字/计数。 */
     PlayerStatus st = Player::status();
     st.hasTrack = true;
-    st.index = 0;
-    st.count = 1;
+    st.index = s_storyPlayIndex;
+    st.count = s_storyPlayCount;
     st.name = Story::currentTitle();
     if (s_audioRedraw) {
       s_audioRedraw = false;

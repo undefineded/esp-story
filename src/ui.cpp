@@ -1157,6 +1157,8 @@ namespace {
 
     if (folder) {
       iconFolder(24, y + 10, selected ? cCoral : cAqua);
+    } else if (Story::kind(actual) == Story::Kind::Audio) {
+      iconNote(24, y + 8, isPlaying ? cCoral : (selected ? cCoral : cAqua));
     } else {
       g.fillRoundRect(22, y + 8, 20, 22, 3, isPlaying ? cCoral : (selected ? cCoral : cAqua));
       g.drawRoundRect(22, y + 8, 20, 22, 3, cInk);

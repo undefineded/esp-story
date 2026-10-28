@@ -9,6 +9,7 @@ namespace {
   struct Panel { uint32_t ms; char name[28]; };
 
   String   s_dirs[MAX_STORIES];
+  String   s_titles[MAX_STORIES];
   String   s_groups[MAX_STORIES];          // /story 一级分组名
   String   s_catNames[MAX_STORIES];
   int      s_storyCat[MAX_STORIES];
@@ -61,14 +62,15 @@ namespace {
     return k >= 0 ? path.substring(k + 1) : path;
   }
 
-  /* 从 /story 的完整路径推出一级分组: /story/音频故事/xx -> 音频故事;
-     直接放在 /story/xx 的故事归到"故事". */
+  /* 从 /story 的完整路径推出一级分类: /story/音频故事/xx -> 音频故事;
+     /story/音频故事 本身也属于"音频故事"分类。 */
   String groupFromDir(const String& dir) {
     const int rootLen = (int)strlen(STORY_DIR);
     if (!dir.startsWith(STORY_DIR "/")) return String("故事");
     String rest = dir.substring(rootLen + 1);
+    if (rest.isEmpty()) return String("故事");
     int slash = rest.indexOf('/');
-    return slash < 0 ? String("故事") : rest.substring(0, slash);
+    return slash < 0 ? rest : rest.substring(0, slash);
   }
 
   void buildCategories() {
@@ -86,11 +88,40 @@ namespace {
     }
   }
 
-  void addStory(const String& dir, const String& group) {
+  String stripExt(const String& name) {
+    int k = name.lastIndexOf('.');
+    return (k > 0) ? name.substring(0, k) : name;
+  }
+
+  void addItem(const String& dir, const String& audio, const String& timeline,
+               const String& group) {
     if (s_count >= MAX_STORIES) return;
     s_dirs[s_count] = dir;
+    s_audioPaths[s_count] = audio;
+    s_timelinePaths[s_count] = timeline;
     s_groups[s_count] = group.length() ? group : String("故事");
+    if (timeline.isEmpty()) {
+      int k = audio.lastIndexOf('/');
+      String name = k >= 0 ? audio.substring(k + 1) : audio;
+      s_titles[s_count] = stripExt(name);
+    } else {
+      int k = dir.lastIndexOf('/');
+      s_titles[s_count] = k >= 0 ? dir.substring(k + 1) : dir;
+    }
     s_count++;
+  }
+
+  /* 音频条目的父目录是目录本身; 图文故事条目的父目录是故事文件夹的上一级 */
+  String itemParent(int i) {
+    if (i < 0 || i >= s_count) return String();
+    if (s_timelinePaths[i].isEmpty()) return s_dirs[i];
+    int k = s_dirs[i].lastIndexOf('/');
+    return k <= 0 ? String() : s_dirs[i].substring(0, k);
+  }
+
+  String itemSortKey(int i) {
+    if (i < 0 || i >= s_count) return String();
+    return s_timelinePaths[i].isEmpty() ? s_audioPaths[i] : s_dirs[i];
   }
 
   /* 扫描 /story 下的分组和故事目录 (每个含 mp3 的目录 = 一个故事), 按名称排序 */
@@ -103,40 +134,38 @@ namespace {
     }
   }
 
-  /* 目录里是否有 mp3: 用来判断"自身就是故事目录"还是"图文故事/音频故事这样的分组目录" */
-  bool dirHasMp3(const String& dir) {
-    File d = SD_MMC.open(dir);
-    if (!d || !d.isDirectory()) { s_scanOk = false; return false; }
-    bool hit = false;
-    File f;
-    while (!hit && (f = d.openNextFile())) {
-      hit = !f.isDirectory() && hasExt(f.name(), ".mp3");
-      f.close();
-    }
-    d.close();
-    return hit;
-  }
-
-  /* 递归收集故事目录: 含 mp3 的目录算一个故事, 否则当作分组目录继续向下 (最多 3 层)。
-     这样 /story/<名>/、/story/图文故事/<名>/、/story/音频故事/<名>/ 都能识别。
-     group 记录 /story 下的一级分组, 供故事分类列表使用。 */
+  /* 递归收集最小故事条目:
+     - 有 timeline.lrc 的目录 = 一个图文故事 (目录是最小单位)
+     - 没有 timeline 的目录 = 其中的每个 MP3 都是一个音频故事条目
+     group 记录 /story 下的一级分组。 */
   void scanDir(const String& dir, int depth, bool root, const String& group) {
-    if (!root && dirHasMp3(dir)) {
-      addStory(dir, group);
-      return;
+    if (depth >= MAX_STORY_DEPTH) return;
+
+    String lrc = findFirst(dir, ".lrc");
+    String image = findFirst(dir, ".jpg");
+    if (!lrc.isEmpty() && !image.isEmpty()) {
+      String audio = findFirst(dir, ".mp3");
+      if (!audio.isEmpty()) {
+        addItem(dir, audio, lrc, group);
+        return;
+      }
     }
-    if (depth >= 3) return;
 
     File d = SD_MMC.open(dir);
     if (!d || !d.isDirectory()) { s_scanOk = false; return; }
     File f;
     while (s_count < MAX_STORIES && (f = d.openNextFile())) {
-      if (f.isDirectory()) {
-        String child = fullPath(dir, f.name());
+      String name = f.name();
+      if (!f.isDirectory()) {
+        if (hasExt(name.c_str(), ".mp3")) {
+          addItem(dir, fullPath(dir, name.c_str()), String(), group);
+        }
+      } else {
+        String child = fullPath(dir, name.c_str());
         String childGroup = group;
         if (depth == 0) {
-          // 一级目录: 自己含 mp3 就是直接放在 /story 下的故事; 否则就是分组名。
-          childGroup = dirHasMp3(child) ? String("故事") : baseName(child);
+          // /story 下的第一层目录就是分类 (音频故事/图文故事/自定义分类)。
+          childGroup = baseName(child);
         }
         scanDir(child, depth + 1, false, childGroup);
       }
@@ -155,24 +184,28 @@ namespace {
     int order[MAX_STORIES];
     for (int i = 0; i < s_count; ++i) order[i] = i;
     std::sort(order, order + s_count,
-              [](int a, int b) { return strcmp(s_dirs[a].c_str(), s_dirs[b].c_str()) < 0; });
-    String dirs[MAX_STORIES], groups[MAX_STORIES];
+              [](int a, int b) { return strcmp(itemSortKey(a).c_str(), itemSortKey(b).c_str()) < 0; });
+
+    String dirs[MAX_STORIES], audio[MAX_STORIES], timelines[MAX_STORIES], groups[MAX_STORIES], titles[MAX_STORIES];
     for (int i = 0; i < s_count; ++i) {
-      dirs[i] = s_dirs[order[i]];
-      groups[i] = s_groups[order[i]];
+      int k = order[i];
+      dirs[i] = s_dirs[k];
+      audio[i] = s_audioPaths[k];
+      timelines[i] = s_timelinePaths[k];
+      groups[i] = s_groups[k];
+      titles[i] = s_titles[k];
     }
     for (int i = 0; i < s_count; ++i) {
       s_dirs[i] = dirs[i];
+      s_audioPaths[i] = audio[i];
+      s_timelinePaths[i] = timelines[i];
       s_groups[i] = groups[i];
+      s_titles[i] = titles[i];
     }
 
-    for (int i = 0; i < s_count; ++i) {
-      s_audioPaths[i] = findFirst(s_dirs[i], ".mp3");
-      s_timelinePaths[i] = findFirst(s_dirs[i], ".lrc");
-    }
     int illustrated = 0;
     for (int i = 0; i < s_count; ++i) if (!s_timelinePaths[i].isEmpty()) illustrated++;
-    Serial.printf("[STORY] %d story(ies) in %s (%d illustrated, %d audio)\n",
+    Serial.printf("[STORY] %d item(s) in %s (%d illustrated, %d audio)\n",
                   s_count, STORY_DIR, illustrated, s_count - illustrated);
     buildCategories();
     rebuildView();
@@ -257,6 +290,7 @@ namespace Story {
 
 void clear() {
   for (auto& dir : s_dirs) dir = "";
+  for (auto& title : s_titles) title = "";
   for (auto& group : s_groups) group = "";
   for (auto& name : s_catNames) name = "";
   for (auto& cat : s_storyCat) cat = 0;
@@ -278,7 +312,8 @@ bool index(CatalogArchive& archive, bool reading, bool apply) {
     String dir = reading ? String() : s_dirs[i];
     String audio = reading ? String() : s_audioPaths[i];
     String timeline = reading ? String() : s_timelinePaths[i];
-    if (!archive.text(dir) || !dir.startsWith("/story/") || dir.indexOf("/../") >= 0 ||
+    if (!archive.text(dir) || !(dir == "/story" || dir.startsWith("/story/")) ||
+        dir.indexOf("/../") >= 0 ||
         !archive.text(audio) || !archive.text(timeline)) return false;
     if ((!audio.isEmpty() && (!audio.startsWith(dir + "/") || audio.indexOf("/../") >= 0 || !hasExt(audio.c_str(), ".mp3"))) ||
         (!timeline.isEmpty() && (!timeline.startsWith(dir + "/") || timeline.indexOf("/../") >= 0 || !hasExt(timeline.c_str(), ".lrc")))) return false;
@@ -287,6 +322,14 @@ bool index(CatalogArchive& archive, bool reading, bool apply) {
       s_groups[i] = groupFromDir(dir);
       s_audioPaths[i] = audio;
       s_timelinePaths[i] = timeline;
+      if (timeline.isEmpty()) {
+        int k = audio.lastIndexOf('/');
+        String name = k >= 0 ? audio.substring(k + 1) : audio;
+        s_titles[i] = stripExt(name);
+      } else {
+        int k = dir.lastIndexOf('/');
+        s_titles[i] = k >= 0 ? dir.substring(k + 1) : dir;
+      }
     }
   }
   if (reading && apply) { s_count = count; buildCategories(); rebuildView(); }
@@ -351,33 +394,24 @@ int categoryOfActual(int actual) {
 
 String categoryPath(int c) {
   if (c < 0 || c >= s_catCount) return String();
-  const String root = String("/story/") + s_catNames[c];
-  for (int i = 0; i < s_count; ++i) {
-    if (s_storyCat[i] != c) continue;
-    int k = s_dirs[i].lastIndexOf('/');
-    String parent = k <= 0 ? String() : s_dirs[i].substring(0, k);
-    if (parent == "/story") return String("/story");
-    if (parent == root) return root;
-  }
-  return root;
+  return String("/story/") + s_catNames[c];
 }
 
 String parentOfActual(int actual) {
-  if (actual < 0 || actual >= s_count) return String();
-  int k = s_dirs[actual].lastIndexOf('/');
-  return k <= 0 ? String() : s_dirs[actual].substring(0, k);
+  return itemParent(actual);
 }
 
 int actualAtPath(const String& path) {
   for (int i = 0; i < s_count; ++i) {
-    if (s_dirs[i] == path) return i;
+    const String& leaf = s_timelinePaths[i].isEmpty() ? s_audioPaths[i] : s_dirs[i];
+    if (leaf == path) return i;
   }
   return -1;
 }
 
-/* 把 path 下所有允许的故事按"直接子文件夹"聚合。
-   story=true 表示这个子文件夹本身就是故事; 否则继续下钻。
-   count 是该子文件夹下允许的故事总数, 用于文件夹行右侧提示。 */
+/* 把 path 下所有允许的条目按"直接子项"聚合:
+   - 子文件夹: story=false, count=其下条目数
+   - 音频文件 / 图文故事文件夹: story=true, actual=条目下标 */
 bool browse(const String& path) {
   s_browseCount = 0;
   s_browsePath = path;
@@ -388,11 +422,20 @@ bool browse(const String& path) {
 
   for (int v = 0; v < s_viewCount; ++v) {
     int actual = s_view[v];
-    const String& dir = s_dirs[actual];
-    if (!dir.startsWith(prefix)) continue;
-    String rel = dir.substring(prefix.length());
-    int slash = rel.indexOf('/');
-    String child = (slash < 0) ? rel : rel.substring(0, slash);
+    String parent = itemParent(actual);
+    if (parent.isEmpty()) continue;
+
+    bool leaf = (parent == path);
+    String child;
+    if (leaf) {
+      child = title(actual);
+    } else if (parent.startsWith(prefix)) {
+      String rel = parent.substring(prefix.length());
+      int slash = rel.indexOf('/');
+      child = (slash < 0) ? rel : rel.substring(0, slash);
+    } else {
+      continue;
+    }
     if (child.isEmpty()) continue;
 
     int entry = -1;
@@ -407,7 +450,7 @@ bool browse(const String& path) {
       s_browse[entry].count = 0;
     }
     s_browse[entry].count++;
-    if (slash < 0) {
+    if (leaf) {
       s_browse[entry].story = true;
       s_browse[entry].actual = actual;
     }
@@ -444,8 +487,7 @@ const char* currentTitle() {
 
 const char* title(int i) {
   if (i < 0 || i >= s_count) return "";
-  int k = s_dirs[i].lastIndexOf('/');
-  return (k >= 0) ? s_dirs[i].c_str() + k + 1 : s_dirs[i].c_str();
+  return s_titles[i].c_str();
 }
 
 /* 有 timeline 就是图文故事 (插画+同步), 没有就是纯音频故事 */
