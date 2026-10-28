@@ -29,12 +29,12 @@ namespace Ui {
   /* 故事模式 */
   void drawStoryCategoryList(int count, int selected);  // /story 一级分组 (音频故事/图文故事)
   void updateStoryCategoryList(int count, int selected);
-  void drawStoryList(int category, int count, int selected, int playing);  // 分类内故事列表
-  void updateStoryList(int category, int count, int selected, int playing);
+  void drawStoryList(const char* path, int count, int selected, int playing);  // 当前目录的直接子文件夹/故事
+  void updateStoryList(const char* path, int count, int selected, int playing);
   void drawStoryLoadingBegin(const char* title);    // 加载页静态层 (背景/顶栏/小书/文案)
   void drawStoryLoadingSpin(int step);              // 加载页旋转圆环 (step 递增, 原位重绘不闪)
   void drawStoryFrame(const char* imgPath);         // 全屏插画 (JPEG)
-  void drawStoryAudio(const char* title, const PlayerStatus& st);  // 音频故事播放页 (整页重绘)
+  void drawStoryAudioStatic(const char* category);  // 音频故事播放页: 复用音乐播放器布局
   void setStoryTitle(const char* title);            // 设置播放页控制条上的故事名
   void drawStoryBar(int panel, int total, uint32_t curSec, uint32_t durSec,
                     uint8_t volume, bool paused);   // 插画底部控制条 (增量刷新, 内部含跑马灯)

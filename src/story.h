@@ -28,6 +28,17 @@ namespace Story {
   int  categoryStoryActual(int c, int view);  // 分组内第 view 个故事的实际下标
   const char* categoryStoryTitle(int c, int view);
   int  categoryOfActual(int actual);
+  String categoryPath(int c);              // 分类对应的目录 (/story/音频故事 或 /story)
+
+  /* 递归目录浏览: 当前目录的直接子文件夹, 含"故事叶子/继续下钻的文件夹" */
+  bool browse(const String& path);
+  int  browseCount();
+  const char* browseName(int i);
+  bool browseIsStory(int i);
+  int  browseActual(int i);
+  int  browseDescendantCount(int i);
+  String parentOfActual(int actual);
+  int  actualAtPath(const String& path);
 
   /* 家长内容白名单视图 */
   void setStoryFilter(uint64_t mask, bool enabled);

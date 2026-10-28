@@ -13,6 +13,16 @@ namespace {
   String   s_catNames[MAX_STORIES];
   int      s_storyCat[MAX_STORIES];
   int      s_catCount = 0;
+
+  struct BrowseEntry {
+    String name;
+    bool story = false;
+    int actual = -1;
+    int count = 0;
+  };
+  BrowseEntry s_browse[MAX_STORIES];
+  int         s_browseCount = 0;
+  String      s_browsePath;
   String   s_audioPaths[MAX_STORIES], s_timelinePaths[MAX_STORIES];
   int      s_count = 0;
   bool     s_scanOk = true;
@@ -337,6 +347,93 @@ int categoryStoryCount(int c) {
 
 int categoryOfActual(int actual) {
   return (actual >= 0 && actual < s_count) ? s_storyCat[actual] : -1;
+}
+
+String categoryPath(int c) {
+  if (c < 0 || c >= s_catCount) return String();
+  const String root = String("/story/") + s_catNames[c];
+  for (int i = 0; i < s_count; ++i) {
+    if (s_storyCat[i] != c) continue;
+    int k = s_dirs[i].lastIndexOf('/');
+    String parent = k <= 0 ? String() : s_dirs[i].substring(0, k);
+    if (parent == "/story") return String("/story");
+    if (parent == root) return root;
+  }
+  return root;
+}
+
+String parentOfActual(int actual) {
+  if (actual < 0 || actual >= s_count) return String();
+  int k = s_dirs[actual].lastIndexOf('/');
+  return k <= 0 ? String() : s_dirs[actual].substring(0, k);
+}
+
+int actualAtPath(const String& path) {
+  for (int i = 0; i < s_count; ++i) {
+    if (s_dirs[i] == path) return i;
+  }
+  return -1;
+}
+
+/* 把 path 下所有允许的故事按"直接子文件夹"聚合。
+   story=true 表示这个子文件夹本身就是故事; 否则继续下钻。
+   count 是该子文件夹下允许的故事总数, 用于文件夹行右侧提示。 */
+bool browse(const String& path) {
+  s_browseCount = 0;
+  s_browsePath = path;
+  if (path.isEmpty() || !path.startsWith("/story")) return false;
+
+  String prefix = path;
+  if (!prefix.endsWith("/")) prefix += "/";
+
+  for (int v = 0; v < s_viewCount; ++v) {
+    int actual = s_view[v];
+    const String& dir = s_dirs[actual];
+    if (!dir.startsWith(prefix)) continue;
+    String rel = dir.substring(prefix.length());
+    int slash = rel.indexOf('/');
+    String child = (slash < 0) ? rel : rel.substring(0, slash);
+    if (child.isEmpty()) continue;
+
+    int entry = -1;
+    for (int i = 0; i < s_browseCount; ++i) {
+      if (s_browse[i].name == child) { entry = i; break; }
+    }
+    if (entry < 0) {
+      entry = s_browseCount++;
+      s_browse[entry].name = child;
+      s_browse[entry].story = false;
+      s_browse[entry].actual = -1;
+      s_browse[entry].count = 0;
+    }
+    s_browse[entry].count++;
+    if (slash < 0) {
+      s_browse[entry].story = true;
+      s_browse[entry].actual = actual;
+    }
+  }
+
+  std::sort(s_browse, s_browse + s_browseCount,
+            [](const BrowseEntry& a, const BrowseEntry& b) { return a.name < b.name; });
+  return true;
+}
+
+int browseCount() { return s_browseCount; }
+
+const char* browseName(int i) {
+  return (i >= 0 && i < s_browseCount) ? s_browse[i].name.c_str() : "";
+}
+
+bool browseIsStory(int i) {
+  return (i >= 0 && i < s_browseCount) ? s_browse[i].story : false;
+}
+
+int browseActual(int i) {
+  return (i >= 0 && i < s_browseCount) ? s_browse[i].actual : -1;
+}
+
+int browseDescendantCount(int i) {
+  return (i >= 0 && i < s_browseCount) ? s_browse[i].count : 0;
 }
 
 int currentIndex() { return s_current; }

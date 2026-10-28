@@ -159,20 +159,24 @@ void drawCover() {
 
 /* 分类徽章 (静态): 显示当前分类名; 童谣汇总显示"童谣"。
    宽度随文字自适应, 左右各 6px 内边距 (对照 ui.html .category 的 padding: 0 6px) */
-void drawCategory() {
+void drawCategoryBadge(const String& label) {
   auto& g = Display::canvas();
-  String label = "音乐";
-  int ci = Storage::currentCategory();
-  if (ci == Storage::NURSERY_CATEGORY)      label = "童谣";
-  else if (ci > 0 && ci < Storage::catCount()) label = Storage::catName(ci);
-
   const int BADGE_PAD = 6;
+  g.fillRect(INFO_X, 43, INFO_W, 18, cPaper);
   g.setFont(Fonts::body());
   int w = g.textWidth(label) + BADGE_PAD * 2;
   g.fillRoundRect(INFO_X, 43, w, 18, 4, cAqua);
   g.drawRoundRect(INFO_X, 43, w, 18, 4, cAquaDk);
   g.setTextColor(TFT_WHITE, cAqua);
   g.drawString(label, INFO_X + BADGE_PAD, 44);
+}
+
+void drawCategory() {
+  String label = "音乐";
+  int ci = Storage::currentCategory();
+  if (ci == Storage::NURSERY_CATEGORY)      label = "童谣";
+  else if (ci > 0 && ci < Storage::catCount()) label = Storage::catName(ci);
+  drawCategoryBadge(label);
 }
 
 /* 集数 "03 / 24" */
@@ -1134,41 +1138,46 @@ void updateStoryCategoryList(int count, int selected) {
   s_sclTop = top; s_sclCount = count; s_sclSel = selected;
 }
 
-/* ---------------- 故事列表 ----------------
-   当前分类内的故事卡片; 正在播放的故事用珊瑚色标题/图标和"播放中"标记。 */
+/* ---------------- 故事目录浏览 ----------------
+   当前目录的直接子项: 文件夹可继续下钻, 含 MP3 的故事文件夹直接播放。 */
 
 namespace {
   const int STORY_Y0 = 36, STORY_RH = 42, STORY_VIS = 4;
 
-  /* 故事行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影 */
-  void storyRow(int y, const char* name, bool selected, bool illustrated, bool playing) {
+  void storyBrowseRow(int y, int index, bool selected, int playing) {
     auto& g = Display::canvas();
+    bool folder = !Story::browseIsStory(index);
+    int actual = Story::browseActual(index);
+    bool isPlaying = (!folder && actual >= 0 && actual == playing);
+
     if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
     g.fillRoundRect(10, y, 300, 38, 6, selected ? cInk : TFT_WHITE);
     g.fillRoundRect(12, y + 2, 296, 34, 5, selected ? cYellow : TFT_WHITE);
     if (!selected) g.drawRoundRect(10, y, 300, 38, 6, cTrackBd);
 
-    /* 小书图标 */
-    uint16_t iconColor = playing ? cCoral : (selected ? cCoral : cAqua);
-    g.fillRoundRect(22, y + 8, 20, 22, 3, iconColor);
-    g.drawRoundRect(22, y + 8, 20, 22, 3, cInk);
-    g.fillRect(25, y + 8, 3, 22, cInk);
+    if (folder) {
+      iconFolder(24, y + 10, selected ? cCoral : cAqua);
+    } else {
+      g.fillRoundRect(22, y + 8, 20, 22, 3, isPlaying ? cCoral : (selected ? cCoral : cAqua));
+      g.drawRoundRect(22, y + 8, 20, 22, 3, cInk);
+      g.fillRect(25, y + 8, 3, 22, cInk);
+    }
 
     uint16_t bg = selected ? cYellow : TFT_WHITE;
     g.setFont(Fonts::title());
-    g.setTextColor(playing ? cCoral : cText, bg);
-    g.drawString(fit(String(name), 178).c_str(), 50, y + 9);
+    g.setTextColor(isPlaying ? cCoral : cText, bg);
+    g.drawString(fit(String(Story::browseName(index)), 178).c_str(), 52, y + 9);
 
-    /* 右侧状态: 播放中优先于类型徽章 */
-    const char* tag = playing ? "播放中" : (illustrated ? "图文" : "音频");
-    uint16_t tagBg = playing ? cCoral : (illustrated ? cAqua : cPurple);
-    if (selected && !playing) tagBg = cCoral;
     g.setFont(Fonts::small());
-    int tw = g.textWidth(tag) + 10;
-    int tx = 306 - tw;
-    g.fillRoundRect(tx, y + 11, tw, 16, 4, tagBg);
-    g.setTextColor(TFT_WHITE, tagBg);
-    g.drawString(tag, tx + 5, y + 12);
+    if (folder) {
+      char b[20];
+      snprintf(b, sizeof(b), "%d个", Story::browseDescendantCount(index));
+      g.setTextColor(cText, bg);
+      g.drawRightString(b, 296, y + 14);
+    } else if (isPlaying) {
+      g.setTextColor(cCoral, bg);
+      g.drawRightString("播放中", 296, y + 14);
+    }
   }
 
   int storyTop(int selected, int count) {
@@ -1178,58 +1187,64 @@ namespace {
     return top;
   }
 
-  /* 只重绘一行槽位 (含清行), 说明见 musicRepaintRow */
-  void storyRepaintRow(int r, int top, int category, int count, int selected, int playing) {
+  void storyRepaintRow(int r, int top, int count, int selected, int playing) {
     auto& g = Display::canvas();
     int y = STORY_Y0 + r * STORY_RH;
     g.fillRect(8, y, 306, STORY_RH, cPaper);
     int i = top + r;
-    if (i >= count) return;
-    int actual = Story::categoryStoryActual(category, i);
-    if (actual < 0) return;
-    bool illustrated = (Story::kind(actual) == Story::Kind::Illustrated);
-    storyRow(y, Story::categoryStoryTitle(category, i), i == selected, illustrated, actual == playing);
+    if (i < count) storyBrowseRow(y, i, i == selected, playing);
   }
 
-  void storyRows(int category, int count, int selected, int playing) {
+  void storyRows(int count, int selected, int playing) {
     int top = storyTop(selected, count);
     for (int r = 0; r < STORY_VIS; r++)
-      storyRepaintRow(r, top, category, count, selected, playing);
+      storyRepaintRow(r, top, count, selected, playing);
   }
 
-  int s_slTop = -1, s_slCount = -1, s_slSel = -1, s_slPlay = -1, s_slCat = -1;
+  int s_slTop = -1, s_slCount = -1, s_slSel = -1, s_slPlay = -1;
+  String s_slPath;
 }
 
-void drawStoryList(int category, int count, int selected, int playing) {
+/* 从 /story/xxx 或更深路径生成面包屑 */
+String storyCrumb(const char* path) {
+  String p(path ? path : "");
+  if (p == "/story" || p.isEmpty()) return String("故事");
+  if (p.startsWith("/story/")) p = p.substring(7);
+  p.replace("/", " / ");
+  return p;
+}
+
+void drawStoryList(const char* path, int count, int selected, int playing) {
   palette();
   auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
-  storyRows(category, count, selected, playing);
+  storyRows(count, selected, playing);
 
   g.setFont(Fonts::small());
   g.setTextColor(cText, cPaper);
-  String hint = String(Story::categoryName(category)) + " · OK播放 · 长按NEXT回播放";
-  g.drawCenterString(hint.c_str(), 160, 213);
+  String hint = storyCrumb(path) + " · OK进入/播放 · 长按OK返回";
+  g.drawCenterString(fit(hint, 304).c_str(), 160, 214);
 
   s_slTop   = storyTop(selected, count);
   s_slCount = count;
   s_slSel   = selected;
   s_slPlay  = playing;
-  s_slCat   = category;
+  s_slPath  = path ? path : "";
 }
 
 /* 选择变化时的增量刷新: 只重绘发生变化的行 (不清屏) */
-void updateStoryList(int category, int count, int selected, int playing) {
+void updateStoryList(const char* path, int count, int selected, int playing) {
   palette();
-  if (s_slTop < 0 || s_slCount != count || s_slCat != category) {
-    drawStoryList(category, count, selected, playing); return;
+  String p(path ? path : "");
+  if (s_slTop < 0 || s_slCount != count || s_slPath != p) {
+    drawStoryList(path, count, selected, playing); return;
   }
 
   int top = storyTop(selected, count);
   if (top != s_slTop) {
     for (int r = 0; r < STORY_VIS; r++)
-      storyRepaintRow(r, top, category, count, selected, playing);
+      storyRepaintRow(r, top, count, selected, playing);
   } else {
     int idx[4] = { s_slSel, s_slPlay, selected, playing };
     for (int k = 0; k < 4; k++) {
@@ -1238,10 +1253,11 @@ void updateStoryList(int category, int count, int selected, int playing) {
       if (duplicate) continue;
       int r = idx[k] - top;
       if (r >= 0 && r < STORY_VIS)
-        storyRepaintRow(r, top, category, count, selected, playing);
+        storyRepaintRow(r, top, count, selected, playing);
     }
   }
   s_slTop = top; s_slCount = count; s_slSel = selected; s_slPlay = playing;
+  s_slPath = p;
 }
 
 namespace {
@@ -1299,61 +1315,19 @@ void drawStoryFrame(const char* imgPath) {
 }
 
 /* ---------------- 音频故事播放页 ----------------
-   音频故事没有插画, 不能沿用"全屏图 + 底部控制条"的图文版式, 改用整页信息卡:
-     顶栏 | 信息卡 (声波徽标 + 故事名 + 播放状态) | 进度条 + 时间 | 操作提示
-   每秒整页重绘一次 (无图可省, 开销很小), 避免增量刷新留下的残影。 */
-void drawStoryAudio(const char* title, const PlayerStatus& st) {
-  palette();
+   直接复用音乐播放器布局 (封面卡/信息列/进度/控制栏), 只把封面标签和分类徽章
+   换成故事信息; 动态部分继续走 Ui::update() 的增量刷新。 */
+void drawStoryAudioStatic(const char* category) {
+  drawStatic();
   auto& g = Display::canvas();
-  g.fillScreen(cPaper);
-  drawTopBarBase();
-  drawVolume(st);
 
-  /* 信息卡: 3px 硬阴影 + 白底 + 描边 (与列表卡片同一套观感) */
-  const int CX = 40, CY = 52, CW = 240, CH = 112;
-  g.fillRoundRect(CX + 3, CY + 3, CW, CH, 8, cInk);
-  g.fillRoundRect(CX, CY, CW, CH, 8, TFT_WHITE);
-  g.drawRoundRect(CX, CY, CW, CH, 8, cTrackBd);
+  g.fillRect(12, 132, 88, 20, cYellow);
+  g.setFont(Fonts::body());
+  g.setTextColor(cText, cYellow);
+  g.drawCenterString("音频故事", 56, 135);
 
-  /* 声波徽标: 珊瑚色圆底 + 白色声源点与两道弧 */
-  g.fillCircle(CX + 44, CY + 56, 30, cCoral);
-  g.fillCircle(CX + 32, CY + 56, 5, TFT_WHITE);
-  g.fillArc(CX + 32, CY + 56, 11, 13, -52, 52, TFT_WHITE);
-  g.fillArc(CX + 32, CY + 56, 18, 20, -52, 52, TFT_WHITE);
-
-  /* 故事名 + 状态 + 类型 */
-  g.setFont(Fonts::title());
-  g.setTextColor(cText, TFT_WHITE);
-  g.drawString(fit(String(title), 128).c_str(), CX + 84, CY + 26);
-
-  g.setFont(Fonts::small());
-  g.fillCircle(CX + 88, CY + 60, 3, st.paused ? cYellow : cGreen);
-  g.setTextColor(cText, TFT_WHITE);
-  g.drawString(st.paused ? "已暂停" : "正在播放", CX + 96, CY + 53);
-  g.drawString("音频故事", CX + 88, CY + 74);
-
-  /* 进度条 (与音乐播放页同一套配色) */
-  const int PX = 40, PY = 180, PW = 240, PH = 8;
-  g.fillRoundRect(PX, PY, PW, PH, 2, cTrack);
-  g.drawRoundRect(PX, PY, PW, PH, 2, cTrackBd);
-  int wf = 0;
-  if (st.durSec > 0) wf = (int)((uint64_t)(PW - 2) * st.curSec / st.durSec);
-  if (wf > 1) {
-    if (wf > PW - 2) wf = PW - 2;
-    g.fillRect(PX + 1, PY + 1, wf, PH - 2, cBlue);
-    if (wf > 4) g.fillRect(PX + 1 + wf - 4, PY + 1, 4, PH - 2, cYellow);  // 黄色端帽
-  }
-
-  /* 时间 */
-  g.setFont(Fonts::small());
-  g.setTextColor(cText, cPaper);
-  g.drawString(fmtSec(st.curSec).c_str(), PX, PY + 12);
-  g.drawRightString(fmtSec(st.durSec).c_str(), PX + PW, PY + 12);
-
-  /* 操作提示 */
-  g.setFont(Fonts::small());
-  g.setTextColor(cText, cPaper);
-  g.drawCenterString("OK播放/暂停 · 长按NEXT列表 · 长按OK返回", 160, 213);
+  String label = (category && category[0]) ? String(category) : String("故事");
+  drawCategoryBadge(label);
 }
 
 namespace {
