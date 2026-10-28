@@ -1,0 +1,124 @@
+:root {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei",
+    "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI",
+    "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", "Consolas", "SFMono-Regular", "Menlo", monospace;
+
+  /* 取自小小程序首页设计稿：蓝色主色 + 中性冷灰底 + 白色卡片 */
+  --coral: #2f7dff;
+  --coral-strong: #1f6bff;
+  --coral-soft: #eaf2ff;
+  --coral-ink: #2468d8;
+  --aqua: #12b3a8;
+  --aqua-strong: #0e8f86;
+  --aqua-soft: #e4f8f6;
+  --yellow: #ff9f43;
+  --yellow-strong: #d97a16;
+  --yellow-soft: #fff4e6;
+  --violet: #7b6cf6;
+  --violet-soft: #efedff;
+  --blue: #3b8eff;
+  --blue-soft: #eaf2ff;
+  --red: #e85a5a;
+  --red-soft: #fdecec;
+  --green: #1fae6d;
+
+  --bg: #f4f6fb;
+  --bg-deep: #eef2f9;
+  --surface: #ffffff;
+  --surface-2: #f6f8fc;
+  --surface-3: #eef3fb;
+  --ink: #16202f;
+  --ink-2: #61708a;
+  --ink-3: #a3adbb;
+  --line: #eaeef5;
+  --line-strong: #dfe6f0;
+  --sidebar: #ffffff;
+  --sidebar-2: #f6f8fc;
+  --sidebar-ink: #16202f;
+  --sidebar-muted: #8b97a9;
+
+  --shadow-sm: 0 4px 18px rgba(22, 40, 72, 0.05);
+  --shadow-md: 0 14px 40px rgba(22, 40, 72, 0.09);
+  --shadow-coral: 0 8px 20px rgba(47, 125, 255, 0.24);
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 24px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --sidebar-width: 244px;
+  --topbar-height: 64px;
+}
+
+html[data-theme='dark'] {
+  --bg: #0f172a;
+  --bg-deep: #0b1220;
+  --surface: #162033;
+  --surface-2: #1b2740;
+  --surface-3: #22304b;
+  --ink: #edf2fa;
+  --ink-2: #a6b4c8;
+  --ink-3: #718096;
+  --line: #26334a;
+  --line-strong: #33425c;
+  --sidebar: #0b1220;
+  --sidebar-2: #111b2e;
+  --sidebar-ink: #edf2fa;
+  --sidebar-muted: #8a99ad;
+  --coral-soft: #16294a;
+  --coral-ink: #8fc0ff;
+  --aqua-soft: #123432;
+  --yellow-soft: #342716;
+  --violet-soft: #242044;
+  --blue-soft: #16294a;
+  --red-soft: #3a2222;
+  --shadow-sm: 0 4px 18px rgba(0, 0, 0, 0.24);
+  --shadow-md: 0 18px 48px rgba(0, 0, 0, 0.36);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  background: var(--bg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: var(--coral-strong);
+  text-decoration: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}

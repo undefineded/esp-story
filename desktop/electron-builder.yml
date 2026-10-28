@@ -1,0 +1,35 @@
+appId: com.storybox.nfcstudio
+productName: StoryBox NFC Studio
+copyright: Copyright © 2026 StoryBox
+npmRebuild: false
+electronDist: node_modules/electron/dist
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**
+  - package.json
+asarUnpack:
+  - node_modules/@serialport/bindings-cpp/prebuilds/**
+  - node_modules/@serialport/bindings-interface/**
+extraMetadata:
+  main: out/main/index.js
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+  artifactName: StoryBox-NFC-Studio-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: false
+  runAfterFinish: false
+  artifactName: StoryBox-NFC-Studio-Setup-${version}.${ext}
+  include: build/installer.nsh
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico

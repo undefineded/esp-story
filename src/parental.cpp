@@ -17,6 +17,7 @@ const uint8_t FLAG_HAS_PIN   = 0x02;
 const uint8_t FLAG_BEDTIME   = 0x04;
 const uint8_t FLAG_ALLOWLIST = 0x08;
 const uint8_t FLAG_REMOTE    = 0x10;
+const uint8_t FLAG_CHILD_LOCK = 0x20;
 
 #pragma pack(push, 1)
 struct HistoryEntry {
@@ -277,7 +278,9 @@ void begin() {
                 (s_p.flags & FLAG_HAS_PIN) ? 1 : 0,
                 (unsigned)s_p.usedSec);
 
-  Serial.printf("[PCTL] day=%u history=%u:", (unsigned)s_p.dayKey, (unsigned)s_p.historyCount);
+  Serial.printf("[PCTL] day=%u history=%u childLock=%d:",
+                (unsigned)s_p.dayKey, (unsigned)s_p.historyCount,
+                (s_p.flags & FLAG_CHILD_LOCK) ? 1 : 0);
   for (uint8_t i = 0; i < s_p.historyCount; i++)
     Serial.printf(" %u/%us", (unsigned)s_p.history[i].dayKey, (unsigned)s_p.history[i].usedSec);
   Serial.println();
@@ -291,6 +294,7 @@ uint16_t bedtimeStartMin(){ return s_p.bedStartMin; }
 uint16_t bedtimeEndMin()  { return s_p.bedEndMin; }
 bool     allowlistEnabled(){ return (s_p.flags & FLAG_ALLOWLIST) != 0; }
 bool     remoteLocked()   { return (s_p.flags & FLAG_REMOTE) != 0; }
+bool     childLock()      { return (s_p.flags & FLAG_CHILD_LOCK) != 0; }
 uint64_t storyMask()      { return s_p.storyMask; }
 uint64_t catMask()        { return s_p.catMask; }
 uint32_t revision()       { return s_rev; }
@@ -345,6 +349,13 @@ void setRemoteLocked(bool locked) {
   if (locked) s_p.flags |= FLAG_REMOTE; else s_p.flags &= ~FLAG_REMOTE;
   s_rev++;
   saveNow();
+}
+
+void setChildLock(bool locked) {
+  if (locked) s_p.flags |= FLAG_CHILD_LOCK; else s_p.flags &= ~FLAG_CHILD_LOCK;
+  s_rev++;
+  saveNow();
+  Serial.printf("[PCTL] child lock %s\n", locked ? "on" : "off");
 }
 
 void save() { saveNow(); }

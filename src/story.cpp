@@ -51,20 +51,44 @@ namespace {
     }
   }
 
+  /* 目录里是否有 mp3: 用来判断"自身就是故事目录"还是"图文故事/音频故事这样的分组目录" */
+  bool dirHasMp3(const String& dir) {
+    File d = SD_MMC.open(dir);
+    if (!d || !d.isDirectory()) { s_scanOk = false; return false; }
+    bool hit = false;
+    File f;
+    while (!hit && (f = d.openNextFile())) {
+      hit = !f.isDirectory() && hasExt(f.name(), ".mp3");
+      f.close();
+    }
+    d.close();
+    return hit;
+  }
+
+  /* 递归收集故事目录: 含 mp3 的目录算一个故事, 否则当作分组目录继续向下 (最多 3 层)。
+     这样 /story/<名>/、/story/图文故事/<名>/、/story/音频故事/<名>/ 都能识别。 */
+  void scanDir(const String& dir, int depth, bool root) {
+    if (!root && dirHasMp3(dir)) {
+      if (s_count < MAX_STORIES) s_dirs[s_count++] = dir;
+      return;
+    }
+    if (depth >= 3) return;
+
+    File d = SD_MMC.open(dir);
+    if (!d || !d.isDirectory()) { s_scanOk = false; return; }
+    File f;
+    while (s_count < MAX_STORIES && (f = d.openNextFile())) {
+      if (f.isDirectory()) scanDir(fullPath(dir, f.name()), depth + 1, false);
+      f.close();
+    }
+    d.close();
+  }
+
   bool scan() {
     s_scanOk = true;
     s_count = 0;
     if (!SD_MMC.exists(STORY_DIR)) return true;
-
-    File root = SD_MMC.open(STORY_DIR);
-    if (!root || !root.isDirectory()) return false;
-
-    File f;
-    while (s_count < MAX_STORIES && (f = root.openNextFile())) {
-      if (f.isDirectory()) s_dirs[s_count++] = fullPath(STORY_DIR, f.name());
-      f.close();
-    }
-    root.close();
+    scanDir(STORY_DIR, 0, true);
 
     std::sort(s_dirs, s_dirs + s_count,
               [](const String& a, const String& b) { return strcmp(a.c_str(), b.c_str()) < 0; });
@@ -72,7 +96,10 @@ namespace {
       s_audioPaths[i] = findFirst(s_dirs[i], ".mp3");
       s_timelinePaths[i] = findFirst(s_dirs[i], ".lrc");
     }
-    Serial.printf("[STORY] %d story(ies) in %s\n", s_count, STORY_DIR);
+    int illustrated = 0;
+    for (int i = 0; i < s_count; ++i) if (!s_timelinePaths[i].isEmpty()) illustrated++;
+    Serial.printf("[STORY] %d story(ies) in %s (%d illustrated, %d audio)\n",
+                  s_count, STORY_DIR, illustrated, s_count - illustrated);
     rebuildView();
     return s_scanOk;
   }
@@ -210,6 +237,16 @@ const char* title(int i) {
   return (k >= 0) ? s_dirs[i].c_str() + k + 1 : s_dirs[i].c_str();
 }
 
+/* 有 timeline 就是图文故事 (插画+同步), 没有就是纯音频故事 */
+Story::Kind kind(int i) {
+  if (i < 0 || i >= s_count) return Kind::Audio;
+  return s_timelinePaths[i].isEmpty() ? Kind::Audio : Kind::Illustrated;
+}
+
+Story::Kind currentKind() {
+  return s_current >= 0 ? kind(s_current) : Kind::Audio;
+}
+
 bool open(int i) {
   stop();
   if (i < 0 || i >= s_count) return false;
@@ -220,9 +257,10 @@ bool open(int i) {
     Serial.printf("[STORY] no mp3 in %s\n", s_dir.c_str());
     return false;
   }
+  /* 音频故事没有 timeline.lrc: 不加载插画, 只放音频 */
   if (!loadTimeline(s_timelinePaths[i])) {
-    Serial.printf("[STORY] no timeline in %s\n", s_dir.c_str());
-    return false;
+    s_panelCount = 0;
+    Serial.printf("[STORY] %s: audio-only\n", s_dir.c_str());
   }
 
   s_current  = i;
@@ -233,7 +271,7 @@ bool open(int i) {
 }
 
 void start() {
-  if (!s_active || s_panelCount == 0) return;
+  if (!s_active) return;
   s_panelIdx = 0;
   s_finished = false;
   s_lastSec  = 0xFFFFFFFF;
@@ -251,8 +289,9 @@ void stop() {
 }
 
 void loop() {
-  if (!s_active || s_finished || s_panelCount == 0) return;
+  if (!s_active || s_finished) return;
   if (Player::takeEof()) { s_finished = true; return; }
+  if (s_panelCount == 0) return;           // 音频故事: 没有插画需要同步
 
   uint32_t sec = Player::status().curSec;
   if (sec == s_lastSec) return;

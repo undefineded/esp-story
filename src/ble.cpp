@@ -66,7 +66,12 @@ void sendDoc(JsonDocument& doc, bool quiet = false) {
   char buf[760];
   size_t n = serializeJson(doc, buf, sizeof(buf));
   if (n == 0) return;
-  if (n < sizeof(buf) - 1) buf[n++] = '\n';
+  /* 缓冲区不足时宁可丢包也不要发一条没有 '\n' 的半截 JSON, 否则小程序只能等超时 */
+  if (n >= sizeof(buf) - 1) {
+    Serial.println("[BLE] tx overflow");
+    return;
+  }
+  buf[n++] = '\n';
 
   /* 一个 notify 包最多只能带 MTU-3 字节, 超长会被截断/丢弃, 小程序就永远等不到 '\n'
      而超时。这里按对端 MTU 切片发送; 小程序是按字节流拼接再找换行的, 分片不影响解析。 */
@@ -143,6 +148,7 @@ void buildState(JsonObject data) {
   data["rem"]    = Parental::remainingSec();
   data["bedtime"] = Parental::bedtimeEnabled();
   data["remote"] = Parental::remoteLocked();
+  data["childLock"] = Parental::childLock();
   data["bound"]  = Parental::bound();
   data["timeSynced"] = Parental::timeSynced();
   data["dayKey"] = Parental::dayKey();
@@ -159,6 +165,7 @@ void buildConfig(JsonObject data) {
   data["bedEndMin"]     = Parental::bedtimeEndMin();
   data["allowlistEnabled"] = Parental::allowlistEnabled();
   data["remoteLocked"]  = Parental::remoteLocked();
+  data["childLock"]     = Parental::childLock();
   data["bound"]         = Parental::bound();
   data["hasPin"]        = Parental::hasPin();
   data["used"]          = Parental::usedTodaySec();
@@ -349,6 +356,11 @@ void handleSet(JsonDocument& doc, int32_t id) {
 
   if (doc["remoteLocked"].is<bool>()) {
     Parental::setRemoteLocked(doc["remoteLocked"].as<bool>());
+    changed = true;
+  }
+
+  if (doc["childLock"].is<bool>()) {
+    Parental::setChildLock(doc["childLock"].as<bool>());
     changed = true;
   }
 

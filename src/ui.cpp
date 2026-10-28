@@ -1,4 +1,4 @@
-/* UI 组件: 小小故事盒风格界面 (对照 ui.html 设计稿) + 设置界面 + 故事模式 */
+/* UI 组件: 小小故事盒主页 (四宫格) + 播放/列表界面 + 设置界面 + 故事模式 */
 #include <FS.h>          // 必须在 LovyanGFX 之前: 用来启用 drawJpgFile(fs, path) 重载
 #include <SD_MMC.h>
 #include "ui.h"
@@ -9,6 +9,7 @@
 #include "storage.h"
 #include "favorites.h"
 #include "story.h"
+#include "home_icons.h"
 #include <LovyanGFX.hpp>
 
 /* 字体统一由 Fonts:: 提供原生尺寸 efont 点阵，前景/背景双色覆盖文字区域。 */
@@ -16,7 +17,7 @@
 namespace {
 
 /* ---------------- 故事盒调色板 (取自 ui.html) ---------------- */
-uint16_t cInk, cInkSoft, cPaper, cCoral, cCoralDk, cYellow, cYellowLt,
+uint16_t cInk, cText, cPaper, cCoral, cCoralDk, cYellow, cYellowLt,
          cAqua, cAquaDk, cBlue, cTrack, cTrackBd, cBtnBlue, cBtnBlueBd,
          cGreen, cGreenDk, cPauseBd, cPurple, cCoverBg, cMoon, cBush,
          cCardLt, cCardDk;
@@ -26,8 +27,8 @@ void palette() {
   if (s_palReady) return;
   s_palReady = true;
   auto& g = Display::canvas();
-  cInk      = g.color565( 23,  50,  77);   // #17324d 深蓝墨色(描边/文字)
-  cInkSoft  = g.color565( 91, 111, 130);   // #5b6f82 次要文字
+  cInk      = g.color565( 23,  50,  77);   // #17324d 深蓝墨色(描边/图标/阴影)
+  cText     = g.color565(  0,   0,   0);   // #000000 纯黑文字 (对比度最高)
   cPaper    = g.color565(255, 242, 176);   // #fff2b0 淡黄纸底
   cCoral    = g.color565(240,  90,  86);   // #f05a56 顶栏珊瑚红
   cCoralDk  = g.color565(217,  67,  67);   // #d94343 顶栏下边
@@ -63,7 +64,9 @@ int      s_lastState = -1;                 // playing/paused/hasTrack 组合键
 int      s_lastHall = -1;
 bool     s_hallNow  = false;               // 最近已知霍尔状态 (顶栏通知位, 各界面共用)
 bool     s_hallLayout = false;             // 上次"音量让位"排版所用的霍尔状态
+bool     s_childLockNow = false;           // 童锁标识 (顶栏常显)
 void     drawHallIcon(bool detected);      // 前置声明: 顶栏基础绘制里要用
+void     drawChildLockBadge(bool locked);  // 前置声明: 顶栏基础绘制里要用
 uint32_t s_lastCur = 0xFFFFFFFF, s_lastDur = 0xFFFFFFFF;
 String   s_subLast;                        // 已绘制的"编码·比特率"行内容 (比特率首帧解码后才给出, 变化时需补绘)
 
@@ -113,6 +116,7 @@ void drawTopBarBase() {
   g.drawString("小小故事盒", 36, 7);
   s_lastHall = -1;                  // 整条顶栏被重铺, 通知位图标必须重画
   drawHallIcon(s_hallNow);          // 通知位: 卡片插入状态 (各界面常显)
+  drawChildLockBadge(s_childLockNow);
 }
 
 /* 音量文本 "音量:10" (顶栏右侧; 检测到卡片时右缘让给通知位图标) */
@@ -144,16 +148,21 @@ void drawCover() {
   g.fillCircle(44, 101, 10, TFT_WHITE);
   g.fillCircle(60, 99, 12, TFT_WHITE);
   g.setFont(Fonts::body());
-  g.setTextColor(cInk, cYellow);
+  g.setTextColor(cText, cYellow);
   g.drawCenterString("音乐播放", 56, 135);
 }
 
 /* ---------------- 信息列 ---------------- */
 
-/* 分类徽章 (静态): 宽度随文字自适应, 左右各 6px 内边距 (对照 ui.html .category 的 padding: 0 6px) */
+/* 分类徽章 (静态): 显示当前分类名; 童谣汇总显示"童谣"。
+   宽度随文字自适应, 左右各 6px 内边距 (对照 ui.html .category 的 padding: 0 6px) */
 void drawCategory() {
   auto& g = Display::canvas();
-  const char* label = "音乐";
+  String label = "音乐";
+  int ci = Storage::currentCategory();
+  if (ci == Storage::NURSERY_CATEGORY)      label = "童谣";
+  else if (ci > 0 && ci < Storage::catCount()) label = Storage::catName(ci);
+
   const int BADGE_PAD = 6;
   g.setFont(Fonts::body());
   int w = g.textWidth(label) + BADGE_PAD * 2;
@@ -172,7 +181,7 @@ void drawCount(const PlayerStatus& st) {
   auto& g = Display::canvas();
   g.fillRect(240, 43, 70, 18, cPaper);
   g.setFont(Fonts::small());
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   char b[16];
   if (cnt > 0) snprintf(b, sizeof(b), "%02u / %02u", (unsigned)(idx + 1), (unsigned)cnt);
   else         snprintf(b, sizeof(b), "-- / --");
@@ -188,7 +197,7 @@ int scrollOffset(int width, int viewport, uint32_t epoch) {
 void drawTitleLine() {
   auto& g = Display::canvas();
   g.setFont(Fonts::title());
-  g.setTextColor(cInk, cPaper);
+  g.setTextColor(cText, cPaper);
   g.setClipRect(INFO_X, 63, INFO_W, TITLE_H);
   g.fillRect(INFO_X, 63, INFO_W, TITLE_H, cPaper);
   g.drawString(s_ttl.c_str(), INFO_X - s_scroll, 65);
@@ -220,7 +229,7 @@ void drawSubLine(const PlayerStatus& st) {
   g.setFont(Fonts::body());
   s_subLast = subText(st);
   g.fillRect(INFO_X, 88, INFO_W, 24, cPaper);
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawString(fit(s_subLast, INFO_W).c_str(), INFO_X, 95);
 }
 
@@ -245,7 +254,7 @@ void drawTimes(const PlayerStatus& st) {
   auto& g = Display::canvas();
   g.fillRect(INFO_X, 116, INFO_W, 16, cPaper);
   g.setFont(Fonts::small());
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawString(fmtSec(st.curSec).c_str(), INFO_X, 118);
   g.drawRightString(fmtSec(st.durSec).c_str(), 310, 118);
 }
@@ -280,7 +289,7 @@ void drawStatus(const PlayerStatus& st) {
   g.fillCircle(INFO_X + 4, 154, 4, border);
   g.fillCircle(INFO_X + 4, 154, 3, dot);
   g.setFont(Fonts::body());
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawString(txt, INFO_X + 14, 146);
 }
 
@@ -303,6 +312,18 @@ void drawHallIcon(bool detected) {
   g.fillRoundRect(X +  2, Y +  3,  8,  8, 2, cCardDk);  // 芯片
   g.fillCircle   (X +  6, Y +  7,      2,     cCardLt); // 芯片内圆孔
   g.fillRoundRect(X + 11, Y +  5,  5,  3, 1, cCardDk);  // 右侧条
+}
+
+/* 顶栏童锁标识: 标题与音量之间的黄色小胶囊, 关闭时只清空该区域 */
+void drawChildLockBadge(bool locked) {
+  auto& g = Display::canvas();
+  g.fillRect(128, 3, 98, 24, cCoral);
+  if (!locked) return;
+
+  g.fillRoundRect(130, 5, 60, 20, 8, cYellow);
+  g.setFont(Fonts::small());
+  g.setTextColor(cInk, cYellow);
+  g.drawCenterString("童锁", 160, 8);
 }
 
 /* ---------------- 控制栏 ---------------- */
@@ -338,7 +359,7 @@ void drawPlayButton(const PlayerStatus& st) {
     g.fillTriangle(ix - 7, iy - 9, ix - 7, iy + 9, ix + 8, iy, cInk);
   }
   g.setFont(Fonts::body());
-  g.setTextColor(cInk, cYellow);
+  g.setTextColor(cText, cYellow);
   g.drawString(pauseIcon ? "暂停" : "播放", ix + 14, iy - 8);
 }
 
@@ -363,9 +384,9 @@ void settingsRow(int y, const char* label, const String& value, bool selected, i
 
   uint16_t bgRow = selected ? cYellow : TFT_WHITE;
   g.setFont(Fonts::body());
-  g.setTextColor(cInk, bgRow);
+  g.setTextColor(cText, bgRow);
   g.drawString(label, 24, y + 7);
-  g.setTextColor(selected ? cInk : cInkSoft, bgRow);
+  g.setTextColor(cText, bgRow);
   g.drawRightString(value.c_str(), 294, y + 7);
 
   if (barPct >= 0) {
@@ -396,7 +417,7 @@ void settingsBands(int y, EqPreset eq) {
 }
 
 void settingsRows(const SettingsData& s, int selected) {
-  const int ITEMS = 8, VISIBLE = 4;
+  const int ITEMS = 10, VISIBLE = 4;
   const int y0 = 34, rh = 44;
   int top = selected - (VISIBLE - 1);
   if (top > ITEMS - VISIBLE) top = ITEMS - VISIBLE;
@@ -422,18 +443,24 @@ void settingsRows(const SettingsData& s, int selected) {
         settingsBands(y, s.eq);
         break;
       case 3:
-        settingsRow(y, "刷新列表", "单击OK", selected == i, -1);
+        settingsRow(y, "播放中熄屏", Settings::minutesLabel(s.screenOffMin), selected == i, -1);
         break;
       case 4:
-        settingsRow(y, "蓝牙广播", s.bleEnabled ? "开" : "关", selected == i, -1);
+        settingsRow(y, "无播放休眠", Settings::minutesLabel(s.sleepMin), selected == i, -1);
         break;
       case 5:
-        settingsRow(y, "WiFi", s.wifiEnabled ? "开" : "关", selected == i, -1);
+        settingsRow(y, "刷新列表", "单击OK", selected == i, -1);
         break;
       case 6:
-        settingsRow(y, "热点 AP", s.apEnabled ? "开" : "关", selected == i, -1);
+        settingsRow(y, "蓝牙广播", s.bleEnabled ? "开" : "关", selected == i, -1);
         break;
       case 7:
+        settingsRow(y, "WiFi", s.wifiEnabled ? "开" : "关", selected == i, -1);
+        break;
+      case 8:
+        settingsRow(y, "热点 AP", s.apEnabled ? "开" : "关", selected == i, -1);
+        break;
+      case 9:
         settingsRow(y, "显示绑定码", "单击查看", selected == i, -1);
         break;
       default:
@@ -450,11 +477,120 @@ void settingsRows(const SettingsData& s, int selected) {
   g.fillRoundRect(sx, thumbY, sw, thumbH, 2, cCoral);
 }
 
+/* ---------------- 主页手机桌面风格图标 ----------------
+   一排四个, 普通 60x60, 选中放大到 72x72, 无阴影。
+   图标来自 docs/icons 切图, 由 tools/build_home_icons.py 生成 RGB565。 */
+const int ICON_SIZE = 60;
+const int ICON_SIZE_SEL = 72;
+
+const int HOME_X0 = 16, HOME_Y0 = 86, HOME_GAP = 16;
+
+void homeSlot(int i, int& x, int& y) {
+  x = HOME_X0 + i * (ICON_SIZE + HOME_GAP);
+  y = HOME_Y0;
+}
+
+void homeTile(int i, bool selected) {
+  auto& g = Display::canvas();
+  static const char* TITLE[4] = { "音乐", "故事", "童谣", "设置" };
+
+  int x, y;
+  homeSlot(i, x, y);
+  g.fillRect(x - 8, y - 8, ICON_SIZE + 16, 94, cPaper);
+
+  const uint16_t* img = HOME_ICON_MUSIC;
+  const int size = selected ? ICON_SIZE_SEL : ICON_SIZE;
+  const int ix = selected ? x - 6 : x;
+  const int iy = selected ? y - 6 : y;
+  switch (i) {
+    case 0: img = selected ? HOME_ICON_MUSIC_SEL    : HOME_ICON_MUSIC;    break;
+    case 1: img = selected ? HOME_ICON_STORY_SEL    : HOME_ICON_STORY;    break;
+    case 2: img = selected ? HOME_ICON_RHYME_SEL    : HOME_ICON_RHYME;    break;
+    default: img = selected ? HOME_ICON_SETTINGS_SEL : HOME_ICON_SETTINGS; break;
+  }
+  g.pushImage(ix, iy, size, size, img);
+
+  g.setFont(Fonts::small());
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString(TITLE[i], x + ICON_SIZE / 2, y + 70);
+}
+
+/* 主页顶栏音量: 始终给右侧霍尔图标留出位置, 图标后出现也不会压字 */
+void homeVolume(uint8_t volume) {
+  auto& g = Display::canvas();
+  g.fillRect(230, 0, 66, 30, cCoral);
+  g.setFont(Fonts::body());
+  g.setTextColor(TFT_WHITE, cCoral);
+  char b[20];
+  snprintf(b, sizeof(b), "音量:%u", (unsigned)volume);
+  g.drawRightString(b, 292, 7);
+}
+
+int s_homeSel = -1;
+int s_homeVol = -1;
+
 } // namespace
 
 namespace Ui {
 
 void begin() { palette(); }
+
+/* ---------------- 主页 ---------------- */
+
+void drawHome(int selected, uint8_t volume) {
+  palette();
+  auto& g = Display::canvas();
+  g.fillScreen(cPaper);
+  drawTopBarBase();
+  homeVolume(volume);
+  for (int i = 0; i < 4; i++) homeTile(i, i == selected);
+
+  g.setFont(Fonts::body());
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString("旋转选择   OK 进入", 160, 218);
+
+  s_homeSel = selected;
+  s_homeVol = (int)volume;
+}
+
+/* 选择变化只重画新旧两块, 音量变化只重画右上角 */
+void updateHome(int selected, uint8_t volume) {
+  palette();
+  if (s_homeSel < 0) { drawHome(selected, volume); return; }
+
+  if (selected != s_homeSel) {
+    int old = s_homeSel;
+    s_homeSel = selected;
+    homeTile(old, false);
+    homeTile(selected, true);
+  }
+  if ((int)volume != s_homeVol) {
+    s_homeVol = (int)volume;
+    homeVolume(volume);
+  }
+}
+
+/* 空列表/无内容提示页: OK 或长按 SET 回主页 */
+void drawNotice(const char* title, const char* line1, const char* line2) {
+  palette();
+  auto& g = Display::canvas();
+  g.fillScreen(cPaper);
+  drawTopBarBase();
+  drawLogo(160, 76, 14);
+
+  g.setFont(Fonts::title());
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString(fit(String(title ? title : "暂无内容"), 296).c_str(), 160, 108);
+
+  g.setFont(Fonts::body());
+  g.setTextColor(cText, cPaper);
+  if (line1) g.drawCenterString(fit(String(line1), 300).c_str(), 160, 144);
+  if (line2) g.drawCenterString(fit(String(line2), 300).c_str(), 160, 170);
+
+  g.setFont(Fonts::small());
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString("按 OK 或长按 SET 回主页", 160, 208);
+}
 
 /* 顶栏通知位: 卡片插入状态。任意界面都能即时更新 (不依赖整屏重绘) */
 void setHall(bool detected) {
@@ -465,6 +601,15 @@ void setHall(bool detected) {
   Serial.printf("[HALL] %s\n", detected ? "card in" : "card out");
 }
 
+/* 顶栏童锁标识: 状态变化时只重绘顶栏那一小块 */
+void setChildLock(bool locked) {
+  if (locked == s_childLockNow) return;
+  s_childLockNow = locked;
+  palette();
+  drawChildLockBadge(locked);
+  Serial.printf("[UI] child lock %s\n", locked ? "badge on" : "badge off");
+}
+
 void boot(const char* line1, const char* line2) {
   palette();
   auto& g = Display::canvas();
@@ -472,11 +617,11 @@ void boot(const char* line1, const char* line2) {
   drawTopBarBase();
   drawLogo(160, 84, 12);
   g.setFont(Fonts::title());
-  g.setTextColor(cInk, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString(line1, 160, 108);
   if (line2) {
     g.setFont(Fonts::body());
-    g.setTextColor(cInkSoft, cPaper);
+    g.setTextColor(cText, cPaper);
     g.drawCenterString(line2, 160, 150);
   }
 }
@@ -539,15 +684,15 @@ void drawSettings(const SettingsData& s, int selected) {
   settingsRows(s, selected);
 
   g.setFont(Fonts::body());
-  g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("上下选择  旋钮调整  OK执行", 160, 220);
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString("旋钮调整  双击OK保存回主页", 160, 220);
 }
 
 void settingsMessage(const char* message) {
   auto& g = Display::canvas();
   g.fillRect(0, 218, SCR_W, 22, cPaper);
   g.setFont(Fonts::body());
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString(fit(String(message), 304).c_str(), 160, 220);
 }
 
@@ -569,16 +714,16 @@ void drawLock(const char* title, const char* line1, const char* line2) {
   g.drawCenterString("护", cx, y + 12);
 
   g.setFont(Fonts::title());
-  g.setTextColor(cInk, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString(fit(String(title ? title : "家长控制中"), 296).c_str(), 160, 124);
 
   g.setFont(Fonts::body());
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   if (line1) g.drawCenterString(fit(String(line1), 300).c_str(), 160, 158);
   if (line2) g.drawCenterString(fit(String(line2), 300).c_str(), 160, 182);
 
   g.setFont(Fonts::small());
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString("家长可在小程序中解锁", 160, 214);
 }
 
@@ -589,10 +734,10 @@ void drawBindCode(const char* code) {
   g.fillScreen(cPaper);
   drawTopBarBase();
   g.setFont(Fonts::title());
-  g.setTextColor(cInk, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString("故事机配对", 160, 58);
   g.setFont(Fonts::body());
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString("请在小程序中输入绑定码", 160, 92);
 
   g.fillRoundRect(96, 118, 128, 54, 12, TFT_WHITE);
@@ -606,7 +751,7 @@ void drawBindCode(const char* code) {
   g.drawCenterString(spaced, 160, 132);
 
   g.setFont(Fonts::small());
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString("首次配对时输入 · 双击OK返回", 160, 196);
 }
 
@@ -617,10 +762,10 @@ void drawNoContent() {
   g.fillScreen(cPaper);
   drawTopBarBase();
   g.setFont(Fonts::title());
-  g.setTextColor(cInk, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString("家长未开放内容", 160, 92);
   g.setFont(Fonts::body());
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString("请在家长控制中开启故事或音乐", 160, 132);
   g.drawCenterString("保存后设备会自动刷新列表", 160, 160);
 }
@@ -637,7 +782,7 @@ void refreshSettings(const SettingsData& s, int selected) {
 namespace {
   const int MUSIC_Y0 = 36, MUSIC_RH = 42, MUSIC_VIS = 4;
 
-  /* ♪ 音符图标 (全部歌曲行): 约 20x20 @ (x,y) */
+  /* ♪ 音符图标 (全部歌曲行 / 正在播放): 约 20x20 @ (x,y) */
   void iconNote(int x, int y, uint16_t c) {
     auto& g = Display::canvas();
     g.fillCircle(x + 6, y + 14, 5, c);
@@ -669,13 +814,13 @@ namespace {
 
     uint16_t bg = selected ? cYellow : TFT_WHITE;
     g.setFont(Fonts::title());
-    g.setTextColor(cInk, bg);
+    g.setTextColor(cText, bg);
     g.drawString(fit(String(name), 206).c_str(), 54, y + 9);
 
     char b[16];
     snprintf(b, sizeof(b), "%d首", Storage::viewCatTrackCount(i));
     g.setFont(Fonts::small());
-    g.setTextColor(selected ? cInk : cInkSoft, bg);
+    g.setTextColor(cText, bg);
     g.drawRightString(b, 296, y + 14);
   }
 
@@ -713,8 +858,8 @@ void drawMusicList(int count, int selected) {
   musicRows(count, selected);
 
   g.setFont(Fonts::body());
-  g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("OK播放 双击设置 长按SET切换", 160, 212);
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString("OK播放  长按SET回主页", 160, 212);
 
   s_mlTop   = musicTop(selected, count);
   s_mlCount = count;
@@ -739,9 +884,12 @@ void updateMusicList(int count, int selected) {
 }
 
 /* ---------------- 当前歌曲列表 ----------------
-   顶栏 + 4 行曲目卡片 (每行 42px); 正在播放的曲目以珊瑚色 ♪ 图标 + 珊瑚色标题 + "播放中" 标记 */
+   顶栏 + 4 行曲目卡片 (每行 42px); 正在播放的曲目以珊瑚色 ♪ 图标 + 珊瑚色标题 +
+   "播放中" 标记; 已收藏显示珊瑚色心形。 */
 
 namespace {
+  const int TRACK_Y0 = 36, TRACK_RH = 42, TRACK_VIS = 4;
+
   /* 去掉 .mp3 后缀 */
   String stripExt(const String& n) {
     int k = n.lastIndexOf('.');
@@ -756,10 +904,12 @@ namespace {
     g.fillTriangle(x, y + 7, x + 15, y + 7, x + 7, y + 16, color);
   }
 
-  /* 曲目行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影 */
-  void trackRow(int y, int viewIndex, bool playing, bool selected) {
-    const char* name = Storage::name(viewIndex);
-    bool fav = Favorites::isFav(Storage::viewTrackGlobal(viewIndex));
+  /* 曲目行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影
+     nursery=true 时从童谣预览列表取名, 此时 Storage::name 仍是原播放列表 */
+  void trackRow(int y, int viewIndex, bool playing, bool selected, bool nursery) {
+    const char* name = nursery ? Storage::nurseryName(viewIndex) : Storage::name(viewIndex);
+    int gi = nursery ? Storage::nurseryGlobal(viewIndex) : Storage::viewTrackGlobal(viewIndex);
+    bool fav = (gi >= 0) && Favorites::isFav(gi);
     auto& g = Display::canvas();
     if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
     g.fillRoundRect(10, y, 300, 38, 6, selected ? cInk : TFT_WHITE);
@@ -771,7 +921,7 @@ namespace {
     else     iconNote(24, y + 8, playing ? cCoral : cAqua);  // 正在播放: 珊瑚色 ♪ 高亮
 
     g.setFont(Fonts::title());
-    g.setTextColor(playing ? cCoral : cInk, bg);
+    g.setTextColor(playing ? cCoral : cText, bg);
     g.drawString(fit(stripExt(String(name)), 200).c_str(), 54, y + 9);
 
     if (playing) {
@@ -782,52 +932,55 @@ namespace {
   }
 
   int trackTop(int selected, int count) {
-    int top = (selected >= MUSIC_VIS) ? selected - MUSIC_VIS + 1 : 0;
-    if (top > count - MUSIC_VIS) top = count - MUSIC_VIS;
+    int top = (selected >= TRACK_VIS) ? selected - TRACK_VIS + 1 : 0;
+    if (top > count - TRACK_VIS) top = count - TRACK_VIS;
     if (top < 0) top = 0;
     return top;
   }
 
-  /* 只重绘一行槽位 (含清行), 说明见 musicRepaintRow */
-  void trackRepaintRow(int r, int top, int count, int selected, int playing) {
+  /* 只重绘一行槽位 (含清行) */
+  void trackRepaintRow(int r, int top, int count, int selected, int playing, bool nursery) {
     auto& g = Display::canvas();
-    int y = MUSIC_Y0 + r * MUSIC_RH;
-    g.fillRect(8, y, 306, MUSIC_RH, cPaper);
+    int y = TRACK_Y0 + r * TRACK_RH;
+    g.fillRect(8, y, 306, TRACK_RH, cPaper);
     int i = top + r;
-    if (i < count) trackRow(y, i, i == playing, i == selected);
+    if (i < count) trackRow(y, i, i == playing, i == selected, nursery);
   }
 
-  void trackRows(int count, int selected, int playing) {
+  void trackRows(int count, int selected, int playing, bool nursery) {
     int top = trackTop(selected, count);
-    for (int r = 0; r < MUSIC_VIS; r++) trackRepaintRow(r, top, count, selected, playing);
+    for (int r = 0; r < TRACK_VIS; r++)
+      trackRepaintRow(r, top, count, selected, playing, nursery);
   }
 
   int s_tlTop = -1, s_tlCount = -1, s_tlSel = -1, s_tlPlay = -1;
 }
 
-void drawTrackList(int count, int selected, int playing) {
+void drawTrackList(int count, int selected, int playing, bool nursery) {
   palette();
   auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
-  trackRows(count, selected, playing);
+  trackRows(count, selected, playing, nursery);
 
   g.setFont(Fonts::body());
-  g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("OK播放 双击设置 长按收藏", 160, 212);
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString(nursery ? "童谣 · OK播放  长按SET回主页"
+                             : "OK播放 长按收藏 长按SET回主页", 160, 212);
 
   s_tlTop = trackTop(selected, count); s_tlCount = count;
   s_tlSel = selected;                  s_tlPlay  = playing;
 }
 
 /* 增量刷新: 选中行 / "播放中"高亮 各自变化时只重绘对应行 (不清屏) */
-void updateTrackList(int count, int selected, int playing) {
+void updateTrackList(int count, int selected, int playing, bool nursery) {
   palette();
-  if (s_tlTop < 0 || s_tlCount != count) { drawTrackList(count, selected, playing); return; }
+  if (s_tlTop < 0 || s_tlCount != count) { drawTrackList(count, selected, playing, nursery); return; }
 
   int top = trackTop(selected, count);
   if (top != s_tlTop) {
-    for (int r = 0; r < MUSIC_VIS; r++) trackRepaintRow(r, top, count, selected, playing);
+    for (int r = 0; r < TRACK_VIS; r++)
+      trackRepaintRow(r, top, count, selected, playing, nursery);
   } else {
     int idx[4] = { s_tlSel, s_tlPlay, selected, playing };
     for (int k = 0; k < 4; k++) {
@@ -835,7 +988,8 @@ void updateTrackList(int count, int selected, int playing) {
       for (int j = 0; j < k; ++j) duplicate |= idx[j] == idx[k];
       if (duplicate) continue;
       int r = idx[k] - top;
-      if (r >= 0 && r < MUSIC_VIS) trackRepaintRow(r, top, count, selected, playing);
+      if (r >= 0 && r < TRACK_VIS)
+        trackRepaintRow(r, top, count, selected, playing, nursery);
     }
   }
   s_tlTop = top; s_tlCount = count; s_tlSel = selected; s_tlPlay = playing;
@@ -847,10 +1001,10 @@ void updateTrackList(int count, int selected, int playing) {
          (黄色顶沿 + 圆形播放键 + 故事名 + 进度条 + 页码 + 时间/音量) */
 
 namespace {
-  const int STORY_Y0  = 36, STORY_RH = 42, STORY_VIS = 4;
+  const int STORY_Y0 = 36, STORY_RH = 42, STORY_VIS = 4;
 
   /* 故事行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影 */
-  void storyRow(int y, const char* name, bool selected) {
+  void storyRow(int y, const char* name, bool selected, bool illustrated) {
     auto& g = Display::canvas();
     if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
     g.fillRoundRect(10, y, 300, 38, 6, selected ? cInk : TFT_WHITE);
@@ -864,8 +1018,19 @@ namespace {
 
     uint16_t bg = selected ? cYellow : TFT_WHITE;
     g.setFont(Fonts::title());
-    g.setTextColor(cInk, bg);
-    g.drawString(fit(String(name), 248).c_str(), 50, y + 9);
+    g.setTextColor(cText, bg);
+    g.drawString(fit(String(name), 186).c_str(), 50, y + 9);
+
+    /* 类型徽章: 图文 / 音频 */
+    const char* tag = illustrated ? "图文" : "音频";
+    uint16_t tagBg  = illustrated ? cAqua : cPurple;
+    if (selected) tagBg = cCoral;
+    g.setFont(Fonts::small());
+    int tw = g.textWidth(tag) + 10;
+    int tx = 306 - tw;
+    g.fillRoundRect(tx, y + 11, tw, 16, 4, tagBg);
+    g.setTextColor(TFT_WHITE, tagBg);
+    g.drawString(tag, tx + 5, y + 12);
   }
 
   int storyTop(int selected, int count) {
@@ -881,7 +1046,11 @@ namespace {
     int y = STORY_Y0 + r * STORY_RH;
     g.fillRect(8, y, 306, STORY_RH, cPaper);
     int i = top + r;
-    if (i < count) storyRow(y, Story::viewTitle(i), i == selected);
+    if (i < count) {
+      int actual = Story::viewActual(i);
+      bool illustrated = (actual >= 0 && Story::kind(actual) == Story::Kind::Illustrated);
+      storyRow(y, Story::viewTitle(i), i == selected, illustrated);
+    }
   }
 
   void storyRows(int count, int selected) {
@@ -900,8 +1069,8 @@ void drawStoryList(int count, int selected) {
   storyRows(count, selected);
 
   g.setFont(Fonts::body());
-  g.setTextColor(cInkSoft, cPaper);
-  g.drawCenterString("OK播放 双击设置 长按SET切换", 160, 212);
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString("OK播放  长按SET回主页", 160, 212);
 
   s_slTop   = storyTop(selected, count);
   s_slCount = count;
@@ -957,11 +1126,11 @@ void drawStoryLoadingBegin(const char* title) {
 
   /* 故事名 + 提示文字 */
   g.setFont(Fonts::story());
-  g.setTextColor(cInk, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString(fit(String(title ? title : ""), 288).c_str(), 160, 168);
 
   g.setFont(Fonts::body());
-  g.setTextColor(cInkSoft, cPaper);
+  g.setTextColor(cText, cPaper);
   g.drawCenterString("正在打开故事…", 160, 194);
 }
 
@@ -975,6 +1144,64 @@ void drawStoryFrame(const char* imgPath) {
     g.setTextColor(TFT_WHITE, TFT_BLACK);
     g.drawCenterString("插画读取失败", 160, 110);
   }
+}
+
+/* ---------------- 音频故事播放页 ----------------
+   音频故事没有插画, 不能沿用"全屏图 + 底部控制条"的图文版式, 改用整页信息卡:
+     顶栏 | 信息卡 (声波徽标 + 故事名 + 播放状态) | 进度条 + 时间 | 操作提示
+   每秒整页重绘一次 (无图可省, 开销很小), 避免增量刷新留下的残影。 */
+void drawStoryAudio(const char* title, const PlayerStatus& st) {
+  palette();
+  auto& g = Display::canvas();
+  g.fillScreen(cPaper);
+  drawTopBarBase();
+  drawVolume(st);
+
+  /* 信息卡: 3px 硬阴影 + 白底 + 描边 (与列表卡片同一套观感) */
+  const int CX = 40, CY = 52, CW = 240, CH = 112;
+  g.fillRoundRect(CX + 3, CY + 3, CW, CH, 8, cInk);
+  g.fillRoundRect(CX, CY, CW, CH, 8, TFT_WHITE);
+  g.drawRoundRect(CX, CY, CW, CH, 8, cTrackBd);
+
+  /* 声波徽标: 珊瑚色圆底 + 白色声源点与两道弧 */
+  g.fillCircle(CX + 44, CY + 56, 30, cCoral);
+  g.fillCircle(CX + 32, CY + 56, 5, TFT_WHITE);
+  g.fillArc(CX + 32, CY + 56, 11, 13, -52, 52, TFT_WHITE);
+  g.fillArc(CX + 32, CY + 56, 18, 20, -52, 52, TFT_WHITE);
+
+  /* 故事名 + 状态 + 类型 */
+  g.setFont(Fonts::title());
+  g.setTextColor(cText, TFT_WHITE);
+  g.drawString(fit(String(title), 128).c_str(), CX + 84, CY + 26);
+
+  g.setFont(Fonts::small());
+  g.fillCircle(CX + 88, CY + 60, 3, st.paused ? cYellow : cGreen);
+  g.setTextColor(cText, TFT_WHITE);
+  g.drawString(st.paused ? "已暂停" : "正在播放", CX + 96, CY + 53);
+  g.drawString("音频故事", CX + 88, CY + 74);
+
+  /* 进度条 (与音乐播放页同一套配色) */
+  const int PX = 40, PY = 180, PW = 240, PH = 8;
+  g.fillRoundRect(PX, PY, PW, PH, 2, cTrack);
+  g.drawRoundRect(PX, PY, PW, PH, 2, cTrackBd);
+  int wf = 0;
+  if (st.durSec > 0) wf = (int)((uint64_t)(PW - 2) * st.curSec / st.durSec);
+  if (wf > 1) {
+    if (wf > PW - 2) wf = PW - 2;
+    g.fillRect(PX + 1, PY + 1, wf, PH - 2, cBlue);
+    if (wf > 4) g.fillRect(PX + 1 + wf - 4, PY + 1, 4, PH - 2, cYellow);  // 黄色端帽
+  }
+
+  /* 时间 */
+  g.setFont(Fonts::small());
+  g.setTextColor(cText, cPaper);
+  g.drawString(fmtSec(st.curSec).c_str(), PX, PY + 12);
+  g.drawRightString(fmtSec(st.durSec).c_str(), PX + PW, PY + 12);
+
+  /* 操作提示 */
+  g.setFont(Fonts::body());
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString("OK 播放/暂停 · 长按OK返回", 160, 212);
 }
 
 namespace {

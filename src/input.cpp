@@ -9,14 +9,31 @@ namespace {
   Btn s_next{ BTN_LAST, false, false, 0, 0 };
   Btn s_prev{ BTN_NEXT, false, false, 0, 0 };
 
+  bool     s_locked  = false;
+  uint32_t s_unlockAt = 0;
+  volatile uint32_t s_activityMs = 0;   // 最近一次按键/旋钮动作 (电源管理用来判空闲)
+  uint32_t s_swallowUntil = 0;          // 唤醒后的输入屏蔽窗口 (毫秒时间戳)
+
+  inline void touch() { s_activityMs = millis(); }
+
+  /* 锁定期间及解锁后 500ms 内屏蔽事件, 防止按住按键解锁时产生误动作,
+     也覆盖 OK 单击等待双击的 350ms 窗口. 唤醒后也短暂屏蔽, 避免点亮屏幕那一下
+     顺带触发按键功能. */
+  bool inputsSuppressed() {
+    return s_locked
+        || (s_unlockAt && (uint32_t)(millis() - s_unlockAt) < 500)
+        || (int32_t)(s_swallowUntil - millis()) > 0;
+  }
+
   /* 25ms 消抖; 松开时判短按, 按住达 NAV_LONG_MS 判长按 (长按触发后抑制短按) */
-  int8_t navEvent(Btn& b) {
+  int8_t navEventRaw(Btn& b) {
     bool     cur = (digitalRead(b.pin) == LOW);
     uint32_t now = millis();
 
     if (cur != b.down && now - b.edgeT > 25) {
       b.edgeT = now;
       b.down  = cur;
+      s_activityMs = now;                       // 任何边沿都算"有人在操作"
       if (cur) {
         b.downT    = now;
         b.longSent = false;
@@ -29,6 +46,11 @@ namespace {
       return 2;                                 // 按住达阈值 -> 长按
     }
     return 0;
+  }
+
+  int8_t navEvent(Btn& b) {
+    int8_t e = navEventRaw(b);
+    return inputsSuppressed() ? 0 : e;
   }
 
   /* EC11 正交解码放在 GPIO 中断里:
@@ -68,7 +90,7 @@ int8_t prevEvent() { return navEvent(s_prev); }
 
 /* 编码器 SET: 按住达 ENC_LONG_MS 判为长按(切换模式), 否则释放时判为短按。
    长按触发后抑制短按, 避免切换模式时又触发播放/暂停。 */
-int8_t encEvent() {
+int8_t encEventRaw() {
   static bool     down     = false;
   static bool     longSent = false;
   static uint32_t edgeT    = 0;
@@ -80,6 +102,7 @@ int8_t encEvent() {
   if (cur != down && now - edgeT > 25) {      // 25ms 消抖
     edgeT = now;
     down  = cur;
+    s_activityMs = now;                       // 任何边沿都算"有人在操作"
     if (cur) {
       downT    = now;
       longSent = false;
@@ -96,7 +119,7 @@ int8_t encEvent() {
 
 /* 单击延迟 350ms 以区分双击; 30ms 消抖; 按住达 OK_LONG_MS 判为长按。
    长按触发后抑制单击/双击, 松开也不再产生单击。 */
-int8_t okEvent() {
+int8_t okEventRaw() {
   static bool     lastLevel = false;
   static uint32_t lastEdgeT = 0;
   static uint32_t downT     = 0;      // 本次按下时刻
@@ -110,6 +133,7 @@ int8_t okEvent() {
   if (pressed != lastLevel && now - lastEdgeT > 30) {   // 30ms 消抖
     lastEdgeT = now;
     lastLevel = pressed;
+    s_activityMs = now;                               // 任何边沿都算"有人在操作"
     if (pressed) {
       downT    = now;
       longSent = false;
@@ -136,6 +160,16 @@ int8_t okEvent() {
   return 0;
 }
 
+int8_t encEvent() {
+  int8_t e = encEventRaw();
+  return inputsSuppressed() ? 0 : e;
+}
+
+int8_t okEvent() {
+  int8_t e = okEventRaw();
+  return inputsSuppressed() ? 0 : e;
+}
+
 /* 取走中断累积的 1/4 步, 每 4 个 1/4 步(即一格)算 1 步
    装机后屏幕为 180° 方向, 旋钮的左右旋转相对用户视角颠倒, 故返回值取反 */
 int encoderSteps() {
@@ -145,10 +179,65 @@ int encoderSteps() {
   interrupts();
 
   static int32_t carry = 0;
+  if (inputsSuppressed()) {
+    carry = 0;                                // 童锁期间丢弃旋钮步数
+    return 0;
+  }
   carry += acc;
   int steps = (int)(carry / 4);
   carry -= (int32_t)steps * 4;
+  if (steps) s_activityMs = millis();         // 转动旋钮也算操作
   return -steps;
+}
+
+uint32_t lastActivityMs() { return s_activityMs; }
+
+void swallowFor(uint32_t ms) { s_swallowUntil = millis() + ms; }
+
+void setLocked(bool locked) {
+  if (locked == s_locked) return;
+  s_locked = locked;
+  if (locked) {
+    s_unlockAt = 0;
+    noInterrupts();
+    s_encAcc = 0;
+    interrupts();
+  } else {
+    s_unlockAt = millis();
+  }
+  Serial.printf("[INPUT] %s\n", locked ? "child lock" : "unlock");
+}
+
+/* 童锁本地解锁: OK + NEXT 同时按住 5 秒。用原始电平读取, 不受事件屏蔽影响。 */
+bool childUnlockHeld() {
+  static bool     comboDown = false;
+  static bool     fired     = false;
+  static uint32_t comboAt   = 0;
+
+  if (!s_locked) {
+    comboDown = false;
+    fired     = false;
+    return false;
+  }
+
+  bool both = (digitalRead(BTN_OK) == LOW) && (digitalRead(s_next.pin) == LOW);
+  uint32_t now = millis();
+  if (!both) {
+    comboDown = false;
+    fired     = false;
+    return false;
+  }
+  if (!comboDown) {
+    comboDown = true;
+    comboAt   = now;
+    fired     = false;
+    return false;
+  }
+  if (!fired && (uint32_t)(now - comboAt) >= CHILD_UNLOCK_MS) {
+    fired = true;
+    return true;
+  }
+  return false;
 }
 
 }

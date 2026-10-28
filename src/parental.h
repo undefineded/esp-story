@@ -24,6 +24,7 @@ uint16_t bedtimeStartMin();         // 距 00:00 的分钟数
 uint16_t bedtimeEndMin();
 bool     allowlistEnabled();
 bool     remoteLocked();
+bool     childLock();
 uint64_t storyMask();
 uint64_t catMask();
 
@@ -34,6 +35,7 @@ void setAllowlistEnabled(bool enabled);
 void setStoryMask(uint64_t mask);
 void setCatMask(uint64_t mask);
 void setRemoteLocked(bool locked);
+void setChildLock(bool locked);       // 童锁: 只锁实体按键/旋钮, 不阻止 BLE 控制
 
 uint32_t revision();                // 配置版本, 供 Storage/Story 重建过滤视图
 void save();

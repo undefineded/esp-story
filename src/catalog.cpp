@@ -7,7 +7,7 @@ namespace {
 constexpr const char* INDEX = "/.esp-story-index.bin";
 constexpr const char* TEMP = "/.esp-story-index.tmp";
 constexpr const char* BACKUP = "/.esp-story-index.bak";
-constexpr uint32_t MAGIC = 0x45535049, VERSION = 1;
+constexpr uint32_t MAGIC = 0x45535049, VERSION = 2;   // v2: 每条曲目多存一个 uuid (文件名散列)
 
 bool transfer(File& file, bool reading, bool apply = true) {
   CatalogArchive archive(file, reading);

@@ -1,18 +1,25 @@
-/* 故事组件: 扫描 /story 下的故事目录, 按 timeline.lrc 与音频进度同步插画
-   故事目录结构 (见 tools/build_story.mjs 输出):
-     /story/<故事名>/<故事名>.mp3
-     /story/<故事名>/NN.jpg
-     /story/<故事名>/timeline.lrc   ([mm:ss.xx]NN.jpg | 摘要) */
+/* 故事组件: 扫描 /story 下的故事目录
+   两种类型 (按目录内容自动区分, 不靠文件夹名):
+     图文故事 : mp3 + NN.jpg + timeline.lrc   -> 全屏插画 + 底部控制条
+     音频故事 : 只有 mp3                      -> 单独的音频播放页
+   目录可以平铺, 也可以分组:
+     /story/<故事名>/...
+     /story/图文故事/<故事名>/...
+     /story/音频故事/<故事名>/...
+   timeline.lrc 格式: [mm:ss.xx]NN.jpg | 摘要 */
 #pragma once
 #include <Arduino.h>
 #include "catalog.h"
 
 namespace Story {
+  enum class Kind : uint8_t { Illustrated, Audio };
+
   bool rescan();
   void clear();
   bool index(CatalogArchive& archive, bool reading, bool apply = true);
   int  count();                    // 故事数量
   const char* title(int i);        // 故事名 (文件夹名, UTF-8; 越界返回 "")
+  Kind kind(int i);                // 图文 / 音频 (按是否有时间轴判断)
 
   /* 家长内容白名单视图 */
   void setStoryFilter(uint64_t mask, bool enabled);
@@ -22,6 +29,7 @@ namespace Story {
 
   int  currentIndex();             // 当前打开的故事实际下标 (-1 = 无)
   const char* currentTitle();      // 当前故事名 ("" = 无)
+  Kind currentKind();              // 当前故事类型
 
   bool open(int i);                // 载入故事 i 的音频与时间轴, 失败返回 false
   void start();                    // 从第一幅插画开始播放

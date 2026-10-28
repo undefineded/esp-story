@@ -1,0 +1,40 @@
+{
+  "name": "storybox-nfc-studio",
+  "version": "1.0.0",
+  "description": "小小故事盒 · PN532 NFC 桌面工作台",
+  "main": "./out/main/index.js",
+  "author": "StoryBox",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "postinstall": "node scripts/ensure-electron.cjs",
+    "dev": "electron-vite dev",
+    "start": "electron-vite preview",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dist": "electron-vite build && electron-builder --win nsis",
+    "dist:portable": "electron-vite build && electron-builder --win portable",
+    "dist:dir": "electron-vite build && electron-builder --win dir"
+  },
+  "dependencies": {
+    "lucide-react": "^1.61.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "serialport": "^13.0.0",
+    "zustand": "^5.0.16"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.7",
+    "vitest": "^5.0.5"
+  }
+}

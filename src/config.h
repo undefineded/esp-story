@@ -37,9 +37,28 @@
 /* --- 霍尔开关 U9 (HAL251SO, 全极型推挽输出) -> IO40 --- */
 #define HALL_PIN   40   // HALOUT -> IO40 (经 R29 10R)
 
-/* --- I2C FRAM U2 (MB85RC16PNF, 16Kbit = 2KB, WP 接地可写) --- */
+/* --- I2C 总线 (FRAM 与 PN532 共用) --- */
 #define I2C_SDA    1    // SDA -> IO1
 #define I2C_SCL    2    // SCL -> IO2
+
+/* --- NXP PN532 NFC (I2C 模式, 固定 7 位地址 0x24) ---
+ * 接线: VCC 3.3V / GND / SDA IO1 / SCL IO2, 模块 DIP 开关切到 I2C。
+ * IRQ 不接也能工作 (驱动通过 I2C RDY 字节轮询); 若已接 RSTPDN, 可把
+ * PN532_RST_PIN 改成实际 GPIO, 初始化时会先复位模块。IRQ 引脚当前未使用。
+ * I2C 与 FRAM 共用总线, 默认 100kHz 以兼容较弱上拉; 线短且上拉足够可改 400000。
+ */
+#ifndef PN532_I2C_ADDR
+#define PN532_I2C_ADDR  0x24
+#endif
+#ifndef PN532_I2C_HZ
+#define PN532_I2C_HZ    100000
+#endif
+#ifndef PN532_IRQ_PIN
+#define PN532_IRQ_PIN   -1      // 预留, 当前驱动使用 I2C RDY 轮询
+#endif
+#ifndef PN532_RST_PIN
+#define PN532_RST_PIN   -1      // 可选: RSTPDN 接到的 GPIO
+#endif
 
 /* --- UI / 播放常量 --- */
 #define SCR_W        320          // 横屏宽度
@@ -53,9 +72,10 @@
 #define VOL_MAX      21           // 音量档位 0..21
 #define BRIGHT_MIN   10           // 最低亮度 (防止调黑后无法操作)
 #define BRIGHT_MAX   100
-#define ENC_LONG_MS  800          // 编码器 SET 长按判定阈值 (切换模式)
+#define ENC_LONG_MS  800          // 编码器 SET 长按判定阈值 (回主页 / 设置页保存返回)
 #define OK_LONG_MS   800          // OK 键长按判定阈值 (故事播放页返回列表)
 #define NAV_LONG_MS  800          // NEXT/LAST 键长按判定阈值 (播放页进入分类列表)
+#define CHILD_UNLOCK_MS 5000      // 童锁本地解锁: OK + NEXT 同时按住时长
 
 /* --- 无线网络 (设置页可开关) ---
  * AP 默认 SSID: StoryBox-XXXX (XXXX 为蓝牙 MAC 后两位), 密码见 WIFI_AP_PASSWORD。

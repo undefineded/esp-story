@@ -162,6 +162,16 @@ async def main():
     st = (await box.request("get", what="state"))["data"]
     results.append(check("remote unlock", st.get("lock") == 0, f"lock={st.get('lock')}"))
 
+    # child lock (physical buttons only, BLE control stays available)
+    await box.request("set", childLock=True)
+    cfg_child = (await box.request("get", what="config"))["data"]
+    st = (await box.request("get", what="state"))["data"]
+    results.append(check("child lock on", cfg_child.get("childLock") is True and st.get("childLock") is True,
+                         f"cfg={cfg_child.get('childLock')} state={st.get('childLock')}"))
+    await box.request("set", childLock=False)
+    st = (await box.request("get", what="state"))["data"]
+    results.append(check("child lock off", st.get("childLock") is False, f"state={st.get('childLock')}"))
+
     # allowlist
     await box.request("set", allowlistEnabled=True, allowStories=[0], allowCats=[1])
     sts = (await box.request("get", what="stories", offset=0, limit=4))["data"]
@@ -215,6 +225,7 @@ async def main():
             bedEndMin=cfg.get("bedEndMin", 420),
             allowlistEnabled=False,
             remoteLocked=False,
+            childLock=cfg.get("childLock", False),
         )
         print("original config restored")
 
