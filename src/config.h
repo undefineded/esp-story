@@ -67,7 +67,7 @@
 #define STORY_DIR    "/story"     // TF 卡故事目录 (/story/<故事名>/)
 #define MAX_TRACKS   300          // 最大曲目数
 #define MAX_CATEGORIES 32         // 最大音乐分类数 (不含置顶的"全部歌曲")
-#define MAX_STORIES  64           // 最大故事条目数 (图文=文件夹, 音频=每个MP3)
+#define MAX_STORIES  128          // 最大故事条目数 (图文=文件夹, 音频=每个MP3)
 #define MAX_STORY_DEPTH 6         // /story 分类下的最大目录深度
 #define MAX_PANELS   256          // 每个故事最大插画数 (每个 Panel 32B, 256 -> 8KB)
 #define VOL_MAX      21           // 音量档位 0..21

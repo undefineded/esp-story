@@ -119,18 +119,16 @@ namespace {
     return k <= 0 ? String() : s_dirs[i].substring(0, k);
   }
 
-  String itemSortKey(int i) {
-    if (i < 0 || i >= s_count) return String();
-    return s_timelinePaths[i].isEmpty() ? s_audioPaths[i] : s_dirs[i];
-  }
-
   /* 扫描 /story 下的分组和故事目录 (每个含 mp3 的目录 = 一个故事), 按名称排序 */
   String findFirst(const String& dir, const char* ext);
 
   void rebuildView() {
     s_viewCount = 0;
     for (int i = 0; i < s_count && s_viewCount < MAX_STORIES; i++) {
-      if (!s_storyFilter || (s_storyMask & (1ULL << i))) s_view[s_viewCount++] = i;
+      // 家长故事白名单是 64 位; 未启用白名单时支持完整的 300 条音频条目。
+      if (!s_storyFilter || (i < 64 && (s_storyMask & (1ULL << i)))) {
+        s_view[s_viewCount++] = i;
+      }
     }
   }
 
@@ -180,28 +178,6 @@ namespace {
     s_catCount = 0;
     if (!SD_MMC.exists(STORY_DIR)) return true;
     scanDir(STORY_DIR, 0, true, String());
-
-    int order[MAX_STORIES];
-    for (int i = 0; i < s_count; ++i) order[i] = i;
-    std::sort(order, order + s_count,
-              [](int a, int b) { return strcmp(itemSortKey(a).c_str(), itemSortKey(b).c_str()) < 0; });
-
-    String dirs[MAX_STORIES], audio[MAX_STORIES], timelines[MAX_STORIES], groups[MAX_STORIES], titles[MAX_STORIES];
-    for (int i = 0; i < s_count; ++i) {
-      int k = order[i];
-      dirs[i] = s_dirs[k];
-      audio[i] = s_audioPaths[k];
-      timelines[i] = s_timelinePaths[k];
-      groups[i] = s_groups[k];
-      titles[i] = s_titles[k];
-    }
-    for (int i = 0; i < s_count; ++i) {
-      s_dirs[i] = dirs[i];
-      s_audioPaths[i] = audio[i];
-      s_timelinePaths[i] = timelines[i];
-      s_groups[i] = groups[i];
-      s_titles[i] = titles[i];
-    }
 
     int illustrated = 0;
     for (int i = 0; i < s_count; ++i) if (!s_timelinePaths[i].isEmpty()) illustrated++;

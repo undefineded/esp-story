@@ -7,7 +7,7 @@ namespace {
 constexpr const char* INDEX = "/.esp-story-index.bin";
 constexpr const char* TEMP = "/.esp-story-index.tmp";
 constexpr const char* BACKUP = "/.esp-story-index.bak";
-constexpr uint32_t MAGIC = 0x45535049, VERSION = 3;   // v3: 音频故事按每个 MP3 建条目
+constexpr uint32_t MAGIC = 0x45535049, VERSION = 4;   // v4: 音频故事按每个 MP3 建条目
 
 bool transfer(File& file, bool reading, bool apply = true) {
   CatalogArchive archive(file, reading);
