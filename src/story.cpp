@@ -3,11 +3,16 @@
 #include "player.h"
 #include <SD_MMC.h>
 #include <algorithm>
+#include <cstring>
 
 namespace {
   struct Panel { uint32_t ms; char name[28]; };
 
   String   s_dirs[MAX_STORIES];
+  String   s_groups[MAX_STORIES];          // /story 一级分组名
+  String   s_catNames[MAX_STORIES];
+  int      s_storyCat[MAX_STORIES];
+  int      s_catCount = 0;
   String   s_audioPaths[MAX_STORIES], s_timelinePaths[MAX_STORIES];
   int      s_count = 0;
   bool     s_scanOk = true;
@@ -41,7 +46,44 @@ namespace {
     return n.startsWith("/") ? n : (dir + "/" + n);
   }
 
-  /* 扫描 /story 下的子目录 (每个目录 = 一个故事), 按名称排序 */
+  String baseName(const String& path) {
+    int k = path.lastIndexOf('/');
+    return k >= 0 ? path.substring(k + 1) : path;
+  }
+
+  /* 从 /story 的完整路径推出一级分组: /story/音频故事/xx -> 音频故事;
+     直接放在 /story/xx 的故事归到"故事". */
+  String groupFromDir(const String& dir) {
+    const int rootLen = (int)strlen(STORY_DIR);
+    if (!dir.startsWith(STORY_DIR "/")) return String("故事");
+    String rest = dir.substring(rootLen + 1);
+    int slash = rest.indexOf('/');
+    return slash < 0 ? String("故事") : rest.substring(0, slash);
+  }
+
+  void buildCategories() {
+    s_catCount = 0;
+    for (int i = 0; i < s_count; ++i) {
+      int c = -1;
+      for (int j = 0; j < s_catCount; ++j) {
+        if (s_catNames[j] == s_groups[i]) { c = j; break; }
+      }
+      if (c < 0) {
+        c = s_catCount++;
+        s_catNames[c] = s_groups[i];
+      }
+      s_storyCat[i] = c;
+    }
+  }
+
+  void addStory(const String& dir, const String& group) {
+    if (s_count >= MAX_STORIES) return;
+    s_dirs[s_count] = dir;
+    s_groups[s_count] = group.length() ? group : String("故事");
+    s_count++;
+  }
+
+  /* 扫描 /story 下的分组和故事目录 (每个含 mp3 的目录 = 一个故事), 按名称排序 */
   String findFirst(const String& dir, const char* ext);
 
   void rebuildView() {
@@ -66,10 +108,11 @@ namespace {
   }
 
   /* 递归收集故事目录: 含 mp3 的目录算一个故事, 否则当作分组目录继续向下 (最多 3 层)。
-     这样 /story/<名>/、/story/图文故事/<名>/、/story/音频故事/<名>/ 都能识别。 */
-  void scanDir(const String& dir, int depth, bool root) {
+     这样 /story/<名>/、/story/图文故事/<名>/、/story/音频故事/<名>/ 都能识别。
+     group 记录 /story 下的一级分组, 供故事分类列表使用。 */
+  void scanDir(const String& dir, int depth, bool root, const String& group) {
     if (!root && dirHasMp3(dir)) {
-      if (s_count < MAX_STORIES) s_dirs[s_count++] = dir;
+      addStory(dir, group);
       return;
     }
     if (depth >= 3) return;
@@ -78,7 +121,15 @@ namespace {
     if (!d || !d.isDirectory()) { s_scanOk = false; return; }
     File f;
     while (s_count < MAX_STORIES && (f = d.openNextFile())) {
-      if (f.isDirectory()) scanDir(fullPath(dir, f.name()), depth + 1, false);
+      if (f.isDirectory()) {
+        String child = fullPath(dir, f.name());
+        String childGroup = group;
+        if (depth == 0) {
+          // 一级目录: 自己含 mp3 就是直接放在 /story 下的故事; 否则就是分组名。
+          childGroup = dirHasMp3(child) ? String("故事") : baseName(child);
+        }
+        scanDir(child, depth + 1, false, childGroup);
+      }
       f.close();
     }
     d.close();
@@ -87,11 +138,24 @@ namespace {
   bool scan() {
     s_scanOk = true;
     s_count = 0;
+    s_catCount = 0;
     if (!SD_MMC.exists(STORY_DIR)) return true;
-    scanDir(STORY_DIR, 0, true);
+    scanDir(STORY_DIR, 0, true, String());
 
-    std::sort(s_dirs, s_dirs + s_count,
-              [](const String& a, const String& b) { return strcmp(a.c_str(), b.c_str()) < 0; });
+    int order[MAX_STORIES];
+    for (int i = 0; i < s_count; ++i) order[i] = i;
+    std::sort(order, order + s_count,
+              [](int a, int b) { return strcmp(s_dirs[a].c_str(), s_dirs[b].c_str()) < 0; });
+    String dirs[MAX_STORIES], groups[MAX_STORIES];
+    for (int i = 0; i < s_count; ++i) {
+      dirs[i] = s_dirs[order[i]];
+      groups[i] = s_groups[order[i]];
+    }
+    for (int i = 0; i < s_count; ++i) {
+      s_dirs[i] = dirs[i];
+      s_groups[i] = groups[i];
+    }
+
     for (int i = 0; i < s_count; ++i) {
       s_audioPaths[i] = findFirst(s_dirs[i], ".mp3");
       s_timelinePaths[i] = findFirst(s_dirs[i], ".lrc");
@@ -100,7 +164,12 @@ namespace {
     for (int i = 0; i < s_count; ++i) if (!s_timelinePaths[i].isEmpty()) illustrated++;
     Serial.printf("[STORY] %d story(ies) in %s (%d illustrated, %d audio)\n",
                   s_count, STORY_DIR, illustrated, s_count - illustrated);
+    buildCategories();
     rebuildView();
+    Serial.printf("[STORY] %d categor(ies)\n", s_catCount);
+    for (int i = 0; i < s_catCount; ++i) {
+      Serial.printf("[STORY]   %s: %d\n", s_catNames[i].c_str(), Story::categoryStoryCount(i));
+    }
     return s_scanOk;
   }
 
@@ -178,9 +247,13 @@ namespace Story {
 
 void clear() {
   for (auto& dir : s_dirs) dir = "";
+  for (auto& group : s_groups) group = "";
+  for (auto& name : s_catNames) name = "";
+  for (auto& cat : s_storyCat) cat = 0;
   for (auto& path : s_audioPaths) path = "";
   for (auto& path : s_timelinePaths) path = "";
   s_count = 0;
+  s_catCount = 0;
   s_current = -1;
   rebuildView();
 }
@@ -199,9 +272,14 @@ bool index(CatalogArchive& archive, bool reading, bool apply) {
         !archive.text(audio) || !archive.text(timeline)) return false;
     if ((!audio.isEmpty() && (!audio.startsWith(dir + "/") || audio.indexOf("/../") >= 0 || !hasExt(audio.c_str(), ".mp3"))) ||
         (!timeline.isEmpty() && (!timeline.startsWith(dir + "/") || timeline.indexOf("/../") >= 0 || !hasExt(timeline.c_str(), ".lrc")))) return false;
-    if (reading && apply) { s_dirs[i] = dir; s_audioPaths[i] = audio; s_timelinePaths[i] = timeline; }
+    if (reading && apply) {
+      s_dirs[i] = dir;
+      s_groups[i] = groupFromDir(dir);
+      s_audioPaths[i] = audio;
+      s_timelinePaths[i] = timeline;
+    }
   }
-  if (reading && apply) { s_count = count; rebuildView(); }
+  if (reading && apply) { s_count = count; buildCategories(); rebuildView(); }
   return true;
 }
 
@@ -223,6 +301,42 @@ int viewActual(int view) {
 const char* viewTitle(int view) {
   int actual = viewActual(view);
   return actual >= 0 ? title(actual) : "";
+}
+
+int categoryCount() { return s_catCount; }
+
+const char* categoryName(int c) {
+  return (c >= 0 && c < s_catCount) ? s_catNames[c].c_str() : "";
+}
+
+int categoryStoryActual(int c, int view) {
+  if (c < 0 || c >= s_catCount || view < 0) return -1;
+  int found = 0;
+  for (int i = 0; i < s_viewCount; ++i) {
+    int actual = s_view[i];
+    if (s_storyCat[actual] != c) continue;
+    if (found == view) return actual;
+    found++;
+  }
+  return -1;
+}
+
+const char* categoryStoryTitle(int c, int view) {
+  int actual = categoryStoryActual(c, view);
+  return actual >= 0 ? title(actual) : "";
+}
+
+int categoryStoryCount(int c) {
+  if (c < 0 || c >= s_catCount) return 0;
+  int n = 0;
+  for (int i = 0; i < s_viewCount; ++i) {
+    if (s_storyCat[s_view[i]] == c) n++;
+  }
+  return n;
+}
+
+int categoryOfActual(int actual) {
+  return (actual >= 0 && actual < s_count) ? s_storyCat[actual] : -1;
 }
 
 int currentIndex() { return s_current; }

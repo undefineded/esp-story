@@ -27,8 +27,10 @@ namespace Ui {
   void updateTrackList(int count, int selected, int playing, bool nursery = false);  // 增量刷新 (选中行/播放中高亮)
 
   /* 故事模式 */
-  void drawStoryList(int count, int selected);      // 故事列表整屏绘制, 进入该屏时调用 (标题取自 Story::title)
-  void updateStoryList(int count, int selected);    // 选择变化时的增量刷新 (只重绘变化的行)
+  void drawStoryCategoryList(int count, int selected);  // /story 一级分组 (音频故事/图文故事)
+  void updateStoryCategoryList(int count, int selected);
+  void drawStoryList(int category, int count, int selected, int playing);  // 分类内故事列表
+  void updateStoryList(int category, int count, int selected, int playing);
   void drawStoryLoadingBegin(const char* title);    // 加载页静态层 (背景/顶栏/小书/文案)
   void drawStoryLoadingSpin(int step);              // 加载页旋转圆环 (step 递增, 原位重绘不闪)
   void drawStoryFrame(const char* imgPath);         // 全屏插画 (JPEG)

@@ -1056,16 +1056,92 @@ void updateTrackList(int count, int selected, int playing, bool nursery) {
   s_tlTop = top; s_tlCount = count; s_tlSel = selected; s_tlPlay = playing;
 }
 
-/* ---------------- 故事模式 ----------------
-   列表: 顶栏 + 4 行故事卡片 (每行 42px)
-   播放: 全屏插画 (320x240 JPEG, 画面贴顶) + 底部迷你控制条
-         (黄色顶沿 + 圆形播放键 + 故事名 + 进度条 + 页码 + 时间/音量) */
+/* ---------------- 故事分类列表 ----------------
+   与音乐分类列表同一套卡片: /story 下的一级目录 (音频故事/图文故事) + 故事数量。 */
+namespace {
+  const int SC_Y0 = 36, SC_RH = 42, SC_VIS = 4;
+
+  void storyCategoryRow(int y, int category, bool selected) {
+    auto& g = Display::canvas();
+    if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
+    g.fillRoundRect(10, y, 300, 38, 6, selected ? cInk : TFT_WHITE);
+    g.fillRoundRect(12, y + 2, 296, 34, 5, selected ? cYellow : TFT_WHITE);
+    if (!selected) g.drawRoundRect(10, y, 300, 38, 6, cTrackBd);
+
+    iconFolder(24, y + 10, selected ? cCoral : cAqua);
+    uint16_t bg = selected ? cYellow : TFT_WHITE;
+    g.setFont(Fonts::title());
+    g.setTextColor(cText, bg);
+    g.drawString(fit(String(Story::categoryName(category)), 196).c_str(), 54, y + 9);
+
+    char b[16];
+    snprintf(b, sizeof(b), "%d个", Story::categoryStoryCount(category));
+    g.setFont(Fonts::small());
+    g.setTextColor(cText, bg);
+    g.drawRightString(b, 296, y + 14);
+  }
+
+  int storyCategoryTop(int selected, int count) {
+    int top = (selected >= SC_VIS) ? selected - SC_VIS + 1 : 0;
+    if (top > count - SC_VIS) top = count - SC_VIS;
+    if (top < 0) top = 0;
+    return top;
+  }
+
+  void storyCategoryRepaintRow(int r, int top, int count, int selected) {
+    auto& g = Display::canvas();
+    int y = SC_Y0 + r * SC_RH;
+    g.fillRect(8, y, 306, SC_RH, cPaper);
+    int i = top + r;
+    if (i < count) storyCategoryRow(y, i, i == selected);
+  }
+
+  void storyCategoryRows(int count, int selected) {
+    int top = storyCategoryTop(selected, count);
+    for (int r = 0; r < SC_VIS; r++) storyCategoryRepaintRow(r, top, count, selected);
+  }
+
+  int s_sclTop = -1, s_sclCount = -1, s_sclSel = -1;
+}
+
+void drawStoryCategoryList(int count, int selected) {
+  palette();
+  auto& g = Display::canvas();
+  g.fillScreen(cPaper);
+  drawTopBarBase();
+  storyCategoryRows(count, selected);
+
+  g.setFont(Fonts::body());
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString("OK进入  长按SET回主页", 160, 212);
+
+  s_sclTop = storyCategoryTop(selected, count);
+  s_sclCount = count;
+  s_sclSel = selected;
+}
+
+void updateStoryCategoryList(int count, int selected) {
+  palette();
+  if (s_sclTop < 0 || s_sclCount != count) { drawStoryCategoryList(count, selected); return; }
+
+  int top = storyCategoryTop(selected, count);
+  if (top != s_sclTop) {
+    for (int r = 0; r < SC_VIS; r++) storyCategoryRepaintRow(r, top, count, selected);
+  } else {
+    storyCategoryRepaintRow(s_sclSel - top, top, count, selected);
+    storyCategoryRepaintRow(selected - top, top, count, selected);
+  }
+  s_sclTop = top; s_sclCount = count; s_sclSel = selected;
+}
+
+/* ---------------- 故事列表 ----------------
+   当前分类内的故事卡片; 正在播放的故事用珊瑚色标题/图标和"播放中"标记。 */
 
 namespace {
   const int STORY_Y0 = 36, STORY_RH = 42, STORY_VIS = 4;
 
   /* 故事行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影 */
-  void storyRow(int y, const char* name, bool selected, bool illustrated) {
+  void storyRow(int y, const char* name, bool selected, bool illustrated, bool playing) {
     auto& g = Display::canvas();
     if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
     g.fillRoundRect(10, y, 300, 38, 6, selected ? cInk : TFT_WHITE);
@@ -1073,19 +1149,20 @@ namespace {
     if (!selected) g.drawRoundRect(10, y, 300, 38, 6, cTrackBd);
 
     /* 小书图标 */
-    g.fillRoundRect(22, y + 8, 20, 22, 3, selected ? cCoral : cAqua);
+    uint16_t iconColor = playing ? cCoral : (selected ? cCoral : cAqua);
+    g.fillRoundRect(22, y + 8, 20, 22, 3, iconColor);
     g.drawRoundRect(22, y + 8, 20, 22, 3, cInk);
     g.fillRect(25, y + 8, 3, 22, cInk);
 
     uint16_t bg = selected ? cYellow : TFT_WHITE;
     g.setFont(Fonts::title());
-    g.setTextColor(cText, bg);
-    g.drawString(fit(String(name), 186).c_str(), 50, y + 9);
+    g.setTextColor(playing ? cCoral : cText, bg);
+    g.drawString(fit(String(name), 178).c_str(), 50, y + 9);
 
-    /* 类型徽章: 图文 / 音频 */
-    const char* tag = illustrated ? "图文" : "音频";
-    uint16_t tagBg  = illustrated ? cAqua : cPurple;
-    if (selected) tagBg = cCoral;
+    /* 右侧状态: 播放中优先于类型徽章 */
+    const char* tag = playing ? "播放中" : (illustrated ? "图文" : "音频");
+    uint16_t tagBg = playing ? cCoral : (illustrated ? cAqua : cPurple);
+    if (selected && !playing) tagBg = cCoral;
     g.setFont(Fonts::small());
     int tw = g.textWidth(tag) + 10;
     int tx = 306 - tw;
@@ -1102,55 +1179,69 @@ namespace {
   }
 
   /* 只重绘一行槽位 (含清行), 说明见 musicRepaintRow */
-  void storyRepaintRow(int r, int top, int count, int selected) {
+  void storyRepaintRow(int r, int top, int category, int count, int selected, int playing) {
     auto& g = Display::canvas();
     int y = STORY_Y0 + r * STORY_RH;
     g.fillRect(8, y, 306, STORY_RH, cPaper);
     int i = top + r;
-    if (i < count) {
-      int actual = Story::viewActual(i);
-      bool illustrated = (actual >= 0 && Story::kind(actual) == Story::Kind::Illustrated);
-      storyRow(y, Story::viewTitle(i), i == selected, illustrated);
-    }
+    if (i >= count) return;
+    int actual = Story::categoryStoryActual(category, i);
+    if (actual < 0) return;
+    bool illustrated = (Story::kind(actual) == Story::Kind::Illustrated);
+    storyRow(y, Story::categoryStoryTitle(category, i), i == selected, illustrated, actual == playing);
   }
 
-  void storyRows(int count, int selected) {
+  void storyRows(int category, int count, int selected, int playing) {
     int top = storyTop(selected, count);
-    for (int r = 0; r < STORY_VIS; r++) storyRepaintRow(r, top, count, selected);
+    for (int r = 0; r < STORY_VIS; r++)
+      storyRepaintRow(r, top, category, count, selected, playing);
   }
 
-  int s_slTop = -1, s_slCount = -1, s_slSel = -1;
+  int s_slTop = -1, s_slCount = -1, s_slSel = -1, s_slPlay = -1, s_slCat = -1;
 }
 
-void drawStoryList(int count, int selected) {
+void drawStoryList(int category, int count, int selected, int playing) {
   palette();
   auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
-  storyRows(count, selected);
+  storyRows(category, count, selected, playing);
 
-  g.setFont(Fonts::body());
+  g.setFont(Fonts::small());
   g.setTextColor(cText, cPaper);
-  g.drawCenterString("OK播放  长按SET回主页", 160, 212);
+  String hint = String(Story::categoryName(category)) + " · OK播放 · 长按NEXT回播放";
+  g.drawCenterString(hint.c_str(), 160, 213);
 
   s_slTop   = storyTop(selected, count);
   s_slCount = count;
   s_slSel   = selected;
+  s_slPlay  = playing;
+  s_slCat   = category;
 }
 
 /* 选择变化时的增量刷新: 只重绘发生变化的行 (不清屏) */
-void updateStoryList(int count, int selected) {
+void updateStoryList(int category, int count, int selected, int playing) {
   palette();
-  if (s_slTop < 0 || s_slCount != count) { drawStoryList(count, selected); return; }
+  if (s_slTop < 0 || s_slCount != count || s_slCat != category) {
+    drawStoryList(category, count, selected, playing); return;
+  }
 
   int top = storyTop(selected, count);
   if (top != s_slTop) {
-    for (int r = 0; r < STORY_VIS; r++) storyRepaintRow(r, top, count, selected);
+    for (int r = 0; r < STORY_VIS; r++)
+      storyRepaintRow(r, top, category, count, selected, playing);
   } else {
-    storyRepaintRow(s_slSel - top, top, count, selected);
-    storyRepaintRow(selected - top, top, count, selected);
+    int idx[4] = { s_slSel, s_slPlay, selected, playing };
+    for (int k = 0; k < 4; k++) {
+      bool duplicate = false;
+      for (int j = 0; j < k; ++j) duplicate |= (idx[j] == idx[k]);
+      if (duplicate) continue;
+      int r = idx[k] - top;
+      if (r >= 0 && r < STORY_VIS)
+        storyRepaintRow(r, top, category, count, selected, playing);
+    }
   }
-  s_slTop = top; s_slCount = count; s_slSel = selected;
+  s_slTop = top; s_slCount = count; s_slSel = selected; s_slPlay = playing;
 }
 
 namespace {
@@ -1260,9 +1351,9 @@ void drawStoryAudio(const char* title, const PlayerStatus& st) {
   g.drawRightString(fmtSec(st.durSec).c_str(), PX + PW, PY + 12);
 
   /* 操作提示 */
-  g.setFont(Fonts::body());
+  g.setFont(Fonts::small());
   g.setTextColor(cText, cPaper);
-  g.drawCenterString("OK 播放/暂停 · 长按OK返回", 160, 212);
+  g.drawCenterString("OK播放/暂停 · 长按NEXT列表 · 长按OK返回", 160, 213);
 }
 
 namespace {

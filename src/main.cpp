@@ -81,7 +81,8 @@
 /* ---------------- 界面状态机 ---------------- */
 
 enum class Screen : uint8_t { Home, MusicList, TrackList, NurseryList, Main, Settings,
-                              StoryList, StoryPlay, StoryAudio, StoryError, NoContent, Empty, Locked, Bind };
+                              StoryCategoryList, StoryList, StoryPlay, StoryAudio, StoryError,
+                              NoContent, Empty, Locked, Bind };
 
 static Screen s_screen   = Screen::Home;
 static Screen s_settingsBack = Screen::Home;   // 设置界面来源屏 (保存后返回该屏)
@@ -92,7 +93,8 @@ static int    s_sel      = 0;      // 设置界面当前选中项
 static int    s_musicSel = 0;      // 音乐分类列表当前选中项
 static int    s_trackSel = 0;      // 当前歌曲列表选中项
 static int    s_trackPlaying = 0;  // 当前歌曲列表中"正在播放"的曲目下标
-static int    s_storySel = 0;      // 故事列表当前选中项
+static int    s_storySel = 0;      // 当前故事分类列表选中项
+static int    s_storyCatSel = 0;   // /story 一级分类选中项
 static bool   s_storyRedraw = false;  // 从设置返回故事页: 置位以强制整体重绘
 static bool   s_audioRedraw = false;  // 音频故事页: 置位以强制整页重绘
 static bool   s_bleWasConnected = false;
@@ -103,9 +105,11 @@ static const int SETTINGS_ITEMS = 10;  // 亮度 / 旋转 / EQ / 息屏 / 休眠
 static void showHome();
 static void goHome();
 static void showMusicList();
+static void showStoryCategoryList();
+static void showStoryList();
+static void startStory(int view);
 static void showTrackList();
 static void showNurseryList();
-static void showStoryList();
 static void showNoContent();
 static void showEmpty(const char* title, const char* line1, const char* line2);
 static void showBindCode(Screen back);
@@ -185,6 +189,8 @@ static void applyParentalConfig() {
     showNurseryList();
   } else if (s_screen == Screen::StoryList || s_screen == Screen::StoryError) {
     showStoryList();
+  } else if (s_screen == Screen::StoryCategoryList) {
+    showStoryCategoryList();
   }
 }
 
@@ -234,6 +240,8 @@ static void exitSettings() {
     showNurseryList();
   } else if (s_settingsBack == Screen::StoryList || s_settingsBack == Screen::StoryError) {
     showStoryList();
+  } else if (s_settingsBack == Screen::StoryCategoryList) {
+    showStoryCategoryList();
   } else if (s_settingsBack == Screen::NoContent) {
     showNoContent();
   } else {
@@ -377,6 +385,9 @@ static void restoreBindBack() {
     case Screen::StoryList:
     case Screen::StoryError:
       showStoryList();
+      break;
+    case Screen::StoryCategoryList:
+      showStoryCategoryList();
       break;
     case Screen::NoContent:
       showNoContent();
@@ -552,23 +563,94 @@ static void refreshStoryBar() {
                    st.curSec, st.durSec, st.volume, st.paused);
 }
 
-/* 绘制故事列表 (受家长白名单过滤); 一个故事都没有时显示放文件提示 */
-static void showStoryList() {
-  int n = Story::viewCount();
-  if (n == 0) {
+/* 绘制 /story 一级分组: 音频故事 / 图文故事 */
+static void showStoryCategoryList() {
+  int n = Story::categoryCount();
+  if (n == 0 || Story::viewCount() == 0) {
     if (Parental::allowlistEnabled()) showNoContent();
     else showEmpty("还没有故事", "把故事文件夹放进 /story", "然后在设置中刷新列表");
     return;
   }
+  if (s_storyCatSel >= n) s_storyCatSel = 0;
+  if (s_storyCatSel < 0) s_storyCatSel = 0;
+  s_screen = Screen::StoryCategoryList;
+  Ui::drawStoryCategoryList(n, s_storyCatSel);
+}
+
+/* 绘制当前分类 (音频故事/图文故事) 内的故事列表 */
+static void showStoryList() {
+  int current = Story::currentIndex();
+  if (current >= 0) {
+    int currentCat = Story::categoryOfActual(current);
+    if (currentCat >= 0) s_storyCatSel = currentCat;
+  }
+
+  int cats = Story::categoryCount();
+  if (cats == 0) { showStoryCategoryList(); return; }
+  if (s_storyCatSel < 0 || s_storyCatSel >= cats) s_storyCatSel = 0;
+
+  int n = Story::categoryStoryCount(s_storyCatSel);
+  if (n == 0) {
+    if (Parental::allowlistEnabled()) showNoContent();
+    else showEmpty("这个分类还没有故事", "把故事文件夹放进对应分类", "然后在设置中刷新列表");
+    return;
+  }
+  if (current >= 0) {
+    for (int i = 0; i < n; ++i) {
+      if (Story::categoryStoryActual(s_storyCatSel, i) == current) { s_storySel = i; break; }
+    }
+  }
   if (s_storySel >= n) s_storySel = 0;
   if (s_storySel < 0) s_storySel = 0;
   s_screen = Screen::StoryList;
-  Ui::drawStoryList(n, s_storySel);
+  Ui::drawStoryList(s_storyCatSel, n, s_storySel, current);
 }
 
-static void startStory(int view) {
-  int actual = Story::viewActual(view);
+/* 从故事列表/分类列表回到正在播放的页面; 播放不中断 */
+static void returnToStoryPlayback() {
+  if (!Story::active()) { showStoryList(); return; }
+  int actual = Story::currentIndex();
+  int cat = Story::categoryOfActual(actual);
+  if (cat >= 0) s_storyCatSel = cat;
+  if (Story::currentKind() == Story::Kind::Audio) {
+    s_screen      = Screen::StoryAudio;
+    s_audioRedraw = true;
+  } else {
+    s_screen      = Screen::StoryPlay;
+    s_storyRedraw = true;
+  }
+}
+
+/* 当前分类内切换上一个/下一个故事 (与音乐播放器 NEXT/LAST 一致) */
+static void switchStory(int delta) {
+  int actual = Story::currentIndex();
+  if (actual < 0) return;
+  int cat = Story::categoryOfActual(actual);
+  if (cat < 0) return;
+  int n = Story::categoryStoryCount(cat);
+  if (n <= 0) return;
+  int view = 0;
+  for (int i = 0; i < n; ++i) {
+    if (Story::categoryStoryActual(cat, i) == actual) { view = i; break; }
+  }
+  int next = (view + delta % n + n) % n;
+  s_storyCatSel = cat;
+  s_storySel = next;
+  startStory(next);
+}
+
+/* 打开一个实际故事下标 (加载页 -> 图文/音频播放页) */
+static void playStoryActual(int actual) {
   if (actual < 0 || !Parental::storyAllowed(actual) || !Parental::canPlay()) return;
+
+  int cat = Story::categoryOfActual(actual);
+  if (cat >= 0) {
+    s_storyCatSel = cat;
+    int n = Story::categoryStoryCount(cat);
+    for (int i = 0; i < n; ++i) {
+      if (Story::categoryStoryActual(cat, i) == actual) { s_storySel = i; break; }
+    }
+  }
 
   Story::Kind kind = Story::kind(actual);
 
@@ -599,11 +681,22 @@ static void startStory(int view) {
   refreshStoryBar();
 }
 
-/* BLE 下发的是实际故事下标: 找到它在当前白名单视图中的位置 */
+/* 当前分类列表中的第 view 个故事 */
+static void startStory(int view) {
+  int actual = Story::categoryStoryActual(s_storyCatSel, view);
+  playStoryActual(actual);
+}
+
+/* BLE 下发的是实际故事下标: 找到它在当前分类中的位置 */
 static void startStoryActual(int actual) {
-  for (int i = 0; i < Story::viewCount(); i++) {
-    if (Story::viewActual(i) == actual) { startStory(i); return; }
+  int cat = Story::categoryOfActual(actual);
+  if (cat < 0) return;
+  s_storyCatSel = cat;
+  int n = Story::categoryStoryCount(cat);
+  for (int i = 0; i < n; ++i) {
+    if (Story::categoryStoryActual(cat, i) == actual) { s_storySel = i; break; }
   }
+  playStoryActual(actual);
 }
 
 /* BLE 下发的播放控制: 在 main loop 里执行, 保证 UI/Player 访问在同一任务 */
@@ -631,12 +724,15 @@ static void handleBleCommand(const Ble::Command& c) {
     case Ble::Action::Prev: {
       if (!Parental::canPlay()) break;
       if (Story::active()) {
-        int n = Story::viewCount();
+        int cat = Story::categoryOfActual(Story::currentIndex());
+        int n = Story::categoryStoryCount(cat);
         if (n <= 0) break;
         int cur = Story::currentIndex();
         int pos = 0;
-        for (int i = 0; i < n; i++) if (Story::viewActual(i) == cur) { pos = i; break; }
+        for (int i = 0; i < n; i++) if (Story::categoryStoryActual(cat, i) == cur) { pos = i; break; }
         int next = (c.action == Ble::Action::Next) ? (pos + 1) % n : (pos - 1 + n) % n;
+        s_storyCatSel = cat;
+        s_storySel = next;
         startStory(next);
       } else if (c.action == Ble::Action::Next) {
         Player::next();
@@ -693,7 +789,8 @@ static void armLock(Parental::Lock lk) {
     if (s_screen == Screen::Home) {
       s_lockedBack = Screen::Home;               // 解锁后回主页
     } else if (s_screen == Screen::StoryPlay || s_screen == Screen::StoryAudio ||
-               s_screen == Screen::StoryList || s_screen == Screen::StoryError) {
+               s_screen == Screen::StoryList || s_screen == Screen::StoryCategoryList ||
+               s_screen == Screen::StoryError) {
       s_lockedBack = Screen::StoryList;
     } else {
       s_lockedBack = Screen::MusicList;
@@ -905,7 +1002,8 @@ void loop() {
   }
   if (s_screen == Screen::Locked) {
     s_lockShown = Parental::Lock::None;
-    if      (s_lockedBack == Screen::StoryList) showStoryList();
+    if      (s_lockedBack == Screen::StoryCategoryList) showStoryCategoryList();
+    else if (s_lockedBack == Screen::StoryList) showStoryList();
     else if (s_lockedBack == Screen::Home)      goHome();
     else                                        showMusicList();
     return;
@@ -949,7 +1047,7 @@ void loop() {
     if (enc == 1 || ok == 1) {
       switch (s_homeSel) {
         case 0:  showMusicList();   break;
-        case 1:  showStoryList();   break;
+        case 1:  showStoryCategoryList(); break;
         case 2:  showNurseryList(); break;
         default: enterSettings();   break;
       }
@@ -1120,24 +1218,59 @@ void loop() {
     break;
   }
 
-  /* ---------------- 故事列表 ---------------- */
-  case Screen::StoryList: {
+  /* ---------------- 故事分类列表 ---------------- */
+  case Screen::StoryCategoryList: {
     int8_t enc = Input::encEvent();
-    if (enc == 2) { goHome(); return; }           // SET 长按: 回主页
-    if (enc == 1) { startStory(s_storySel); return; }
+    if (enc == 2) { goHome(); return; }
+    if (enc == 1) { showStoryList(); return; }
 
     int move = Input::encoderSteps();
     if (Input::nextEvent() == 1) move += 1;
     if (Input::prevEvent() == 1) move -= 1;
 
-    int n = Story::viewCount();
+    int n = Story::categoryCount();
     if (move != 0 && n > 0) {
-      s_storySel = (int)((s_storySel + move % n + n) % n);
-      Ui::updateStoryList(n, s_storySel);
+      s_storyCatSel = (int)((s_storyCatSel + move % n + n) % n);
+      Ui::updateStoryCategoryList(n, s_storyCatSel);
       return;
     }
 
-    if (Input::okEvent() == 1) { startStory(s_storySel); return; }
+    if (Input::okEvent() == 1) { showStoryList(); return; }
+    break;
+  }
+
+  /* ---------------- 故事列表 ---------------- */
+  case Screen::StoryList: {
+    int n = Story::categoryStoryCount(s_storyCatSel);
+    if (n == 0) { showStoryCategoryList(); return; }
+
+    int8_t enc = Input::encEvent();
+    if (enc == 2) { goHome(); return; }           // SET 长按: 回主页
+    if (enc == 1) { startStory(s_storySel); return; }
+
+    int8_t nx = Input::nextEvent();
+    int8_t pv = Input::prevEvent();
+    if (nx == 2 || pv == 2) {                     // 长按: 回到正在播放的页面
+      if (Story::active()) returnToStoryPlayback();
+      else                 showStoryCategoryList();
+      return;
+    }
+
+    int move = Input::encoderSteps() + (nx == 1 ? 1 : 0) + (pv == 1 ? -1 : 0);
+    if (move != 0 && n > 0) {
+      s_storySel = (int)((s_storySel + move % n + n) % n);
+      Ui::updateStoryList(s_storyCatSel, n, s_storySel, Story::currentIndex());
+      return;
+    }
+
+    switch (Input::okEvent()) {
+      case 1: startStory(s_storySel); return;
+      case 3:
+        if (Story::active()) Story::stop();
+        showStoryCategoryList();
+        return;
+      default: break;
+    }
     break;
   }
 
@@ -1161,6 +1294,13 @@ void loop() {
     int8_t enc = Input::encEvent();
     if (enc == 2) { goHome(); return; }           // SET 长按: 停止故事并回主页
     if (enc == 1) Player::toggle();               // SET 短按: 暂停/继续
+
+    int8_t nx = Input::nextEvent();
+    int8_t pv = Input::prevEvent();
+    if (nx == 1) { switchStory(1); return; }       // 短按: 下一个故事
+    if (pv == 1) { switchStory(-1); return; }      // 短按: 上一个故事
+    if (nx == 2) { showStoryList(); return; }      // 长按: 当前分类播放列表
+    if (pv == 2) { Story::stop(); showStoryCategoryList(); return; }
 
     switch (Input::okEvent()) {
       case 1: Player::toggle(); break;              // 单击: 暂停/继续
@@ -1200,6 +1340,13 @@ void loop() {
     int8_t enc = Input::encEvent();
     if (enc == 2) { goHome(); return; }             // SET 长按: 停止故事并回主页
     if (enc == 1) { Player::toggle(); return; }      // SET 短按: 暂停/继续
+
+    int8_t nx = Input::nextEvent();
+    int8_t pv = Input::prevEvent();
+    if (nx == 1) { switchStory(1); return; }
+    if (pv == 1) { switchStory(-1); return; }
+    if (nx == 2) { showStoryList(); return; }        // 长按: 当前分类播放列表
+    if (pv == 2) { Story::stop(); showStoryCategoryList(); return; }
 
     switch (Input::okEvent()) {
       case 1: Player::toggle(); return;                              // 单击: 暂停/继续
