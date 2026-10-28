@@ -21,4 +21,14 @@ int main() {
   frame[20]^=1;
   for(size_t i=0;i<total;i++)assert(!decoder.feed(frame[i]));
   assert(decoder.used==0);
+
+  // A frame header claiming 4KB of body but followed by too many bytes must
+  // be discarded without writing past Decoder::bytes.
+  uint8_t header[16];
+  TransferFrame::header(header, 2, 4096);
+  for (size_t i = 0; i < sizeof(header); i++) decoder.feed(header[i]);
+  for (size_t i = 0; i < 60000; i++) {
+    decoder.feed(0xAA);
+    assert(decoder.used <= TransferFrame::Capacity);
+  }
 }

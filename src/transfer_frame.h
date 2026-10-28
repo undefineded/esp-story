@@ -16,6 +16,7 @@ public:
   size_t used=0;
   void reset() { used=0; }
   bool feed(uint8_t c) {
+    if (used >= Capacity) { reset(); return false; }
     bytes[used++]=c;
     while (used && memcmp(bytes, "SBX4", used<4?used:4)) {
       memmove(bytes, bytes+1, --used);
@@ -25,7 +26,9 @@ public:
     if (!json || json>MaxJson || raw>MaxData || u32(bytes+8)!=transferCrc32(bytes,8)) {
       reset(); return false;
     }
-    if (used != Header+json+raw) return false;
+    const size_t expected=Header+json+raw;
+    if (used > expected) { reset(); return false; }
+    if (used != expected) return false;
     if (u32(bytes+12)!=transferCrc32(bytes+Header,json+raw)) { reset(); return false; }
     return true;
   }

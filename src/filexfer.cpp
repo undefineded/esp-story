@@ -583,7 +583,12 @@ uint8_t progress() {
 
 void loop() {
   const uint32_t now = millis();
-  if (s_guard && now - s_activity > 60000) { abortAll(); return; }
+  // 慢卡一次 16KB 合并写可能超过 60 秒；传输仍在进行时不能按“会话闲置”
+  // 把它取消，否则会在数据已经落盘后删掉 .part 文件。
+  if (s_guard && !s_read.active && !s_write.active && now - s_activity > 60000) {
+    abortAll();
+    return;
+  }
   if (s_read.active && now - s_lastReadMs > 30000) {
     s_read.file.close();
     s_read.active = false;
