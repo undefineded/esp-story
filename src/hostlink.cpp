@@ -3,25 +3,23 @@
 #include "nfc.h"
 #include "ble.h"
 #include "filexfer.h"
+#include "transfer_frame.h"
 #include <ArduinoJson.h>
 #include <cstring>
 
 namespace {
 
-constexpr uint16_t kLineMax   = 12288;
-constexpr uint16_t kDocMax    = 24576;
 constexpr uint16_t kNdefMax   = 1024;
 constexpr uint16_t kRawMax    = 512;
 constexpr uint32_t kHostIdleMs = 120000;
 
-char     s_line[kLineMax];
-uint16_t s_lineLen = 0;
-bool     s_lineOverflow = false;
+TransferFrame::Decoder s_decoder;
+uint32_t s_rxAt = 0;
 uint32_t s_lastHostMs = 0;
 bool     s_booted = false;
 uint8_t  s_ndefBuf[kNdefMax];
 uint8_t  s_rawBuf[kRawMax];
-char     s_docBuf[kDocMax];
+uint8_t s_docBuf[TransferFrame::Capacity];
 
 void hexEncode(const uint8_t* data, uint16_t len, char* out, size_t outSize) {
   static const char* digits = "0123456789ABCDEF";
@@ -66,20 +64,24 @@ int hexDecode(const char* text, uint8_t* out, size_t outSize) {
   return (int)n;
 }
 
-void sendDoc(JsonDocument& doc) {
-  size_t n = serializeJson(doc, s_docBuf, sizeof(s_docBuf));
-  if (n == 0) return;
-  if (n >= sizeof(s_docBuf) - 1) {
-    Serial.println("[USB] json overflow");
-    return;
+void sendDoc(JsonDocument& doc, const uint8_t* raw = nullptr, size_t rawLen = 0) {
+  const size_t jsonLen = measureJson(doc);
+  if (!jsonLen || jsonLen > TransferFrame::MaxJson || rawLen > TransferFrame::MaxData) return;
+  serializeJson(doc, s_docBuf + TransferFrame::Header, jsonLen + 1);
+  if (rawLen) memcpy(s_docBuf + TransferFrame::Header + jsonLen, raw, rawLen);
+  TransferFrame::header(s_docBuf, jsonLen, rawLen);
+  const size_t length = TransferFrame::Header + jsonLen + rawLen;
+  size_t sent = 0;
+  while (sent < length) {
+    size_t n = Serial.write(s_docBuf + sent, length - sent);
+    if (!n) break;
+    sent += n;
   }
-  s_docBuf[n++] = '\n';
-  Serial.write((const uint8_t*)s_docBuf, n);
 }
 
 void sendError(int32_t id, const char* code, const char* msg = nullptr) {
   JsonDocument doc;
-  doc["v"] = 2;
+  doc["v"] = 4;
   if (id) doc["id"] = id;
   doc["ok"] = false;
   doc["err"] = code;
@@ -89,7 +91,7 @@ void sendError(int32_t id, const char* code, const char* msg = nullptr) {
 
 void sendOk(int32_t id, const char* cmd = nullptr, const char* act = nullptr) {
   JsonDocument doc;
-  doc["v"] = 2;
+  doc["v"] = 4;
   if (id) doc["id"] = id;
   doc["ok"] = true;
   if (cmd) doc["cmd"] = cmd;
@@ -167,12 +169,12 @@ void buildNfcStatus(JsonObject obj) {
 
 void sendHello(int32_t id) {
   JsonDocument doc;
-  doc["v"]       = 2;
+  doc["v"]       = 4;
   if (id) doc["id"] = id;
   doc["ok"]      = true;
   doc["evt"]     = "hello";
   doc["fw"]      = "storybox-nfc-1.0";
-  doc["proto"]   = 2;
+  doc["proto"]   = 4;
   doc["board"]   = "ESP32-S3";
   doc["name"]    = Ble::deviceName();
   doc["role"]    = "storybox";
@@ -185,8 +187,6 @@ void sendHello(int32_t id) {
   features.add("fs.read");
   features.add("fs.write");
   features.add("fs.sd");
-  features.add("fs.session");
-  features.add("fs.window4.crc32");
   JsonObject fs = doc["fs"].to<JsonObject>();
   fs["ready"] = FileXfer::ready();
   JsonObject nfc = doc["nfc"].to<JsonObject>();
@@ -196,7 +196,7 @@ void sendHello(int32_t id) {
 
 void sendStatus(int32_t id) {
   JsonDocument doc;
-  doc["v"] = 2;
+  doc["v"] = 4;
   if (id) doc["id"] = id;
   doc["ok"] = true;
   doc["cmd"] = "nfc";
@@ -211,7 +211,7 @@ void flushEvents() {
   int budget = 6;
   while (budget-- > 0 && Nfc::takeEvent(ev)) {
     JsonDocument doc;
-    doc["v"] = 2;
+    doc["v"] = 4;
     doc["evt"] = "nfc";
     switch (ev.type) {
       case Nfc::EventType::Module:
@@ -273,7 +273,7 @@ void handleRead(JsonDocument& doc, int32_t id) {
   hexEncode(res.data, res.len, hex, sizeof(hex));
 
   JsonDocument out;
-  out["v"] = 2;
+  out["v"] = 4;
   if (id) out["id"] = id;
   out["ok"] = true;
   out["cmd"] = "nfc";
@@ -297,7 +297,7 @@ void handleWriteNdef(JsonDocument& doc, int32_t id) {
     return;
   }
   JsonDocument out;
-  out["v"] = 2;
+  out["v"] = 4;
   if (id) out["id"] = id;
   out["ok"] = true;
   out["cmd"] = "nfc";
@@ -332,7 +332,7 @@ void handleWriteRaw(JsonDocument& doc, int32_t id) {
     return;
   }
   JsonDocument out;
-  out["v"] = 2;
+  out["v"] = 4;
   if (id) out["id"] = id;
   out["ok"] = true;
   out["cmd"] = "nfc";
@@ -367,16 +367,13 @@ void handleNfc(JsonDocument& doc, int32_t id) {
   sendError(id, "BAD_ACT");
 }
 
-void processLine(const char* line) {
-  /* 璺宠繃鍓嶅绌虹櫧, 鍙鐞?JSON 瀵硅薄琛?*/
-  while (*line == ' ' || *line == '\t' || *line == '\r') line++;
-  if (*line != '{') return;
-
+void processFrame(const uint8_t* json, size_t jsonLen, const uint8_t* raw, size_t rawLen) {
   JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, line);
+  DeserializationError err = deserializeJson(doc, json, jsonLen);
   if (err) { sendError(0, "BAD_JSON"); return; }
 
   int32_t id = doc["id"] | 0;
+  if (doc["v"].as<int>() != 4) { sendError(id, "PROTOCOL_V4_REQUIRED"); return; }
   const char* cmd = doc["cmd"] | "";
 
   s_lastHostMs = millis();
@@ -386,7 +383,7 @@ void processLine(const char* line) {
     if (strcmp(act, "hello") == 0) { sendHello(id); return; }
     if (strcmp(act, "ping") == 0) {
       JsonDocument out;
-      out["v"] = 2;
+      out["v"] = 4;
       if (id) out["id"] = id;
       out["ok"] = true;
       out["evt"] = "pong";
@@ -406,8 +403,10 @@ void processLine(const char* line) {
 
   if (strcmp(cmd, "fs") == 0) {
     JsonDocument out;
-    FileXfer::handle(doc, out, id);
-    sendDoc(out);
+    FileXfer::handle(doc, out, id, raw, rawLen);
+    size_t length = 0;
+    const uint8_t* data = FileXfer::outputData(length);
+    sendDoc(out, data, length);
     return;
   }
 
@@ -415,29 +414,20 @@ void processLine(const char* line) {
 }
 
 void readSerial() {
+  if (s_decoder.used && (uint32_t)(millis() - s_rxAt) > 2000) s_decoder.reset();
   int budget = 24576;
   const uint32_t started = micros();
   while (budget-- > 0 && Serial.available() > 0) {
-    // Drain several complete frames, bounded in time so cancellation/UI still run.
     if ((budget & 255) == 0 && (uint32_t)(micros() - started) >= 6000) break;
-    int value = Serial.read();
+    const int value = Serial.read();
     if (value < 0) break;
-    char c = (char)value;
-    if (c == '\n') {
-      if (!s_lineOverflow) {
-        s_line[s_lineLen] = 0;
-        size_t len = s_lineLen;
-        while (len > 0 && (s_line[len - 1] == '\r' || s_line[len - 1] == ' ')) {
-          s_line[--len] = 0;
-        }
-        if (len > 0) processLine(s_line);
-      }
-      s_lineLen = 0;
-      s_lineOverflow = false;
-    } else if (s_lineLen + 1 < sizeof(s_line)) {
-      s_line[s_lineLen++] = c;
-    } else {
-      s_lineOverflow = true;
+    s_rxAt = millis();
+    if (s_decoder.feed((uint8_t)value)) {
+      const size_t json = TransferFrame::u16(s_decoder.bytes + 4);
+      const size_t raw = TransferFrame::u16(s_decoder.bytes + 6);
+      processFrame(s_decoder.bytes + TransferFrame::Header, json,
+                   s_decoder.bytes + TransferFrame::Header + json, raw);
+      s_decoder.reset();
     }
   }
 }
@@ -447,17 +437,16 @@ void readSerial() {
 namespace HostLink {
 
 void begin() {
-  s_lineLen = 0;
-  s_lineOverflow = false;
+  s_decoder.reset();
   s_lastHostMs = millis();
 
   /* 鍚姩鏃朵富鍔ㄥ箍鎾竴娆?hello; 涓婁綅鏈哄鏋滃凡缁忔墦寮€涓插彛鍙洿鎺ヨ瘑鍒? 鍚﹀垯涓诲姩璇㈤棶 */
   JsonDocument doc;
-  doc["v"] = 2;
+  doc["v"] = 4;
   doc["evt"] = "boot";
   doc["fw"] = "storybox-nfc-1.0";
   doc["board"] = "ESP32-S3";
-  doc["proto"] = 2;
+  doc["proto"] = 4;
   JsonArray features = doc["features"].to<JsonArray>();
   features.add("nfc");
   features.add("nfc.ndef");
@@ -466,8 +455,6 @@ void begin() {
   features.add("fs.read");
   features.add("fs.write");
   features.add("fs.sd");
-  features.add("fs.session");
-  features.add("fs.window4.crc32");
   JsonObject fs = doc["fs"].to<JsonObject>();
   fs["ready"] = FileXfer::ready();
   JsonObject nfc = doc["nfc"].to<JsonObject>();

@@ -128,15 +128,15 @@ src/renderer/src/
 - 请求 id 与响应匹配、5s 心跳、3 次心跳失败自动重连。
 - 将非 JSON 的设备日志原样送到 UI 日志面板。
 - 事件：`conn:status`、`device:event`、`log:entry`。
-- 文件传输：`fs.list/mkdir/remove/rename/read/write/rescan`，内容 base64 分块；下载写入本机文件，上传支持浏览器拖放和 Windows 剪贴板路径（含文件夹）。
+- 文件传输：`fs.list/mkdir/remove/rename/read/write/rescan`，内容以原始二进制分块传输；下载写入本机文件，上传支持浏览器拖放和 Windows 剪贴板路径（含文件夹）。
 
 ### 协议
 
-换行分隔 JSON v2；详细命令见 [`docs/pn532-i2c.md`](../docs/pn532-i2c.md#3-usb-串口协议v2)。
+USB 使用 SBX4 二进制帧，JSON 元数据版本为 v4，文件数据不使用 Base64。两端必须一起更新；详见 [传输协议](../docs/file-transfer-refactor.md)。旧协议文档中的动作名称仍有参考价值，线格式以新协议为准。
 
 ```json
-{"v":2,"id":3,"cmd":"nfc","act":"status"}
-{"v":2,"evt":"nfc","type":"card","card":{...}}
+{"v":4,"id":3,"cmd":"nfc","act":"status"}
+{"v":4,"evt":"nfc","type":"card","card":{...}}
 ```
 
 ### 为什么要做扩展层

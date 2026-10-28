@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { SerialPort } from 'serialport'
-import { crc32, transferWindow } from '@shared/transfer'
+import { encodeFrame, FrameDecoder } from './frame'
+import { transferWindow } from '@shared/transfer'
 import type {
   ConnectionStatus,
   DeviceEvent,
@@ -60,9 +61,10 @@ function normalizeNfc(input: unknown): NfcStatus {
 }
 
 function normalizeDevice(doc: Record<string, unknown>): DeviceInfo {
+  if (doc.proto !== 4) throw new Error('PROTOCOL: 请同时更新上位机与固件，要求协议 v4')
   return {
     fw: typeof doc.fw === 'string' ? doc.fw : 'storybox-nfc',
-    proto: Number(doc.proto) || 2,
+    proto: 4,
     board: typeof doc.board === 'string' ? doc.board : 'ESP32-S3',
     name: typeof doc.name === 'string' ? doc.name : 'StoryBox',
     role: typeof doc.role === 'string' ? doc.role : 'storybox',
@@ -81,9 +83,9 @@ function openPort(path: string, baudRate: number): Promise<SerialPort> {
   })
 }
 
-function writeLine(port: SerialPort, text: string): Promise<void> {
+function writeFrame(port: SerialPort, frame: Buffer): Promise<void> {
   return new Promise((resolve, reject) => {
-    port.write(text, (err) => (err ? reject(err) : resolve()))
+    port.write(frame, (err) => (err ? reject(err) : resolve()))
   })
 }
 
@@ -103,7 +105,11 @@ function attemptsSource(ports: PortInfo[]): PortInfo[] {
  */
 export class NfcSession extends EventEmitter<SessionEvents> {
   private port: SerialPort | null = null
-  private rx = ''
+  private decoder = new FrameDecoder((doc, raw) => {
+    const data = doc.data;
+    if (data && typeof data === 'object') (data as Record<string, unknown>).bytes = raw;
+    this.onMessage(doc);
+  }, (text) => { if (text.trim()) this.log('in', text.trim()) })
   private pending = new Map<number, Pending>()
   private nextId = 1
   private status: ConnectionStatus = { state: 'disconnected' }
@@ -119,28 +125,32 @@ export class NfcSession extends EventEmitter<SessionEvents> {
   private ready = false
   private fileBusy = 0
   private transferSession = false
-  private transferChunk = 4096
 
   transferWindowSize(): number {
-    return this.device?.features.includes('fs.window4.crc32') ? 4 : 1
+    return 4
   }
 
   async fsSessionBegin(): Promise<void> {
     if (this.transferSession) throw new Error('BUSY: 已有文件传输任务')
     this.transferSession = true
     try {
-      if (this.device?.features.includes('fs.session')) {
-        await this.request('fs', { act: 'session_begin' }, 10000)
-      }
+      await this.request('fs', { act: 'session_begin' }, 10000)
     } catch (err) { this.transferSession = false; throw err }
   }
 
   async fsSessionEnd(): Promise<void> {
     try {
-      if (this.transferSession && this.device?.features.includes('fs.session')) {
+      if (this.transferSession) {
         await this.request('fs', { act: 'session_end' }, 10000)
       }
     } finally { this.transferSession = false }
+  }
+
+  private async fileOperation<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.transferSession) return operation()
+    await this.fsSessionBegin()
+    try { return await operation() }
+    finally { await this.fsSessionEnd() }
   }
 
   constructor(private readonly settings: SettingsStore) {
@@ -251,7 +261,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
 
     const port = await openPort(path, settings.baudRate)
     this.port = port
-    this.rx = ''
+    this.decoder.reset()
     this.bindPort(port)
     this.setState({ state: 'connecting', port: path, message: '等待设备握手…' })
 
@@ -266,7 +276,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
   private bindPort(port: SerialPort): void {
     port.on('data', (chunk: Buffer | string) => {
       if (this.port !== port) return
-      this.onData(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
+      this.decoder.feed(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
     })
     port.on('close', () => {
       if (this.port !== port) return
@@ -363,39 +373,6 @@ export class NfcSession extends EventEmitter<SessionEvents> {
     this.heartbeatTimer = undefined
   }
 
-  private onData(text: string): void {
-    this.rx += text
-    if (this.rx.length > 128 * 1024) {
-      this.rx = ''
-      this.log('error', '串口接收缓冲溢出, 已清空')
-      return
-    }
-    let index = this.rx.indexOf('\n')
-    while (index >= 0) {
-      const line = this.rx.slice(0, index).replace(/\r$/, '')
-      this.rx = this.rx.slice(index + 1)
-      this.onLine(line)
-      index = this.rx.indexOf('\n')
-    }
-  }
-
-  private onLine(line: string): void {
-    const text = line.trim()
-    if (!text) return
-    if (!text.startsWith('{')) {
-      this.log('in', text)
-      return
-    }
-    let doc: Record<string, unknown>
-    try {
-      doc = JSON.parse(text) as Record<string, unknown>
-    } catch {
-      this.log('in', text)
-      return
-    }
-    this.onMessage(doc)
-  }
-
   private onMessage(doc: Record<string, unknown>): void {
     const id = typeof doc.id === 'number' ? doc.id : 0
     if (id && this.pending.has(id)) {
@@ -416,7 +393,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
     if (doc.evt === 'boot' || doc.evt === 'hello') {
       if (!this.ready && this.port) {
         const path = this.status.port
-        if (path) void this.onDeviceReady(doc, path)
+        if (path) void this.onDeviceReady(doc, path).catch((err: Error) => this.fatal(err.message))
       }
       return
     }
@@ -486,12 +463,14 @@ export class NfcSession extends EventEmitter<SessionEvents> {
     cmd: string,
     payload: Record<string, unknown> = {},
     timeoutMs = 3000,
-    quiet = false
+    quiet = false,
+    binary: Buffer = Buffer.alloc(0)
   ): Promise<Record<string, unknown>> {
     if (!this.port?.isOpen) return Promise.reject(new Error('串口未打开'))
     const id = this.nextId++
-    const body = { v: 2, id, cmd, ...payload }
+    const body = { v: 4, id, cmd, ...payload }
     const line = JSON.stringify(body)
+    const frame = encodeFrame(body, binary)
     const isFileCommand = cmd === 'fs'
     if (isFileCommand) this.fileBusy += 1
     let released = false
@@ -518,7 +497,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
         timer
       })
       if (!quiet) this.log('out', line.length > 700 ? `${line.slice(0, 700)}…` : line)
-      writeLine(this.port as SerialPort, `${line}\n`).catch((err: Error) => {
+      writeFrame(this.port as SerialPort, frame).catch((err: Error) => {
         const item = this.pending.get(id)
         if (item) {
           this.pending.delete(id)
@@ -618,20 +597,21 @@ export class NfcSession extends EventEmitter<SessionEvents> {
   }
 
   async fsMkdir(path: string): Promise<void> {
-    await this.request('fs', { act: 'mkdir', path }, 10000)
+    await this.fileOperation(() => this.request('fs', { act: 'mkdir', path }, 10000))
   }
 
   async fsRemove(path: string): Promise<void> {
-    await this.request('fs', { act: 'remove', path }, 120000)
+    await this.fileOperation(() => this.request('fs', { act: 'remove', path }, 120000))
   }
 
   async fsRename(from: string, to: string): Promise<void> {
-    await this.request('fs', { act: 'rename', from, to }, 15000)
+    await this.fileOperation(() => this.request('fs', { act: 'rename', from, to }, 15000))
   }
 
   async fsReadStart(path: string): Promise<FsReadStart> {
     const doc = await this.request('fs', { act: 'read_begin', path }, 30000)
     const data = (doc.data ?? {}) as Record<string, unknown>
+    if (data.chunk !== 4096) throw new Error('PROTOCOL: 分块大小不匹配')
     return {
       xid: Number(data.xid) || 0,
       path: typeof data.path === 'string' ? data.path : path,
@@ -656,11 +636,9 @@ export class NfcSession extends EventEmitter<SessionEvents> {
     }
     if (!doc) throw lastError ?? new Error('读取超时')
     const data = (doc.data ?? {}) as Record<string, unknown>
-    const encoded = typeof data.data === 'string' ? data.data : ''
-    const buffer = Buffer.from(encoded, 'base64')
-    if (Number(data.offset) !== offset || Number(data.len) !== buffer.length ||
-        (this.transferWindowSize() > 1 && typeof data.crc32 !== 'number') ||
-        (typeof data.crc32 === 'number' && crc32(buffer) !== data.crc32)) {
+    const buffer = data.bytes
+    if (!Buffer.isBuffer(buffer)) throw new Error('VERIFY: 缺少二进制数据')
+    if (Number(data.offset) !== offset || Number(data.len) !== buffer.length) {
       throw new Error('VERIFY: 下载块偏移、长度或校验值不匹配')
     }
     return {
@@ -679,7 +657,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
   async fsWriteStart(path: string, size: number, overwrite = true): Promise<FsWriteStart> {
     const doc = await this.request('fs', { act: 'write_begin', path, size, overwrite }, 30000)
     const data = (doc.data ?? {}) as Record<string, unknown>
-    this.transferChunk = Math.min(4096, Math.max(1, Number(data.chunk) || 4096))
+    if (data.chunk !== 4096) throw new Error('PROTOCOL: 分块大小不匹配')
     return {
       xid: Number(data.xid) || 0,
       path: typeof data.path === 'string' ? data.path : path,
@@ -690,7 +668,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
 
   async fsWriteChunk(xid: number, offset: number, data: Uint8Array): Promise<{ written: number }> {
     const payload = Buffer.from(data)
-    const chunkSize = this.transferChunk
+    const chunkSize = 4096
     const window = this.transferWindowSize()
     let written = offset
     for (let base = 0; base < payload.length; base += chunkSize * window) {
@@ -704,9 +682,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
             try {
               doc = await this.request('fs', {
                 act: 'write_chunk', xid, offset: offset + i,
-                data: piece.toString('base64'),
-                ...(window > 1 ? { crc32: crc32(piece) } : {})
-              }, 30000, true)
+              }, 30000, true, piece)
               break
             } catch (err) {
               lastError = err instanceof Error ? err : new Error(String(err))
@@ -743,7 +719,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
   }
 
   async fsRescan(): Promise<{ tracks: number; categories: number }> {
-    const doc = await this.request('fs', { act: 'rescan' }, 120000)
+    const doc = await this.fileOperation(() => this.request('fs', { act: 'rescan' }, 120000))
     const data = (doc.data ?? {}) as Record<string, unknown>
     return {
       tracks: Number(data.tracks) || 0,
@@ -766,7 +742,7 @@ export class NfcSession extends EventEmitter<SessionEvents> {
     this.pollSent = false
     this.rejectPending(new Error('串口已关闭'))
     this.fileBusy = 0
-    this.rx = ''
+    this.decoder.reset()
     const port = this.port
     this.port = null
     if (!port) return

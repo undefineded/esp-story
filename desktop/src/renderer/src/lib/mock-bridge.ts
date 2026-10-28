@@ -142,7 +142,7 @@ export class MockBridge implements NfcBridge {
     this.seedFs()
     this.device = {
       fw: 'storybox-nfc-1.0',
-      proto: 2,
+      proto: 4,
       board: 'ESP32-S3',
       name: 'StoryBox-3F2A',
       role: 'storybox',

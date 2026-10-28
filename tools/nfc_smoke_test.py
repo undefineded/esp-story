@@ -13,6 +13,8 @@ import argparse
 import json
 import sys
 import time
+import struct
+import zlib
 from typing import Optional
 
 try:
@@ -31,24 +33,34 @@ class NfcDevice:
         self.verbose = verbose
         self.seq = 0
         self.events: list = []
+        self.rx = bytearray()
 
     def _read_line(self, deadline: float) -> Optional[dict]:
         while time.monotonic() < deadline:
-            raw = self.ser.readline()
-            if not raw:
+            start = self.rx.find(b'SBX4')
+            if start < 0:
+                self.rx = self.rx[-3:]
+                self.rx.extend(self.ser.read(max(1, self.ser.in_waiting)))
                 continue
-            line = raw.decode("utf-8", errors="replace").strip()
-            if not line:
+            del self.rx[:start]
+            if len(self.rx) < 16:
+                self.rx.extend(self.ser.read(max(1, self.ser.in_waiting)))
                 continue
-            if not line.startswith("{"):
-                if self.verbose:
-                    print(f"[dev] {line}")
+            size, raw_size, head_crc, body_crc = struct.unpack_from('<HHII', self.rx, 4)
+            if not 0 < size <= 24576 or raw_size > 4096 or zlib.crc32(self.rx[:8]) != head_crc:
+                del self.rx[0]
+                continue
+            total = 16 + size + raw_size
+            if len(self.rx) < total:
+                self.rx.extend(self.ser.read(max(1, self.ser.in_waiting)))
+                continue
+            frame = bytes(self.rx[:total])
+            del self.rx[:total]
+            if zlib.crc32(frame[16:]) != body_crc:
                 continue
             try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                if self.verbose:
-                    print(f"[json?] {line}")
+                msg = json.loads(frame[16:16+size])
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
             if msg.get("evt") == "nfc":
                 self.events.append(msg)
@@ -58,8 +70,10 @@ class NfcDevice:
     def request(self, cmd: str, act: str, timeout: float = 5.0, **kwargs):
         self.seq += 1
         req_id = self.seq
-        payload = {"v": 2, "id": req_id, "cmd": cmd, "act": act, **kwargs}
-        self.ser.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        payload = {"v": 4, "id": req_id, "cmd": cmd, "act": act, **kwargs}
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        head = b'SBX4' + struct.pack('<HH', len(body), 0)
+        self.ser.write(head + struct.pack('<II', zlib.crc32(head), zlib.crc32(body)) + body)
         self.ser.flush()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

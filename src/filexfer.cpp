@@ -7,14 +7,12 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
-#include "transfer_crc.h"
 #include "nfc.h"
 
 namespace {
 
 constexpr uint16_t kChunk = 4096;
 constexpr uint16_t kWriteBuffer = 16384;
-constexpr uint16_t kB64Max = 5600;
 
 struct ReadXfer {
   bool active = false;
@@ -49,11 +47,11 @@ uint64_t s_readOffset = 0;
 uint32_t s_writeStarted = 0, s_diskMs = 0, s_maxDiskMs = 0;
 int8_t    s_writable = -1;   // -1 未检测, 0 只读, 1 可写
 uint8_t   s_io[kChunk];
-char      s_b64[kB64Max];
+size_t s_binaryLength = 0;
 
 void okDoc(JsonDocument& out, int32_t id, const char* act) {
   out.clear();
-  out["v"] = 2;
+  out["v"] = 4;
   if (id) out["id"] = id;
   out["ok"] = true;
   out["cmd"] = "fs";
@@ -62,7 +60,7 @@ void okDoc(JsonDocument& out, int32_t id, const char* act) {
 
 void errDoc(JsonDocument& out, int32_t id, const char* act, const char* code, const char* msg = nullptr) {
   out.clear();
-  out["v"] = 2;
+  out["v"] = 4;
   if (id) out["id"] = id;
   out["ok"] = false;
   out["cmd"] = "fs";
@@ -223,60 +221,6 @@ bool removeRecursive(const String& path) {
   return true;
 }
 
-void encodeBase64(const uint8_t* data, size_t len, char* out) {
-  static const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  size_t o = 0;
-  size_t i = 0;
-  while (i + 3 <= len) {
-    uint32_t v = ((uint32_t)data[i] << 16) | ((uint32_t)data[i + 1] << 8) | data[i + 2];
-    out[o++] = tbl[(v >> 18) & 63];
-    out[o++] = tbl[(v >> 12) & 63];
-    out[o++] = tbl[(v >> 6) & 63];
-    out[o++] = tbl[v & 63];
-    i += 3;
-  }
-  if (i < len) {
-    uint32_t v = (uint32_t)data[i] << 16;
-    if (i + 1 < len) v |= (uint32_t)data[i + 1] << 8;
-    out[o++] = tbl[(v >> 18) & 63];
-    out[o++] = tbl[(v >> 12) & 63];
-    out[o++] = (i + 1 < len) ? tbl[(v >> 6) & 63] : '=';
-    out[o++] = '=';
-  }
-  out[o] = 0;
-}
-
-int b64Value(char c) {
-  if (c >= 'A' && c <= 'Z') return c - 'A';
-  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-  if (c >= '0' && c <= '9') return c - '0' + 52;
-  if (c == '+') return 62;
-  if (c == '/') return 63;
-  return -1;
-}
-
-int decodeBase64(const char* text, uint8_t* out, size_t cap) {
-  if (!text) return -1;
-  uint32_t acc = 0;
-  int bits = 0;
-  size_t n = 0;
-  for (const char* p = text; *p; p++) {
-    char c = *p;
-    if (c == '=') break;
-    if (c == ' ' || c == '\r' || c == '\n' || c == '\t') continue;
-    int v = b64Value(c);
-    if (v < 0) return -1;
-    acc = (acc << 6) | (uint32_t)v;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      if (n >= cap) return -1;
-      out[n++] = (uint8_t)((acc >> bits) & 0xFF);
-    }
-  }
-  return (int)n;
-}
-
 void fillStorage(JsonObject data) {
   const uint64_t total = SD_MMC.totalBytes();
   const uint64_t used = SD_MMC.usedBytes();
@@ -421,7 +365,7 @@ void handleReadChunk(JsonDocument& req, JsonDocument& out, int32_t id) {
   size_t n = s_read.file.read(s_io, kChunk);
   if (n == 0 && offset < s_read.size) { errDoc(out, id, "read_chunk", "IO"); return; }
   s_lastReadMs = millis();
-  encodeBase64(s_io, n, s_b64);
+  s_binaryLength = n;
   s_readOffset = std::max<uint64_t>(s_readOffset, offset + n);
 
   okDoc(out, id, "read_chunk");
@@ -431,8 +375,6 @@ void handleReadChunk(JsonDocument& req, JsonDocument& out, int32_t id) {
   data["len"] = n;
   data["size"] = s_read.size;
   data["eof"] = (offset + n >= s_read.size);
-  data["data"] = s_b64;
-  data["crc32"] = transferCrc32(s_io, n);
 }
 
 void handleReadEnd(JsonDocument& req, JsonDocument& out, int32_t id) {
@@ -497,15 +439,13 @@ void handleWriteBegin(JsonDocument& req, JsonDocument& out, int32_t id) {
   data["chunk"] = kChunk;
 }
 
-void handleWriteChunk(JsonDocument& req, JsonDocument& out, int32_t id) {
+void handleWriteChunk(JsonDocument& req, JsonDocument& out, int32_t id, const uint8_t* raw, size_t rawLen) {
   uint32_t xid = req["xid"] | 0;
   uint32_t offset = req["offset"] | 0;
   if (!s_write.active || xid != s_write.id) { errDoc(out, id, "write_chunk", "BAD_XFER"); return; }
-  int n = decodeBase64(req["data"] | "", s_io, sizeof(s_io));
-  if (n < 0) { errDoc(out, id, "write_chunk", "BAD_BASE64"); return; }
-  if (!req["crc32"].isNull() && req["crc32"].as<uint32_t>() != transferCrc32(s_io, n)) {
-    errDoc(out, id, "write_chunk", "CRC"); return;
-  }
+  if (!raw || !rawLen || rawLen > kChunk) { errDoc(out, id, "write_chunk", "BAD_LENGTH"); return; }
+  const int n = rawLen;
+  memcpy(s_io, raw, rawLen);
   if ((uint64_t)offset + n > s_write.expected ||
       (offset < s_write.written && (uint64_t)offset + n > s_write.written)) {
     errDoc(out, id, "write_chunk", "RANGE"); return;
@@ -589,7 +529,6 @@ void handleWriteEnd(JsonDocument& req, JsonDocument& out, int32_t id) {
   data["elapsedMs"] = (uint32_t)(millis() - s_writeStarted);
   data["diskMs"] = s_diskMs;
   data["maxDiskMs"] = s_maxDiskMs;
-  if (!s_session) fillStorage(data);
 }
 
 void handleCancel(JsonDocument& req, JsonDocument& out, int32_t id) {
@@ -663,10 +602,6 @@ void loop() {
     if (path.length()) SD_MMC.remove(path);
     Serial.printf("[FS ] idle write cancelled: %s\n", path.c_str());
   }
-  if (s_guard && !s_session && !s_read.active && !s_write.active) {
-    s_guard = false;
-    Player::inhibitPlayback(false);
-  }
 }
 
 void abortAll() {
@@ -681,7 +616,10 @@ void abortAll() {
   Player::inhibitPlayback(false);
 }
 
-bool handle(JsonDocument& req, JsonDocument& out, int32_t id) {
+const uint8_t* outputData(size_t& length) { length = s_binaryLength; return s_io; }
+
+bool handle(JsonDocument& req, JsonDocument& out, int32_t id, const uint8_t* raw, size_t rawLen) {
+  s_binaryLength = 0;
   const char* act = req["act"] | "";
   if (!act[0]) { errDoc(out, id, "", "BAD_ACT"); return true; }
   s_activity = millis();
@@ -700,6 +638,9 @@ bool handle(JsonDocument& req, JsonDocument& out, int32_t id) {
   }
   if (s_sessionCancelled && strcmp(act, "list") != 0) {
     errDoc(out, id, act, "TRANSFER_CANCELLED"); return true;
+  }
+  if (!s_session && strcmp(act, "list") != 0) {
+    errDoc(out, id, act, "NO_SESSION"); return true;
   }
   if (strcmp(act, "list") != 0 && Nfc::writeBusy()) {
     errDoc(out, id, act, "NFC_BUSY"); return true;
@@ -729,7 +670,7 @@ bool handle(JsonDocument& req, JsonDocument& out, int32_t id) {
   if (strcmp(act, "read_chunk") == 0) { handleReadChunk(req, out, id); return true; }
   if (strcmp(act, "read_end") == 0) { handleReadEnd(req, out, id); return true; }
   if (strcmp(act, "write_begin") == 0) { handleWriteBegin(req, out, id); return true; }
-  if (strcmp(act, "write_chunk") == 0) { handleWriteChunk(req, out, id); return true; }
+  if (strcmp(act, "write_chunk") == 0) { handleWriteChunk(req, out, id, raw, rawLen); return true; }
   if (strcmp(act, "write_end") == 0) { handleWriteEnd(req, out, id); return true; }
   if (strcmp(act, "cancel") == 0) { handleCancel(req, out, id); return true; }
 
