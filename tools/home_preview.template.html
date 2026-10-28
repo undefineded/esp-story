@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小小故事盒 · 新主页预览</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#e9ece8;color:#29434b;font:14px system-ui,sans-serif;min-height:100vh;display:grid;place-items:center;padding:24px}main{max-width:720px;width:100%;text-align:center}h1{font-size:20px;font-weight:600;margin:0 0 8px}p{color:#637674;line-height:1.8;margin:8px 0 20px}.stage{overflow:auto;padding:12px 0}canvas{display:block;margin:auto;image-rendering:pixelated;outline:none;box-shadow:0 12px 35px #213d4220;touch-action:manipulation}canvas:focus-visible{outline:2px solid #397b78;outline-offset:5px}.toolbar{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:22px 0 12px}button,select{font:inherit;padding:8px 14px;border:1px solid #bdcdca;border-radius:6px;background:#fafcf9;color:#29434b;cursor:pointer}button:hover{background:#ddeae4}#status{min-height:24px;font-size:13px}small{display:block;color:#74847e;line-height:1.8}
+</style>
+<main>
+<h1>故事小镇 · 每次转动，去一个新地方</h1>
+<p>四个主题场景 / 实机字库 / 320 × 240 像素</p>
+<div class="stage"><canvas id="screen" width="320" height="240" tabindex="0" role="application" aria-label="故事机主页，左右方向键选择，回车进入，Escape 返回"></canvas></div>
+<div class="toolbar"><button id="prev" aria-label="上一项">← 上一项</button><button id="next">下一项 →</button><button id="enter">OK 进入</button><button id="back">返回主页</button><select id="scale" aria-label="预览倍率"><option value="1">1× 原始像素</option><option value="2" selected>2× 像素放大</option><option value="3">3× 像素放大</option></select></div>
+<div id="status" aria-live="polite"></div>
+<small>方向键 / 滚轮选择，Enter 进入，Esc 返回；也可以点击图标选择。<br>画布固定为 320 × 240，文字来自项目 VLW 字库。进入页面仅为交互示意。</small>
+</main>
+<script>
+const data=/* PAYLOAD */;
+const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d');
+const names=['音乐','故事','童谣','设置'];
+const colors={paper:'#fff4d6',ink:'#243e4b',muted:'#647b79',line:'#e3ddbf',focus:'#dceee5',edge:'#558d86'};
+let selected=1,opened=false;
+const images=Object.values(data.icons).map(src=>{const im=new Image();im.src=src;return im});
+const sceneSheet=new Image();sceneSheet.src=data.scenes;
+function box(x,y,w,h,r,fill,stroke){ctx.beginPath();ctx.roundRect(x,y,w,h,r);if(fill){ctx.fillStyle=fill;ctx.fill()}if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=1;ctx.stroke()}}
+const glyphCache=new Map();
+function text(str,x,baseline,size=14,color=colors.ink,center=false){
+ const font=data.fonts[size],width=[...str].reduce((sum,ch)=>sum+(font[ch]?.[2]||size),0);if(center)x-=Math.floor(width/2);
+ for(const ch of str){const g=font[ch];if(!g){x+=size;continue}const [w,h,adv,dy,dx,raw]=g,key=size+color+ch;
+ if(!glyphCache.has(key)){const c=document.createElement('canvas');c.width=w;c.height=h;const cctx=c.getContext('2d'),pixels=cctx.createImageData(w,h),alpha=atob(raw),rgb=color.match(/\w\w/g).map(v=>parseInt(v,16));for(let i=0;i<alpha.length;i++){pixels.data.set([...rgb,alpha.charCodeAt(i)],i*4)}cctx.putImageData(pixels,0,0);glyphCache.set(key,c)}
+ ctx.drawImage(glyphCache.get(key),Math.round(x+dx),Math.round(baseline-dy));x+=adv;
+ }
+}
+const themes=[
+ {title:'音乐舞台',sub:'听见好心情',sky:'#f9dfad',land:'#dca566',dark:'#694c51',accent:'#815a81'},
+ {title:'故事森林',sub:'打开新世界',sky:'#dcebd5',land:'#9bbd95',dark:'#315c52',accent:'#407b67'},
+ {title:'童谣花园',sub:'一起唱首歌',sky:'#f8dfd4',land:'#e7b59e',dark:'#795e67',accent:'#ac6b7a'},
+ {title:'工具小屋',sub:'准备好出发',sky:'#e2e3f3',land:'#b5b7d5',dark:'#505878',accent:'#6e7caa'}];
+function circle(x,y,r,color){ctx.fillStyle=color;ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill()}
+function poly(points,color){ctx.fillStyle=color;ctx.beginPath();points.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.fill()}
+function line(x,y,a,b,color,width=1){ctx.strokeStyle=color;ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(a,b);ctx.stroke()}
+function star(x,y,c){ctx.fillStyle=c;ctx.fillRect(x-1,y-4,2,9);ctx.fillRect(x-4,y-1,9,2)}
+function tree(x,y,s,t){ctx.fillStyle=t.dark;ctx.fillRect(x-2,y-8,4,15);poly([[x,y-s],[x-s/2,y],[x+s/2,y]],t.accent);poly([[x,y-s-12],[x-s/2+3,y-12],[x+s/2-3,y-12]],t.dark)}
+function geometricScene(t){
+ circle(268,58,17,'#fff4ce');box(167,55,32,6,3,'#fff9e9');box(180,49,15,8,4,'#fff9e9');
+ poly([[148,139],[188,104],[224,129],[266,99],[320,129],[320,166],[148,166]],t.land);
+ if(selected===1){
+ tree(180,134,31,t);tree(285,139,44,t);tree(309,145,24,t);
+ poly([[208,164],[225,133],[236,133],[247,164]],'#f6e4b5');
+ box(211,100,45,34,3,'#f9edce');poly([[204,103],[233,75],[263,103]],t.dark);
+ box(226,111,12,23,6,t.accent);box(215,108,6,8,1,'#e9bd6c');box(244,108,6,8,1,'#e9bd6c');
+ circle(270,148,9,'#f0ca79');circle(266,139,4,'#f0ca79');circle(275,139,4,'#f0ca79');circle(268,147,1,t.dark);circle(274,147,1,t.dark);
+ }else if(selected===0){
+ box(181,140,118,13,3,t.dark);box(191,132,98,10,3,t.accent);
+ line(240,82,240,132,t.dark,3);circle(240,80,8,t.accent);line(229,132,250,132,t.dark,2);
+ for(const x of [187,283]){box(x,101,16,32,3,t.dark);circle(x+8,111,4,t.land);circle(x+8,123,5,t.land)}
+ line(211,70,211,94,t.accent,3);line(211,70,224,67,t.accent,3);circle(207,95,5,t.accent);star(268,84,t.accent);
+ }else if(selected===2){
+ for(const [x,y] of [[181,131],[282,120],[305,145]]){line(x,y,x,y+18,t.dark,2);for(const [dx,dy] of [[-5,0],[5,0],[0,5],[0,-5]])circle(x+dx,y+dy,4,'#fff4cf');circle(x,y,3,'#e5b957')}
+ circle(238,119,22,'#ebc35f');circle(251,101,15,'#ebc35f');poly([[262,99],[276,105],[263,109]],t.accent);circle(254,98,2,t.dark);circle(229,120,11,'#d9a648');line(232,138,230,150,t.dark,3);line(246,138,248,150,t.dark,3);star(206,85,t.accent);
+ }else{
+ box(194,99,93,49,3,'#fff2d9');poly([[185,100],[238,69],[296,100]],t.dark);box(230,117,17,31,3,t.accent);
+ for(const x of [202,258]){box(x,109,18,17,2,t.land);line(x+9,109,x+9,126,t.dark);line(x,117,x+18,117,t.dark)}
+ ctx.fillStyle=t.accent;ctx.fillRect(267,71,9,17);circle(279,59,5,'#fff9e9');circle(287,49,7,'#fff9e9');
+ }
+ star(302,76,t.accent);
+}
+function scene(t){
+ const sw=sceneSheet.naturalWidth/2,sh=sceneSheet.naturalHeight/2;
+ // Rasterize into native-size backing canvas once; preview zoom stays pixel-exact.
+ if(!scene.cache)scene.cache=new Map();
+ if(!scene.cache.has(selected)){
+  const sprite=document.createElement('canvas');sprite.width=128;sprite.height=128;
+  const s=sprite.getContext('2d');s.imageSmoothingEnabled=true;s.imageSmoothingQuality='high';
+  s.drawImage(sceneSheet,(selected%2)*sw,Math.floor(selected/2)*sh,sw,sh,0,0,128,128);
+  scene.cache.set(selected,sprite);
+ }
+ ctx.drawImage(scene.cache.get(selected),174,34);
+}
+function draw(){const t=themes[selected];ctx.fillStyle='#fff5df';ctx.fillRect(0,0,320,240);
+ ctx.fillStyle=t.sky;ctx.fillRect(0,0,320,169);
+ circle(17,17,7,t.dark);ctx.fillStyle='#fff5df';ctx.fillRect(14,15,1,2);ctx.fillRect(19,15,1,2);ctx.fillRect(15,20,4,1);text('小小故事盒',31,23,14,t.dark);
+ box(268,8,42,18,9,'#fff5df');ctx.fillStyle=t.dark;ctx.fillRect(276,14,3,6);poly([[279,14],[283,11],[283,22],[279,20]],t.dark);text('10',289,21,11,t.dark);
+ text('0'+(selected+1),15,56,11,t.dark);line(36,51,67,51,t.accent);
+ text(t.title,14,84,16,t.dark);text(t.sub,14,106,14,t.dark);
+ box(14,127,113,27,9,t.dark);box(14,123,113,27,9,'#f6cd68',t.dark);
+ circle(28,136,8,'#fff5df');poly([[26,132],[26,140],[32,136]],t.dark);
+ text(opened?'返回主页':'按下探索',41,142,14,t.dark);star(117,129,'#fff5df');
+ scene(t);ctx.fillStyle=t.dark;ctx.fillRect(0,167,320,2);
+ const tickets=[['#f5d67f','#886631'],['#a8d7b9','#386a56'],['#efb5b0','#8b5362'],['#c5c0e8','#655887']];
+ for(let i=0;i<4;i++){
+  const x=8+i*78,active=i===selected,y=active?176:182,[fill,ink]=tickets[i];
+  box(x,y+3,70,34,5,ink);box(x,y,70,34,5,fill,ink);
+  // Ticket notches, perforation and a tiny emblem are inexpensive primitives.
+  circle(x,y+22,3,'#fff5df');circle(x+70,y+22,3,'#fff5df');
+  for(let p=x+7;p<x+66;p+=5){ctx.fillStyle=ink;ctx.fillRect(p,y+26,2,1)}
+  if(i===0){line(x+13,y+7,x+13,y+17,ink,2);line(x+13,y+7,x+18,y+9,ink,2);circle(x+10,y+17,3,ink)}
+  if(i===1){poly([[x+7,y+7],[x+13,y+9],[x+13,y+20],[x+7,y+18]],ink);poly([[x+14,y+9],[x+20,y+7],[x+20,y+18],[x+14,y+20]],ink)}
+  if(i===2){circle(x+12,y+14,5,ink);circle(x+16,y+9,3,ink);poly([[x+19,y+9],[x+22,y+11],[x+18,y+12]],ink)}
+  if(i===3){circle(x+13,y+13,6,ink);ctx.fillStyle=ink;ctx.fillRect(x+11,y+5,4,16);ctx.fillRect(x+5,y+11,16,4);circle(x+13,y+13,3,fill)}
+  text(names[i],x+42,y+20,14,ink,true);
+  if(active){circle(x+64,y+2,5,ink);line(x+61,y+2,x+63,y+4,'#fff5df');line(x+63,y+4,x+67,y,'#fff5df');}
+ }
+ text('旋转选择',12,233,11,'#647b79');for(let i=0;i<4;i++)circle(148+i*8,229,i===selected?3:2,i===selected?t.dark:'#d2cbb7');text('OK',250,233,11,'#647b79');text('进入',275,233,11,'#647b79');
+ if(opened){box(43,60,234,89,8,'#fff5df',t.dark);text(names[selected],160,91,16,t.dark,true);text('返回主页',160,127,14,t.dark,true)}
+ document.querySelector('#status').textContent=opened?'交互示意：已进入'+names[selected]+'。':'当前目的地：'+t.title;
+}
+function move(n){opened=false;selected=(selected+n+4)%4;draw()}
+document.querySelector('#prev').onclick=()=>move(-1);document.querySelector('#next').onclick=()=>move(1);document.querySelector('#enter').onclick=()=>{opened=true;draw()};document.querySelector('#back').onclick=()=>{opened=false;draw()};
+function resize(){const scale=Number(document.querySelector('#scale').value);canvas.style.width=320*scale+'px';canvas.style.height=240*scale+'px'}document.querySelector('#scale').onchange=resize;resize();
+canvas.onkeydown=e=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Enter','Escape'].includes(e.key)){e.preventDefault();if(e.key==='Enter')opened=true;else if(e.key==='Escape')opened=false;else return move(['ArrowLeft','ArrowUp'].includes(e.key)?-1:1);draw()}};
+let lastWheel=0;canvas.addEventListener('wheel',e=>{e.preventDefault();if(Date.now()-lastWheel>140){move(e.deltaY>0?1:-1);lastWheel=Date.now()}},{passive:false});
+canvas.onclick=e=>{canvas.focus();const r=canvas.getBoundingClientRect(),x=(e.clientX-r.left)*320/r.width,y=(e.clientY-r.top)*240/r.height;if(opened){opened=false;draw();return}if(y>=176&&y<=219&&x>=8&&x<312){selected=Math.min(3,Math.floor((x-8)/78));draw()}else if(x>=14&&x<=127&&y>=123&&y<=154){opened=true;draw()}};
+Promise.all([...images,sceneSheet].map(im=>im.decode())).then(draw).catch(()=>document.querySelector('#status').textContent='图标加载失败');
+</script>
+</html>
