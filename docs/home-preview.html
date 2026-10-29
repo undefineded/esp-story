@@ -19,7 +19,7 @@ const data={"fonts": {"11": {"0": [5, 7, 6, 6, 1, "AP///wD//wD/////AP////8A/////
 const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d');
 const names=['音乐','故事','童谣','设置'];
 const colors={paper:'#fff4d6',ink:'#243e4b',muted:'#647b79',line:'#e3ddbf',focus:'#dceee5',edge:'#558d86'};
-let selected=1,opened=false;
+let selected=1,opened=false,playerPreview=false,playerPlaying=true,playerIndex=0;
 const images=Object.values(data.icons).map(src=>{const im=new Image();im.src=src;return im});
 const sceneSheet=new Image();sceneSheet.src=data.scenes;
 function box(x,y,w,h,r,fill,stroke){ctx.beginPath();ctx.roundRect(x,y,w,h,r);if(fill){ctx.fillStyle=fill;ctx.fill()}if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=1;ctx.stroke()}}
@@ -77,7 +77,212 @@ function scene(t){
  }
  ctx.drawImage(scene.cache.get(selected),174,34);
 }
-function draw(){const t=themes[selected];ctx.fillStyle='#fff5df';ctx.fillRect(0,0,320,240);
+const playerTracks=[
+ {name:'月亮船',tag:'晚安音乐',sub:'轻轻摇呀摇',sky:'#bde2df',hill:'#78b5a8',accent:'#8f7cb2'},
+ {name:'森林散步',tag:'自然声音',sub:'风从树叶经过',sky:'#cde4be',hill:'#79a875',accent:'#d39255'},
+ {name:'小熊圆舞曲',tag:'童谣花园',sub:'转个圈吧',sky:'#f2d1bf',hill:'#d89583',accent:'#aa7084'}
+];
+function playerText(s,x,y,size=12,color='#29434b',center=false){
+ ctx.font=size+'px monospace';ctx.textAlign=center?'center':'left';ctx.textBaseline='top';ctx.fillStyle=color;ctx.fillText(s,x,y);ctx.textAlign='left';
+}
+function playerFlower(x,y,color){circle(x,y,5,color);for(let i=0;i<8;i++){let a=i*Math.PI/4;circle(x+Math.cos(a)*7,y+Math.sin(a)*7,3,color)}circle(x,y,3,'#fff9e8')}
+function drawPlayer(){
+ const t=playerTracks[playerIndex],ink='#29434b',paper='#fff5df',cream='#fff9e8',yellow='#f5c960',deep='#21444a';
+ ctx.fillStyle=paper;ctx.fillRect(0,0,320,240);ctx.fillStyle=deep;ctx.fillRect(0,0,320,30);ctx.fillStyle=yellow;ctx.fillRect(0,30,320,2);
+ circle(19,15,10,yellow);circle(16,13,2,ink);circle(22,13,2,ink);line(15,19,23,19,ink,2);text('月光音乐站',37,23,14,cream);
+ box(240,7,68,17,8,'#a9d8bd',ink);playerText('音量  10',274,11,9,ink,true);
+ box(14,39,119,117,13,ink);box(11,35,119,117,13,cream,ink);ctx.fillStyle=t.sky;ctx.fillRect(17,41,107,94);
+ circle(101,60,15,yellow);circle(105,56,15,t.sky);box(25,57,25,7,4,'#fffdf3');circle(32,55,7,'#fffdf3');circle(43,54,8,'#fffdf3');
+ poly([[17,119],[50,88],[76,116]],t.hill);poly([[55,119],[86,79],[124,117]],t.accent);ctx.fillStyle=t.hill;ctx.fillRect(17,118,107,17);
+ box(58,103,28,22,4,'#efb99f',ink);poly([[54,104],[72,90],[91,104]],'#a9675e');box(68,111,8,14,3,'#bc8735');circle(98,122,9,yellow,ink);circle(94,116,4,yellow);circle(101,116,4,yellow);circle(96,122,1,ink);circle(101,122,1,ink);
+ playerFlower(27,76,cream);playerFlower(46,96,cream);playerFlower(114,80,cream);line(109,95,109,110,cream,2);line(109,95,116,98,cream,2);circle(105,111,4,cream);
+ box(23,133,98,13,6,yellow,ink);playerText(t.tag,72,136,9,ink,true);
+ box(148,42,70,18,9,t.accent,ink);playerText('正在播放',183,47,10,cream,true);playerText(t.name,150,70,20,ink);playerText(t.sub,151,98,12,'#6c817c');playerText(('0'+(playerIndex+1)).slice(-2)+' / 03  ·  MP3',151,113,10,'#6c817c');
+ playerText('00:56',151,130,10,'#6c817c');playerText('03:04',304,130,10,'#6c817c',true);box(151,147,153,8,4,'#d9d5b8',ink);box(153,149,46,4,2,'#8f7cb2');circle(199,151,5,yellow,ink);
+ for(let i=0;i<5;i++){let x=160+i*29;if(i<2)playerFlower(x,164,yellow);else circle(x,164,2,'#d9d5b8')}box(151,169,118,17,8,'#a9d8bd',ink);playerText('旋转调节音量',210,173,9,ink,true);
+ ctx.fillStyle=deep;ctx.fillRect(0,181,320,59);ctx.fillStyle=yellow;ctx.fillRect(0,181,320,3);
+ box(38,197,57,29,12,'#417e95');box(36,194,57,29,12,'#6daec6',ink);line(56,202,56,216,cream,3);poly([[70,202],[70,216],[59,209]],cream);
+ box(225,197,57,29,12,'#4b8873');box(227,194,57,29,12,'#a9d8bd',ink);line(264,202,264,216,cream,3);poly([[251,202],[251,216],[262,209]],cream);
+ circle(160,210,26,'#bc8735');circle(160,207,26,yellow,ink);if(playerPlaying){ctx.fillStyle=ink;ctx.fillRect(151,197,6,20);ctx.fillRect(163,197,6,20)}else poly([[153,196],[153,218],[172,207]],ink);
+ playerText(playerPlaying?'暂停':'播放',160,231,10,cream,true);playerText('上一首',65,229,9,cream,true);playerText('下一首',255,229,9,cream,true);
+ document.querySelector('#status').textContent=(playerPlaying?'正在播放：':'已暂停：')+t.name+' · 点击中间按钮切换播放状态。';
+}
+function drawPlayerClean(){
+ const t=playerTracks[playerIndex],ink='#29434b',paper='#fff5df',cream='#fff9e8',yellow='#f5c960',deep='#21444a';
+ ctx.fillStyle=paper;ctx.fillRect(0,0,320,240);
+ /* 第一层：只保留品牌、返回语义与音量，避免顶栏变成信息卡片。 */
+ ctx.fillStyle=deep;ctx.fillRect(0,0,320,31);ctx.fillStyle=yellow;ctx.fillRect(0,30,320,2);
+ box(10,7,21,17,8,yellow,cream);poly([[17,11],[17,20],[13,16]],ink);text('音乐舞台',42,23,14,cream);
+ playerText('音量 10',290,12,10,cream,true);
+ /* 第二层：一张安静的专辑卡 + 一列只有必要信息的曲目内容。 */
+ box(16,48,105,105,12,ink);box(13,44,105,105,12,cream,ink);
+ ctx.fillStyle=t.sky;ctx.fillRect(20,51,91,76);circle(91,67,14,yellow);circle(95,63,14,t.sky);
+ box(29,67,22,6,4,'#fffdf3');circle(35,65,6,'#fffdf3');circle(45,64,7,'#fffdf3');poly([[20,127],[51,98],[74,125]],t.hill);poly([[56,127],[85,89],[111,125]],t.accent);ctx.fillStyle=t.hill;ctx.fillRect(20,124,91,13);
+ box(58,110,24,18,3,'#efb99f',ink);poly([[54,111],[70,98],[86,111]],'#a9675e');circle(96,129,8,yellow,ink);circle(92,124,3,yellow);circle(99,124,3,yellow);
+ box(27,132,77,10,5,t.accent);playerText(t.tag,65,133,8,cream,true);
+ box(140,50,67,17,8,t.accent,ink);playerText('正在播放',174,54,9,cream,true);
+ playerText(t.name,140,78,21,ink);playerText(t.sub,141,108,12,'#6c817c');playerText(('0'+(playerIndex+1)).slice(-2)+' / 03  ·  MP3',141,128,10,'#6c817c');
+ playerText('00:56',140,148,10,'#6c817c');playerText('03:04',305,148,10,'#6c817c',true);
+ box(140,164,165,8,4,'#d9d5b8',ink);box(142,166,51,4,2,t.accent);circle(193,168,5,yellow,ink);
+ /* 第三层：单一暗色基座。三颗按钮同一组，不再额外加提示和装饰。 */
+ ctx.fillStyle=deep;ctx.fillRect(0,186,320,54);ctx.fillStyle=yellow;ctx.fillRect(0,186,320,3);
+ circle(83,211,19,'#6daec6',ink);line(79,203,79,219,cream,3);poly([[94,203],[94,219],[81,211]],cream);
+ circle(160,210,26,'#bc8735');circle(160,207,26,yellow,ink);if(playerPlaying){ctx.fillStyle=ink;ctx.fillRect(151,197,6,20);ctx.fillRect(163,197,6,20)}else poly([[153,196],[153,218],[172,207]],ink);
+ circle(237,211,19,'#a9d8bd',ink);line(241,203,241,219,cream,3);poly([[226,203],[226,219],[239,211]],cream);
+ playerText('上一首',83,233,9,cream,true);playerText(playerPlaying?'暂停':'播放',160,233,10,cream,true);playerText('下一首',237,233,9,cream,true);
+ document.querySelector('#status').textContent=(playerPlaying?'正在播放：':'已暂停：')+t.name+' · 层级精简版播放器。';
+}
+function drawMusicTheatre(){
+ const t=playerTracks[playerIndex],ink='#514c62',paper='#fff5df',mint='#a8cbb5',purple='#b9abd0',yellow='#f0cb72';
+ ctx.fillStyle=paper;ctx.fillRect(0,0,320,240);
+ // Static garden scenery sits behind the controls and clear title area.
+ ctx.fillStyle='#f5e7c8';ctx.fillRect(0,31,320,2);
+ // Scalloped curtains frame the stage without covering the full-width title.
+ for(const x of [0,303]){box(x,33,17,116,7,'#d8cbe1');for(let y=40;y<135;y+=16)line(x+7,y,x+7,y+9,'#b5a3c2');}
+ poly([[0,98],[18,112],[0,139]],'#b5a3c2');poly([[320,98],[302,112],[320,139]],'#b5a3c2');
+ box(0,102,18,5,2,'#d6ad68');box(302,102,18,5,2,'#d6ad68');
+ line(21,33,87,40,'#aa997c');line(233,40,299,33,'#aa997c');
+ const pennants=['#b0c9af','#e7b5a0','#bcb0d1','#ebce81'];
+ for(let i=0;i<4;i++){let x=24+i*15,y=34+i*1.5;poly([[x,y],[x+11,y+1],[x+5,y+12]],pennants[i]);x=236+i*15;y=39-i*1.5;poly([[x,y],[x+11,y-1],[x+6,y+10]],pennants[3-i]);}
+ // Low garden border leaves the timer and playback status on plain paper.
+ ctx.fillStyle='#e7edda';ctx.fillRect(0,222,320,18);
+ for(let x=0;x<320;x+=19)circle(x,239,13,'#d3dfbf');
+ circle(0,181,48,'#e4ebcf');circle(320,182,44,'#e4ebcf');
+ circle(5,199,27,'#cfdfbd');circle(316,204,30,'#cfdfbd');
+ function cloud(x,y){box(x,y,32,8,4,'#f0e5cb');circle(x+10,y,8,'#f0e5cb');circle(x+22,y-2,10,'#f0e5cb');box(x,y-2,32,8,4,'#fffdf3');circle(x+10,y-2,7,'#fffdf3');circle(x+22,y-4,9,'#fffdf3')}
+ cloud(17,52);cloud(274,58);
+ // A bear and a rabbit peek over opposite shoulders of the record player.
+ circle(56,72,7,'#d9ae72');circle(79,72,7,'#d9ae72');
+ circle(56,72,3,'#f4cfb0');circle(79,72,3,'#f4cfb0');
+ box(51,72,34,30,13,'#e8bf85',ink);
+ circle(61,82,1.5,ink);circle(75,82,1.5,ink);box(63,86,10,7,4,'#fff0d4');circle(68,87,2,ink);
+ circle(57,87,3,'#e8a990');circle(79,87,3,'#e8a990');
+ box(239,59,7,24,4,'#fffdf3',ink);box(250,57,7,26,4,'#fffdf3',ink);
+ box(241,63,3,12,2,'#e9c6bd');box(252,61,3,14,2,'#e9c6bd');
+ box(232,76,32,25,11,'#fffdf3',ink);circle(242,85,1.5,ink);circle(254,85,1.5,ink);
+ poly([[246,89],[250,89],[248,92]],'#bc8e8d');circle(237,90,3,'#efd0c4');circle(259,90,3,'#efd0c4');
+ // Sparse music marks and flower stems occupy the outer margins only.
+ for(const [x,y] of [[21,110],[292,125]]){line(x+4,y,x+4,y+13,'#a699b6',2);line(x+4,y,x+10,y+3,'#a699b6',2);circle(x,y+13,3,'#a699b6')}
+ for(const [x,y] of [[21,178],[299,185]]){line(x,y,x,y+18,'#89a584',2);poly([[x,y+12],[x-7,y+7],[x-5,y+13]],'#89a584');for(const [dx,dy] of [[-4,0],[4,0],[0,-4],[0,4]])circle(x+dx,y+dy,3,'#fffdf3');circle(x,y,2,yellow)}
+ // A pair of tiny audience members and woodland props anchor the stage.
+ for(const [x,y] of [[18,212],[302,217]]){box(x-2,y-1,4,8,1,'#f5e7c8');circle(x,y-4,7,'#d6a48c');ctx.fillStyle='#e7edda';ctx.fillRect(x-8,y,16,2);circle(x-3,y-6,1,'#fff5df');circle(x+3,y-4,1,'#fff5df');}
+ circle(56,234,10,'#d4ad77');circle(49,226,4,'#d4ad77');circle(63,226,4,'#d4ad77');circle(53,232,1,ink);circle(60,232,1,ink);
+ circle(266,235,10,'#eee2be');poly([[257,231],[256,220],[264,227]],'#eee2be');poly([[268,227],[277,220],[275,232]],'#eee2be');circle(263,233,1,ink);circle(270,233,1,ink);
+ for(const [x,y] of [[29,151],[289,161]]){poly([[x,y],[x-5,y-4],[x-6,y+2]],'#e4bf79');poly([[x,y],[x+5,y-4],[x+6,y+2]],'#e9c3b2');line(x,y-1,x,y+4,'#958569');}
+ // A quiet heading, then one full-width title; no cover/sidebar split.
+ line(19,13,14,18,ink,2);line(14,18,19,23,ink,2);text('音乐舞台',29,24,14,ink);
+ playerText('VOL 10',294,14,11,ink,true);
+ playerText(t.name,160,40,20,ink,true);
+ playerText(t.tag+'  /  0'+(playerIndex+1)+' · 03',160,67,11,'#827b80',true);
+ // The turntable is both the illustration and the controls.
+ box(44,106,232,99,15,'#c6b79e');
+ box(42,96,236,104,15,ink);
+ box(43,92,234,100,14,mint,ink);
+ // Corner screws and speaker perforations give the toy a crafted finish.
+ for(const x of [48,272]){circle(x,185,2,'#6f9581');line(x-1,185,x+1,185,'#dce8cd');}
+ box(49,98,222,78,11,'#dce8cd',ink);
+ box(65,83,24,13,5,purple,ink);box(231,83,24,13,5,purple,ink);
+ circle(160,135,44,ink);circle(160,135,36,'#69617b');circle(160,135,34,ink);
+ circle(160,135,28,'#69617b');circle(160,135,26,ink);circle(160,135,20,yellow);
+ if(playerPlaying){ctx.fillStyle=ink;ctx.fillRect(151,127,6,16);ctx.fillRect(163,127,6,16)}else poly([[154,125],[154,145],[170,135]],ink);
+ // Small tactile side keys: no competing labels or separate control bar.
+ box(61,125,40,32,9,'#82748f');box(61,121,40,32,9,purple,ink);
+ line(73,131,73,143,ink,2);poly([[87,130],[87,144],[76,137]],ink);
+ box(219,125,40,32,9,'#b89b4d');box(219,121,40,32,9,yellow,ink);
+ line(247,131,247,143,ink,2);poly([[233,130],[233,144],[244,137]],ink);
+ // Tonearm and two simple highlights make it read as a real toy record player.
+ circle(214,105,5,ink);line(214,105,208,123,ink,3);line(208,123,195,129,ink,3);box(190,126,10,5,2,purple,ink);
+ line(134,109,143,104,'#aaa0b6',2);line(130,115,133,111,'#aaa0b6',2);
+ box(71,181,178,5,2,'#7c9f8c');box(71,181,54,5,2,ink);circle(125,183,4,yellow);
+ playerText('00:56',44,207,11,'#827b80');playerText('03:04',276,207,11,'#827b80',true);
+ playerText(playerPlaying?'正在播放':'已经暂停',160,207,12,ink,true);
+ text('旋转',109,234,11,'#827b80');playerText('音量 · OK '+(playerPlaying?'暂停':'播放'),137,223,11,'#827b80');
+ document.querySelector('#status').textContent=t.name+' · 点击唱片播放/暂停，两侧按键切歌，Esc 返回主页。';
+}
+function drawCassetteRadio(){
+ const t=playerTracks[playerIndex],ink='#494653',cream='#fff1d2',green='#719b88',gold='#eac16b';
+ ctx.fillStyle='#e3e9d5';ctx.fillRect(0,0,320,240);
+ // One large radio housing establishes the composition, rather than floating cards.
+ box(10,13,300,222,18,'#a8b59e');box(8,8,304,222,18,cream,ink);
+ box(23,18,274,26,9,green);
+ poly([[35,25],[29,31],[35,36]],cream);text('音乐舞台',44,38,14,cream);
+ playerText('VOL 10',278,26,11,cream,true);
+ // Cassette label: title and category are printed on the same physical object.
+ box(26,54,268,112,12,'#bc8d70');box(23,50,274,111,12,'#dfad86',ink);
+ box(31,57,258,95,7,'#f8e8bf',ink);
+ ctx.fillStyle='#e8cf93';ctx.fillRect(32,83,256,2);
+ playerText(t.name,160,62,18,ink,true);
+ playerText(t.tag,44,90,11,'#7f6b5b');playerText('0'+(playerIndex+1)+' / 03',270,90,11,'#7f6b5b',true);
+ // Tape reels and the central window make the playing state visible at a glance.
+ box(53,108,214,34,17,'#9b8c79',ink);box(114,115,92,20,5,'#4d6260');
+ playerText('00:56 / 03:04',160,119,10,'#fff1d2',true);
+ for(const x of [79,241]){
+  circle(x,125,19,ink);circle(x,125,16,'#fff4db');circle(x,125,11,'#cdbb99');
+  for(let j=0;j<6;j++){const a=j*Math.PI/3;circle(x+Math.cos(a)*8,125+Math.sin(a)*8,2,ink)}
+  circle(x,125,4,'#fff4db');circle(x,125,2,ink);
+ }
+ box(124,138,72,3,1,'#cfb98f');box(124,138,22,3,1,green);
+ for(const x of [28,292])for(const y of [56,155]){circle(x,y,2,'#8e6c56');line(x-1,y,x+1,y,'#f8e8bf')}
+ // Speaker grille and a small bird are part of the enclosure, below the tape.
+ for(let x=31;x<100;x+=6)for(let y=171;y<=183;y+=6)circle(x,y,1,'#b6a887');
+ circle(116,177,7,gold);circle(121,171,5,gold);circle(122,170,1,ink);poly([[126,171],[131,174],[125,175]],'#bd8866');
+ line(114,183,113,186,ink);line(119,183,120,186,ink);
+ circle(144,177,3,playerPlaying?green:'#bd8866');playerText(playerPlaying?'正在播放':'已经暂停',153,172,12,ink);
+ for(let x=243;x<290;x+=6)for(let y=171;y<=183;y+=6)circle(x,y,1,'#b6a887');
+ // Three broad mechanical keys with consistent outlines and different roles.
+ const keys=[[30,73,'#b6c9b2'],[109,102,gold],[217,73,'#c1b4d1']];
+ for(const [x,w,col] of keys){box(x,198,w,25,5,'#8f806c');box(x,194,w,25,5,col,ink);line(x+6,198,x+w-6,198,'#fff4db');}
+ line(43,202,43,212,ink,2);poly([[53,202],[53,212],[45,207]],ink);playerText('上一首',59,202,10,ink);
+ if(playerPlaying){ctx.fillStyle=ink;ctx.fillRect(127,202,3,11);ctx.fillRect(133,202,3,11)}else poly([[127,201],[127,213],[137,207]],ink);
+ playerText(playerPlaying?'暂停':'播放',165,201,13,ink,true);playerText('OK',195,203,9,ink,true);
+ playerText('下一首',226,202,10,ink);poly([[266,202],[266,212],[274,207]],ink);line(276,202,276,212,ink,2);
+ document.querySelector('#status').textContent=t.name+' · 磁带电台：← → 切歌，Enter 暂停/播放，Esc 返回。';
+}
+let storyPage=0,storyRun=false,rhymeIndex=0,rhymeRun=false,settingIndex=0;
+const settingValues=[3,2,0,1];
+function toyKey(x,w,label,col){box(x,201,w,29,6,'#8b806d');box(x,197,w,29,6,col,'#514c62');playerText(label,x+w/2,205,12,'#514c62',true)}
+function toyHeader(title,bg){ctx.fillStyle=bg;ctx.fillRect(0,0,320,240);line(18,12,12,18,'#514c62',2);line(12,18,18,24,'#514c62',2);playerText(title,29,11,14,'#514c62');playerText('小小故事盒',302,13,10,'#716b70',true)}
+function drawStoryProjector(){
+ toyHeader('森林放映室','#e1ead6');
+ // A filmstrip surrounds the story image, with a physical projector beside it.
+ box(13,42,207,142,9,'#8caa8c');box(10,37,207,142,9,'#405d53');
+ for(let x=18;x<211;x+=17){box(x,42,9,5,1,'#e1ead6');box(x,169,9,5,1,'#e1ead6')}
+ ctx.fillStyle=['#d9d8b9','#c4dbe0','#e8d0ac'][storyPage];ctx.fillRect(17,52,193,111);
+ circle(174,73,13,'#fff0b9');poly([[17,143],[64,85],[107,143]],'#8ca989');poly([[68,148],[137,91],[210,148]],'#668d7b');
+ poly([[74,163],[104,119],[117,119],[142,163]],'#e8d9af');box(88,108,46,32,3,'#f7e6be');poly([[82,109],[111,83],[140,109]],'#64705b');box(105,119,12,21,5,'#bd9067');
+ circle(157,142,10,'#e3b77d');circle(151,133,4,'#e3b77d');circle(163,133,4,'#e3b77d');circle(154,141,1,'#514c62');circle(161,141,1,'#514c62');
+ box(26,148,175,13,4,'#fff1d2');playerText(['小熊找到了森林小屋','月亮为小熊照亮了路','朋友们一起回家啦'][storyPage],113,150,10,'#514c62',true);
+ for(const [x,y,r] of [[244,65,20],[284,72,16]]){circle(x,y,r,'#514c62');circle(x,y,r-3,'#b8accc');for(let j=0;j<5;j++){let a=j*6.28/5;circle(x+Math.cos(a)*(r-9),y+Math.sin(a)*(r-9),4,'#514c62')}circle(x,y,3,'#fff1d2')}
+ box(232,89,66,54,8,'#d8b878','#514c62');box(222,102,15,25,3,'#514c62');box(241,100,46,7,3,'#f4dfb0');circle(279,127,5,'#a681a6');line(254,143,244,160,'#514c62',3);line(273,143,283,160,'#514c62',3);
+ playerText('小熊回家',267,168,12,'#514c62',true);playerText('0'+(storyPage+1)+' / 03',267,184,10,'#6b786d',true);
+ toyKey(15,76,'上一页','#b9cfaf');toyKey(100,120,storyRun?'暂停故事':'开始故事','#eac16b');toyKey(229,76,'下一页','#b9cfaf');
+ document.querySelector('#status').textContent='故事放映机 · 点击翻页、播放/暂停；此处为图文故事交互示意。';
+}
+function drawRhymeBox(){
+ toyHeader('童谣八音盒','#f3dfd3');
+ const names=['小星星','两只老虎','小燕子'];
+ box(32,49,256,134,15,'#cda0a0');box(28,43,264,134,15,'#ad7f91','#66515f');box(35,50,250,118,11,'#fff0d3','#66515f');
+ playerText(names[rhymeIndex],160,60,20,'#66515f',true);playerText('童谣花园 · 0'+(rhymeIndex+1)+' / 03',160,86,11,'#977682',true);
+ // The three birds form a small choir on the music-box stage.
+ for(let i=0;i<3;i++){const x=98+i*62,y=i===1?124:133,col=['#b7cfa6','#ebc46c','#bdb0d0'][i];circle(x,y,17,col);circle(x+8,y-15,11,col);circle(x+10,y-17,2,'#66515f');poly([[x+17,y-14],[x+26,y-10],[x+17,y-7]],'#d0936a');circle(x-6,y+1,9,['#8eac86','#d8aa56','#a08cb9'][i]);line(x-5,y+16,x-6,y+21,'#66515f',2);line(x+5,y+16,x+7,y+21,'#66515f',2)}
+ for(const [x,y] of [[52,103],[253,113]]){line(x,y,x,y+13,'#ad7f91',2);line(x,y,x+7,y+2,'#ad7f91',2);circle(x-3,y+14,3,'#ad7f91')}
+ box(51,161,218,7,3,'#b7cfa6');
+ // Piano teeth connect the control keys to the box itself.
+ for(let i=0;i<10;i++){box(41+i*24,177,22,14,2,'#fff8e7','#d3b5a0');if(i%3!==2)box(57+i*24,176,7,8,1,'#66515f')}
+ toyKey(15,76,'上一首','#b7cfa6');toyKey(100,120,rhymeRun?'暂停童谣':'一起唱','#eac16b');toyKey(229,76,'下一首','#c1b4d1');
+ document.querySelector('#status').textContent='童谣八音盒 · 切换童谣与播放状态，预览不播放实际音频。';
+}
+function drawSettingsHouse(){
+ toyHeader('工具小屋','#e7e3ed');
+ poly([[17,63],[160,32],[303,63]],'#8c80a7');box(22,62,276,129,8,'#fff1d2','#665a78');
+ const labels=['屏幕亮度','播放音量','无线网络','休眠时间'];const vals=[['柔和','舒适','明亮','最亮'],['安静','轻声','适中','响亮'],['关闭','开启'],['关闭','1分钟','5分钟','10分钟']];
+ for(let i=0;i<4;i++){let x=33+(i%2)*132,y=72+Math.floor(i/2)*55;box(x,y+3,122,46,7,'#c9bba4');box(x,y,122,46,7,i===settingIndex?'#f0cb72':'#e7e2cf',i===settingIndex?'#665a78':'#c9bba4');circle(x+17,y+17,9,['#edce79','#b4c9b0','#bdb1d0','#c0d3dc'][i]);if(i===0){circle(x+17,y+17,4,'#8e7651');for(let j=0;j<4;j++){let a=j*1.57;line(x+Math.cos(a)*6+17,y+Math.sin(a)*6+17,x+Math.cos(a)*8+17,y+Math.sin(a)*8+17,'#8e7651')}}else if(i===1){poly([[x+12,y+15],[x+20,y+11],[x+20,y+23],[x+12,y+19]],'#63806d')}else if(i===2){circle(x+17,y+18,3,'#79698e');line(x+11,y+12,x+23,y+12,'#79698e',2)}else{circle(x+17,y+17,6,'#6b8791');circle(x+20,y+14,6,'#c0d3dc')}
+ playerText(labels[i],x+32,y+9,12,'#665a78');playerText(vals[i][settingValues[i]],x+32,y+28,11,'#817566');}
+ toyKey(15,76,'上一项','#b7cfa6');toyKey(100,120,'调整设置','#eac16b');toyKey(229,76,'下一项','#c1b4d1');
+ document.querySelector('#status').textContent='工具小屋 · 点击设置卡选中，再点调整设置。仅为预览，不修改设备配置。';
+}
+function sceneAction(n){if(selected===1){if(n)storyPage=(storyPage+n+3)%3;else storyRun=!storyRun}else if(selected===2){if(n)rhymeIndex=(rhymeIndex+n+3)%3;else rhymeRun=!rhymeRun}else{if(n)settingIndex=(settingIndex+n+4)%4;else settingValues[settingIndex]=(settingValues[settingIndex]+1)%(settingIndex===2?2:4)}draw()}
+function draw(){if(opened){[null,drawStoryProjector,drawRhymeBox,drawSettingsHouse][selected]?.();return}if(playerPreview){drawCassetteRadio();return}const t=themes[selected];ctx.fillStyle='#fff5df';ctx.fillRect(0,0,320,240);
  ctx.fillStyle=t.sky;ctx.fillRect(0,0,320,169);
  circle(17,17,7,t.dark);ctx.fillStyle='#fff5df';ctx.fillRect(14,15,1,2);ctx.fillRect(19,15,1,2);ctx.fillRect(15,20,4,1);text('小小故事盒',31,23,14,t.dark);
  box(268,8,42,18,9,'#fff5df');ctx.fillStyle=t.dark;ctx.fillRect(276,14,3,6);poly([[279,14],[283,11],[283,22],[279,20]],t.dark);text('10',289,21,11,t.dark);
@@ -105,12 +310,18 @@ function draw(){const t=themes[selected];ctx.fillStyle='#fff5df';ctx.fillRect(0,
  if(opened){box(43,60,234,89,8,'#fff5df',t.dark);text(names[selected],160,91,16,t.dark,true);text('返回主页',160,127,14,t.dark,true)}
  document.querySelector('#status').textContent=opened?'交互示意：已进入'+names[selected]+'。':'当前目的地：'+t.title;
 }
-function move(n){opened=false;selected=(selected+n+4)%4;draw()}
-document.querySelector('#prev').onclick=()=>move(-1);document.querySelector('#next').onclick=()=>move(1);document.querySelector('#enter').onclick=()=>{opened=true;draw()};document.querySelector('#back').onclick=()=>{opened=false;draw()};
+function move(n){opened=false;playerPreview=false;selected=(selected+n+4)%4;draw()}
+function enter(){if(selected===0){playerPreview=true;opened=false}else opened=true;draw()}
+document.querySelector('#prev').onclick=()=>move(-1);document.querySelector('#next').onclick=()=>move(1);document.querySelector('#enter').onclick=enter;document.querySelector('#back').onclick=()=>{opened=false;playerPreview=false;draw()};
 function resize(){const scale=Number(document.querySelector('#scale').value);canvas.style.width=320*scale+'px';canvas.style.height=240*scale+'px'}document.querySelector('#scale').onchange=resize;resize();
-canvas.onkeydown=e=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Enter','Escape'].includes(e.key)){e.preventDefault();if(e.key==='Enter')opened=true;else if(e.key==='Escape')opened=false;else return move(['ArrowLeft','ArrowUp'].includes(e.key)?-1:1);draw()}};
+canvas.onkeydown=e=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Enter','Escape'].includes(e.key)){e.preventDefault();if(playerPreview){if(e.key==='Escape'){playerPreview=false;draw()}else if(e.key==='Enter'){playerPlaying=!playerPlaying;draw()}else if(e.key==='ArrowLeft'){playerIndex=(playerIndex+2)%3;draw()}else if(e.key==='ArrowRight'){playerIndex=(playerIndex+1)%3;draw()}return}if(e.key==='Enter')enter();else if(e.key==='Escape')opened=false;else return move(['ArrowLeft','ArrowUp'].includes(e.key)?-1:1);draw()}};
 let lastWheel=0;canvas.addEventListener('wheel',e=>{e.preventDefault();if(Date.now()-lastWheel>140){move(e.deltaY>0?1:-1);lastWheel=Date.now()}},{passive:false});
-canvas.onclick=e=>{canvas.focus();const r=canvas.getBoundingClientRect(),x=(e.clientX-r.left)*320/r.width,y=(e.clientY-r.top)*240/r.height;if(opened){opened=false;draw();return}if(y>=176&&y<=219&&x>=8&&x<312){selected=Math.min(3,Math.floor((x-8)/78));draw()}else if(x>=14&&x<=127&&y>=123&&y<=154){opened=true;draw()}};
+canvas.onclick=e=>{canvas.focus();const r=canvas.getBoundingClientRect(),x=(e.clientX-r.left)*320/r.width,y=(e.clientY-r.top)*240/r.height;if(playerPreview){if(y>=18&&y<=44&&x<115)playerPreview=false;else if(y>=194&&y<=223){if(x>=109&&x<=211)playerPlaying=!playerPlaying;else if(x>=30&&x<=103)playerIndex=(playerIndex+2)%3;else if(x>=217&&x<=290)playerIndex=(playerIndex+1)%3;}draw();return}if(opened){opened=false;draw();return}if(y>=176&&y<=219&&x>=8&&x<312){selected=Math.min(3,Math.floor((x-8)/78));draw()}else if(x>=14&&x<=127&&y>=123&&y<=154)enter()};
+canvas.addEventListener('click',e=>{if(!opened)return;e.stopImmediatePropagation();canvas.focus();const r=canvas.getBoundingClientRect(),x=(e.clientX-r.left)*320/r.width,y=(e.clientY-r.top)*240/r.height;if(y<32){opened=false;draw()}else if(y>=197&&y<=230){if(x>=15&&x<=91)sceneAction(-1);else if(x>=100&&x<=220)sceneAction(0);else if(x>=229&&x<=305)sceneAction(1)}else if(selected===3&&x>=33&&x<=287&&y>=72&&y<=173){settingIndex=(y>=127?2:0)+(x>=165?1:0);draw()}},true);
+canvas.addEventListener('keydown',e=>{if(!opened)return;if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Enter','Escape'].includes(e.key))return;e.preventDefault();e.stopImmediatePropagation();if(e.key==='Escape'){opened=false;draw()}else sceneAction(e.key==='Enter'?0:['ArrowLeft','ArrowUp'].includes(e.key)?-1:1)},true);
+document.querySelector('#prev').onclick=()=>opened?sceneAction(-1):playerPreview?(playerIndex=(playerIndex+2)%3,draw()):move(-1);
+document.querySelector('#next').onclick=()=>opened?sceneAction(1):playerPreview?(playerIndex=(playerIndex+1)%3,draw()):move(1);
+document.querySelector('#enter').onclick=()=>opened?sceneAction(0):playerPreview?(playerPlaying=!playerPlaying,draw()):enter();
 Promise.all([...images,sceneSheet].map(im=>im.decode())).then(draw).catch(()=>document.querySelector('#status').textContent='图标加载失败');
 </script>
 </html>
