@@ -1,6 +1,18 @@
 #include "input.h"
 #include "config.h"
 #include <driver/gpio.h>
+#include <initializer_list>
+#ifndef ARDUINO
+#include "esp_timer.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+namespace {
+uint32_t millis() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
+int digitalRead(int pin) { return gpio_get_level(static_cast<gpio_num_t>(pin)); }
+constexpr int LOW = 0;
+}
+#endif
 
 namespace {
   struct Btn { uint8_t pin; bool down; bool longSent; uint32_t edgeT; uint32_t downT; };
@@ -60,18 +72,22 @@ namespace {
                                         -1, 0, 0, 1,  0, 1, -1, 0 };
   volatile int32_t s_encAcc  = 0;
   volatile uint8_t s_encPrev = 0;
+  portMUX_TYPE s_encoderMux = portMUX_INITIALIZER_UNLOCKED;
 
   void IRAM_ATTR encISR() {
+    portENTER_CRITICAL_ISR(&s_encoderMux);
     uint8_t cur = (uint8_t)((gpio_get_level((gpio_num_t)ENC_A) << 1) |
                              gpio_get_level((gpio_num_t)ENC_B));
     s_encAcc += ENC_TBL[(s_encPrev << 2) | cur];
     s_encPrev = cur;
+    portEXIT_CRITICAL_ISR(&s_encoderMux);
   }
 }
 
 namespace Input {
 
 void begin() {
+#ifdef ARDUINO
   pinMode(BTN_OK,   INPUT_PULLUP);
   pinMode(BTN_NEXT, INPUT_PULLUP);
   pinMode(BTN_LAST, INPUT_PULLUP);
@@ -83,6 +99,22 @@ void begin() {
   s_encAcc  = 0;
   attachInterrupt(digitalPinToInterrupt(ENC_A), encISR, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENC_B), encISR, CHANGE);
+#else
+  gpio_config_t config{};
+  config.pin_bit_mask = (1ULL << BTN_OK) | (1ULL << BTN_NEXT) | (1ULL << BTN_LAST)
+                     | (1ULL << ENC_A) | (1ULL << ENC_B) | (1ULL << ENC_SW);
+  config.mode = GPIO_MODE_INPUT;
+  config.pull_up_en = GPIO_PULLUP_ENABLE;
+  ESP_ERROR_CHECK(gpio_config(&config));
+  s_encPrev = (digitalRead(ENC_A) << 1) | digitalRead(ENC_B);
+  auto result = gpio_install_isr_service(0);
+  if (result != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(result);
+  for (auto pin : {ENC_A, ENC_B}) {
+    ESP_ERROR_CHECK(gpio_set_intr_type(static_cast<gpio_num_t>(pin), GPIO_INTR_ANYEDGE));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(static_cast<gpio_num_t>(pin),
+        [](void*) { encISR(); }, nullptr));
+  }
+#endif
 }
 
 int8_t nextEvent() { return navEvent(s_next); }
@@ -173,10 +205,10 @@ int8_t okEvent() {
 /* 取走中断累积的 1/4 步, 每 4 个 1/4 步(即一格)算 1 步
    装机后屏幕为 180° 方向, 旋钮的左右旋转相对用户视角颠倒, 故返回值取反 */
 int encoderSteps() {
-  noInterrupts();
+  portENTER_CRITICAL(&s_encoderMux);
   int32_t acc = s_encAcc;
   s_encAcc = 0;
-  interrupts();
+  portEXIT_CRITICAL(&s_encoderMux);
 
   static int32_t carry = 0;
   if (inputsSuppressed()) {
@@ -199,13 +231,17 @@ void setLocked(bool locked) {
   s_locked = locked;
   if (locked) {
     s_unlockAt = 0;
-    noInterrupts();
+    portENTER_CRITICAL(&s_encoderMux);
     s_encAcc = 0;
-    interrupts();
+    portEXIT_CRITICAL(&s_encoderMux);
   } else {
     s_unlockAt = millis();
   }
+#ifdef ARDUINO
   Serial.printf("[INPUT] %s\n", locked ? "child lock" : "unlock");
+#else
+  ESP_LOGI("input", "%s", locked ? "child lock" : "unlock");
+#endif
 }
 
 /* 童锁本地解锁: OK + NEXT 同时按住 5 秒。用原始电平读取, 不受事件屏蔽影响。 */

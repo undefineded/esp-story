@@ -8,7 +8,7 @@
  * 写入按页/块分步执行, 每次 loop 只做一小步, 因此不会长时间卡住 UI。
  */
 #pragma once
-#include <Arduino.h>
+#include <cstdint>
 #include "pn532.h"
 
 namespace Nfc {

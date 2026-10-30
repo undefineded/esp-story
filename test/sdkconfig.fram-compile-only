@@ -1,0 +1,4 @@
+# CI compile coverage only. NOT evidence that a physical board is confirmed.
+# Do not flash this configuration without independently checking the FRAM model.
+CONFIG_STORYBOX_FRAM_CONFIRMED=y
+CONFIG_STORYBOX_USB_FILE_WRITES=y

@@ -1,0 +1,56 @@
+menu "StoryBox migration"
+    config STORYBOX_USB_FILE_WRITES
+        bool "Enable diagnostic USB file uploads (not full desktop FS support)"
+        depends on STORYBOX_USB_PROTOCOL && STORYBOX_AUDIO_DIAGNOSTICS
+        default n
+        help
+            Enables explicit host-requested uploads in existing directories.
+            Requires stopped playback and an exclusive storage session.
+            Authentication and automatic media refresh are not yet implemented.
+    config STORYBOX_NFC_DIAGNOSTICS
+        bool "Enable PN532 diagnostic polling on shared I2C"
+        depends on STORYBOX_PERIPHERAL_DIAGNOSTICS
+        default n
+    config STORYBOX_USB_PROTOCOL
+        bool "Enable native USB v4 diagnostic protocol"
+        depends on ESP_CONSOLE_NONE
+        default n
+        help
+            Disable the IDF console to give the protocol TX task sole ownership
+            of USB output. ESP_LOG output is queued by the same TX task.
+            Audio diagnostics publish read-only file commands after SD mount.
+            File sessions require all playback/image handles to be released.
+    config STORYBOX_FRAM_CONFIRMED
+        bool "Physical FRAM model and selected board profile have been confirmed"
+        default n
+        help
+            Enables real FRAM access. Do not enable based only on an I2C ACK.
+            Legacy uses MB85RC16 bank addresses; new board uses FM24CL64B at 0x51.
+    config STORYBOX_NETWORK_DIAGNOSTICS
+        bool "Enable Wi-Fi mode controls in diagnostics (starts with radio off)"
+        depends on STORYBOX_PERIPHERAL_DIAGNOSTICS
+        default n
+    config STORYBOX_PERIPHERAL_DIAGNOSTICS
+        bool "Run display, input and SD diagnostics (confirm board wiring first)"
+        default n
+    config STORYBOX_AUDIO_DIAGNOSTICS
+        bool "Enable MP3 playback controls in diagnostics"
+        depends on STORYBOX_PERIPHERAL_DIAGNOSTICS
+        default n
+        help
+            Loads the configured MP3 paused. OK toggles playback; encoder changes
+            volume. Confirm amplifier wiring before enabling. No GPIO38 enable
+            is asserted until its board-specific polarity is verified.
+    config STORYBOX_AUDIO_TEST_PATH
+        string "SD MP3 test path"
+        depends on STORYBOX_AUDIO_DIAGNOSTICS
+        default "/music/test.mp3"
+    choice STORYBOX_BOARD
+        prompt "Board profile (confirm against physical hardware)"
+        default STORYBOX_BOARD_LEGACY
+        config STORYBOX_BOARD_LEGACY
+            bool "Legacy board (FRAM model unverified)"
+        config STORYBOX_BOARD_REV_20261028
+            bool "2026-10-28 schematic (assembly unverified)"
+    endchoice
+endmenu

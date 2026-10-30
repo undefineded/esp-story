@@ -8,9 +8,19 @@
  *     Mifare Classic 认证与块读写
  */
 #pragma once
+#ifdef ARDUINO
 #include <Arduino.h>
+#else
+#include <cstdint>
+#include "driver/i2c_master.h"
+#endif
 
 namespace Pn532 {
+#ifndef ARDUINO
+// Single NFC owner task. Shared bus lifetime belongs to Board::I2cBus.
+esp_err_t attachBus(i2c_master_bus_handle_t bus);
+esp_err_t detachBus(); // only after the NFC owner has stopped
+#endif
 
 enum Error : uint8_t {
   Ok = 0,

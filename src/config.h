@@ -3,7 +3,11 @@
  * 全部来自 Netlist_Schematic1_2026-10-08.enet
  */
 #pragma once
+#ifdef ARDUINO
 #include <Arduino.h>
+#else
+#include <cstdint>
+#endif
 
 /* --- ST7789 TFT (SPI, 240x320) --- */
 #define TFT_SCK    5    // SCL_SCREEN -> IO5

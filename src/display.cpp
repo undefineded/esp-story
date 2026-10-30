@@ -3,6 +3,15 @@
 #include "render_math.h"
 #include <esp_heap_caps.h>
 #include <cstring>
+#ifndef ARDUINO
+#include "esp_timer.h"
+#include "esp_psram.h"
+#include "esp_log.h"
+#include "driver/ledc.h"
+#include "driver/gpio.h"
+static uint32_t millis() { return esp_timer_get_time() / 1000; }
+static bool psramFound() { return esp_psram_get_size() != 0; }
+#endif
 
 /* ST7789 面板 + SPI 总线配置 (引脚见 config.h) */
 class LGFX : public lgfx::LGFX_Device {
@@ -85,10 +94,26 @@ void begin() {
     heap_caps_free(s_transfer);
     s_previous = s_transfer = nullptr;
   }
+#ifdef ARDUINO
   Serial.printf("[UI] PSRAM canvas: %s\n", s_buffered ? "OK (300 KiB + 5 KiB staging)" : "unavailable, direct rendering");
-
   ledcSetup(BL_CHANNEL, BL_FREQ, BL_RES);
   ledcAttachPin(TFT_BL, BL_CHANNEL);
+#else
+  ESP_LOGI("display", "PSRAM canvas: %s", s_buffered ? "ready" : "direct rendering fallback");
+  ledc_timer_config_t timer{};
+  timer.speed_mode = LEDC_LOW_SPEED_MODE;
+  timer.duty_resolution = LEDC_TIMER_8_BIT;
+  timer.timer_num = LEDC_TIMER_0;
+  timer.freq_hz = BL_FREQ;
+  timer.clk_cfg = LEDC_AUTO_CLK;
+  ESP_ERROR_CHECK(ledc_timer_config(&timer));
+  ledc_channel_config_t channel{};
+  channel.gpio_num = TFT_BL;
+  channel.speed_mode = LEDC_LOW_SPEED_MODE;
+  channel.channel = static_cast<ledc_channel_t>(BL_CHANNEL);
+  channel.timer_sel = LEDC_TIMER_0;
+  ESP_ERROR_CHECK(ledc_channel_config(&channel));
+#endif
   s_blReady = true;
   setBrightness(100);
 }
@@ -96,10 +121,21 @@ void begin() {
 void setBrightness(uint8_t percent) {
   if (percent > 100) percent = 100;
   if (s_blReady) {
+#ifdef ARDUINO
     ledcWrite(BL_CHANNEL, (uint32_t)percent * ((1 << BL_RES) - 1) / 100);
+#else
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, static_cast<ledc_channel_t>(BL_CHANNEL),
+                                uint32_t(percent) * ((1 << BL_RES) - 1) / 100));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, static_cast<ledc_channel_t>(BL_CHANNEL)));
+#endif
   } else {                            // PWM 未就绪时退化为开关
+#ifdef ARDUINO
     pinMode(TFT_BL, OUTPUT);
     digitalWrite(TFT_BL, percent > 0 ? HIGH : LOW);
+#else
+    ESP_ERROR_CHECK(gpio_set_direction(static_cast<gpio_num_t>(TFT_BL), GPIO_MODE_OUTPUT));
+    ESP_ERROR_CHECK(gpio_set_level(static_cast<gpio_num_t>(TFT_BL), percent > 0));
+#endif
   }
 }
 

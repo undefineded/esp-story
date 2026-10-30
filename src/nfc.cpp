@@ -1,5 +1,9 @@
 #include "nfc.h"
 #include <cstring>
+#ifndef ARDUINO
+#include "esp_timer.h"
+namespace { uint32_t millis() { return esp_timer_get_time()/1000; } }
+#endif
 
 namespace {
 

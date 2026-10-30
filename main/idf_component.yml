@@ -1,0 +1,6 @@
+dependencies:
+  idf: "==5.5.1"
+  espressif/esp_audio_codec: "==2.6.2"
+  LovyanGFX:
+    git: https://github.com/lovyan03/LovyanGFX.git
+    version: 5438181440c71cf30bbdc347b0b1597ae3ebf77d

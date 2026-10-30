@@ -1,6 +1,22 @@
 #include "pn532.h"
 #include "config.h"
+#include "pn532_frame.h"
+#ifdef ARDUINO
 #include <Wire.h>
+#else
+#include "esp_timer.h"
+#include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <algorithm>
+#include <cstdio>
+namespace {
+uint32_t millis() { return esp_timer_get_time()/1000; }
+void delay(uint32_t ms) { vTaskDelay(std::max(TickType_t{1},pdMS_TO_TICKS(ms))); }
+i2c_master_bus_handle_t s_bus=nullptr;
+i2c_master_dev_handle_t s_device=nullptr;
+}
+#endif
 #include <cstring>
 
 namespace {
@@ -44,21 +60,31 @@ uint8_t i2cAddr() { return (uint8_t)PN532_I2C_ADDR; }
    i2c 驱动会停在错误态, 之后同一总线上的 FRAM 读写会一直报 INVALID_STATE (263) ——
    表现为开机卡死。所以探测失败后必须复位一次驱动, 把总线还给 FRAM。 */
 void busRecover() {
+#ifdef ARDUINO
   Wire.end();
   delay(2);
   Wire.begin(I2C_SDA, I2C_SCL, (uint32_t)PN532_I2C_HZ);
   Wire.setClock((uint32_t)PN532_I2C_HZ);
   delay(2);
+#else
+  // Native devices must never destroy the shared bus. The application may
+  // ask Board::I2cBus to recover after all device users have quiesced.
+#endif
 }
 
 bool i2cPing() {
+#ifdef ARDUINO
   Wire.beginTransmission(i2cAddr());
   return Wire.endTransmission(true) == 0;
+#else
+  return s_bus && i2c_master_probe(s_bus,i2cAddr(),100)==ESP_OK;
+#endif
 }
 
 /* PN532 I2C 读: 第一个字节是 RDY (0x01 就绪), 其余为帧数据 */
 bool readRaw(uint8_t* out, uint8_t len) {
   if (len == 0) return true;
+#ifdef ARDUINO
   uint8_t got = (uint8_t)Wire.requestFrom((uint8_t)i2cAddr(), (uint8_t)(len + 1));
   if (got < (uint8_t)(len + 1)) {
     while (Wire.available()) Wire.read();
@@ -67,11 +93,18 @@ bool readRaw(uint8_t* out, uint8_t len) {
   int rdy = Wire.read();
   for (uint8_t i = 0; i < len; i++) out[i] = (uint8_t)Wire.read();
   return rdy == 0x01;
+#else
+  uint8_t data[256];
+  if (!s_device || i2c_master_receive(s_device,data,std::size_t(len)+1,100)!=ESP_OK || data[0]!=1) return false;
+  std::memcpy(out,data+1,len);
+  return true;
+#endif
 }
 
 bool waitReady(uint32_t timeoutMs) {
   uint32_t start = millis();
   for (;;) {
+#ifdef ARDUINO
     uint8_t got = (uint8_t)Wire.requestFrom((uint8_t)i2cAddr(), (uint8_t)1);
     if (got == 1) {
       int b = Wire.read();
@@ -79,6 +112,10 @@ bool waitReady(uint32_t timeoutMs) {
     } else {
       while (Wire.available()) Wire.read();
     }
+#else
+    uint8_t status=0;
+    if (s_device && i2c_master_receive(s_device,&status,1,20)==ESP_OK && status==1) return true;
+#endif
     if (millis() - start >= timeoutMs) return false;
     delay(2);
   }
@@ -102,9 +139,15 @@ bool writeCommand(const uint8_t* cmd, uint8_t cmdLen) {
   frame[6 + cmdLen] = (uint8_t)(~sum + 1);
   frame[7 + cmdLen] = PN532_POSTAMBLE;
 
+#ifdef ARDUINO
   Wire.beginTransmission(i2cAddr());
   Wire.write(frame, (size_t)(8 + cmdLen));
   if (Wire.endTransmission() != 0) { s_error = Pn532::NoDevice; return false; }
+#else
+  if (!s_device || i2c_master_transmit(s_device,frame,8+cmdLen,100)!=ESP_OK) {
+    s_error=Pn532::NoDevice; return false;
+  }
+#endif
   return true;
 }
 
@@ -116,33 +159,15 @@ bool readAck() {
 }
 
 /* 读取完整响应帧; 返回 D5 CMD 之后的数据 (不含状态外的任何头) */
-bool readResponse(uint8_t expectedCmd, uint8_t* out, uint8_t& outLen, uint8_t maxLen) {
-  uint8_t hdr[7];
-  if (!readRaw(hdr, sizeof(hdr))) { s_error = Pn532::Timeout; return false; }
-
-  if (hdr[0] != 0x00 || hdr[1] != 0x00 || hdr[2] != 0xFF ||
-      hdr[5] != PN532_PN532TOHOST || hdr[6] != (uint8_t)(expectedCmd + 1) ||
-      (uint8_t)(hdr[3] + hdr[4]) != 0xFF || hdr[3] < 3) {
+bool readResponse(uint8_t expectedResponse, uint8_t* out, uint8_t& outLen, uint8_t maxLen) {
+  // One transaction reads the entire normal response (plus padding). Do not
+  // assume that a second I2C read resumes after a partial header transaction.
+  uint8_t frame[80];
+  if (!readRaw(frame, sizeof(frame))) { s_error = Pn532::Timeout; return false; }
+  if (!Pn532Frame::decode(frame, sizeof(frame), expectedResponse, out, outLen, maxLen)) {
     s_error = Pn532::BadFrame;
     return false;
   }
-
-  uint8_t len = hdr[3];
-  /* 头部已经消费 TFI + CMD; 剩余 = 数据(含状态) + DCS + POSTAMBLE = len */
-  uint8_t rest[72];
-  if (len > sizeof(rest)) { s_error = Pn532::BadFrame; return false; }
-  if (!readRaw(rest, len)) { s_error = Pn532::Timeout; return false; }
-  if (rest[len - 1] != PN532_POSTAMBLE) { s_error = Pn532::BadFrame; return false; }
-
-  uint8_t dataLen = (uint8_t)(len - 2);            // len - DCS - POSTAMBLE
-  uint8_t sum = (uint8_t)(PN532_PN532TOHOST + hdr[6]);
-  for (uint8_t i = 0; i < dataLen; i++) sum = (uint8_t)(sum + rest[i]);
-  uint8_t expectDcs = (uint8_t)(~sum + 1);
-  if (rest[dataLen] != expectDcs) { s_error = Pn532::BadFrame; return false; }
-
-  uint8_t copy = dataLen < maxLen ? dataLen : maxLen;
-  if (out && copy) memcpy(out, rest, copy);
-  outLen = copy;
   return true;
 }
 
@@ -188,8 +213,9 @@ bool applyRfConfig() {
   return command(cmd, sizeof(cmd), RESP_RF_CONFIG, out, n, sizeof(out));
 }
 
-void hardwareReset() {
+bool hardwareReset() {
 #if PN532_RST_PIN >= 0
+#ifdef ARDUINO
   pinMode(PN532_RST_PIN, OUTPUT);
   digitalWrite(PN532_RST_PIN, HIGH);
   delay(10);
@@ -197,24 +223,57 @@ void hardwareReset() {
   delay(80);
   digitalWrite(PN532_RST_PIN, HIGH);
   delay(120);
+#else
+  const auto pin=static_cast<gpio_num_t>(PN532_RST_PIN);
+  if (gpio_set_direction(pin,GPIO_MODE_OUTPUT)!=ESP_OK) return false;
+  if (gpio_set_level(pin,1)!=ESP_OK) return false;
+  delay(10);
+  if (gpio_set_level(pin,0)!=ESP_OK) return false;
+  delay(80);
+  if (gpio_set_level(pin,1)!=ESP_OK) return false;
+  delay(120);
 #endif
+#endif
+  return true;
 }
 
 } // namespace
 
 namespace Pn532 {
+#ifndef ARDUINO
+esp_err_t attachBus(i2c_master_bus_handle_t bus) {
+  if (!bus || s_device) return ESP_ERR_INVALID_STATE;
+  i2c_device_config_t config{};
+  config.dev_addr_length=I2C_ADDR_BIT_LEN_7;
+  config.device_address=PN532_I2C_ADDR;
+  config.scl_speed_hz=PN532_I2C_HZ;
+  const auto result=i2c_master_bus_add_device(bus,&config,&s_device);
+  if (result==ESP_OK) s_bus=bus;
+  return result;
+}
+esp_err_t detachBus() {
+  if (!s_device) return ESP_OK;
+  const auto result=i2c_master_bus_rm_device(s_device);
+  if (result==ESP_OK) { s_device=nullptr; s_bus=nullptr; s_present=false; }
+  return result;
+}
+#endif
 
 bool begin() {
+#ifdef ARDUINO
   pinMode(I2C_SDA, INPUT_PULLUP);
   pinMode(I2C_SCL, INPUT_PULLUP);
   /* 总线已由 Fram::begin() 用同一组引脚初始化, 这里只调速率:
      重复 Wire.begin() 会把可用驱动顶掉, 之后 FRAM 访问会持续失败。 */
   Wire.setClock((uint32_t)PN532_I2C_HZ);
+#else
+  if (!s_device) { s_error=NoDevice; return false; }
+#endif
   delay(20);
 
   s_present = false;
   s_error = NoDevice;
-  hardwareReset();
+  if (!hardwareReset()) { s_error=BadArg; return false; }
   bool ok = probe();
   if (!ok) busRecover();          // 模块不在: 把总线恢复给 FRAM
   return ok;

@@ -1,0 +1,30 @@
+dependencies:
+  LovyanGFX:
+    component_hash: dfd18bad566cc59688f71f0628cb1015f0de9638df9f81e759f48ad6662dfce8
+    dependencies: []
+    source:
+      git: https://github.com/lovyan03/LovyanGFX.git
+      path: .
+      type: git
+    version: 5438181440c71cf30bbdc347b0b1597ae3ebf77d
+  espressif/esp_audio_codec:
+    component_hash: a5b9275af74247e3ce536d16a7080e4d77207a185b63e1bea368eb4d57176c2b
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.6.2
+  idf:
+    source:
+      type: idf
+    version: 5.5.1
+direct_dependencies:
+- LovyanGFX
+- espressif/esp_audio_codec
+- idf
+manifest_hash: 5f6c99fe117fad9bd41b4af18f78c6f8a1482d4ebf44d4ec643b96f28bd771ce
+target: esp32s3
+version: 2.0.0

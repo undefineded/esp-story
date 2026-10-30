@@ -1,0 +1,34 @@
+name: ESP-IDF migration
+on: [push, pull_request]
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native firmware
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py build
+          bash tools/test_mp3_stream.sh
+          bash tools/test_native_protocol.sh
+          idf.py -B build-diagnostics -D SDKCONFIG=build-diagnostics/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.diagnostics' build
+          idf.py -B build-audio -D SDKCONFIG=build-audio/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.audio-diagnostics' build
+          idf.py -B build-usb -D SDKCONFIG=build-usb/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.usb-diagnostics' build
+          # Compile persistence/policy paths, but do not publish this image.
+          idf.py -B build-fram-compile -D SDKCONFIG=build-fram-compile/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.usb-diagnostics;test/sdkconfig.fram-compile-only' build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: storybox-idf-diagnostic
+          path: |
+            build/*.bin
+            build/*.map
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/flasher_args.json
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tools/test_host.sh

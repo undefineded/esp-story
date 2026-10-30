@@ -1,6 +1,6 @@
 /* 输入组件: 3 个按键 + EC11 旋转编码器 */
 #pragma once
-#include <Arduino.h>
+#include <stdint.h>
 
 namespace Input {
   void   begin();
