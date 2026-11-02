@@ -16,8 +16,6 @@ namespace {
   int     s_curCat   = 0;           // 当前分类: 0 = 全部歌曲, 1..N = s_cats[i-1]
   int16_t s_cur[MAX_TRACKS];        // 当前分类曲目 -> s_tracks 下标
   int     s_curCount = 0;
-  int16_t s_nursery[MAX_TRACKS];    // 童谣预览列表 (浏览时不动 s_cur, 按下播放才切换)
-  int     s_nurseryCount = 0;
 
   bool    s_ready = false;
   bool    s_scanOk = true;
@@ -71,31 +69,6 @@ namespace {
     return h ? h : 1u;
   }
 
-  /* 童谣分类识别: 只按分类名匹配, 不猜文件名。
-     统一转小写后同时支持中文关键词和英文关键词 (nursery / rhyme)。 */
-  bool isNurseryName(const String& name) {
-    String s = name;
-    s.toLowerCase();
-    return s.indexOf("童谣") >= 0 || s.indexOf("儿歌") >= 0 ||
-           s.indexOf("nursery") >= 0 || s.indexOf("rhyme") >= 0;
-  }
-
-  /* 曲目 i 是否属于童谣汇总 (家长白名单关闭的分类不计入) */
-  bool nurseryTrack(int i) {
-    int cat = s_tracks[i].cat;
-    if (cat < 0) return false;
-    if (s_catFilter && !(s_catMask & (1ULL << (cat + 1)))) return false;
-    return isNurseryName(s_cats[cat]);
-  }
-
-  /* 只重建预览列表, 不碰当前播放列表 */
-  void rebuildNursery() {
-    s_nurseryCount = 0;
-    for (int i = 0; i < s_total && s_nurseryCount < MAX_TRACKS; i++) {
-      if (nurseryTrack(i)) s_nursery[s_nurseryCount++] = (int16_t)i;
-    }
-  }
-
   /* 递归收集 dir(含子目录)内的 mp3, 全部归入分类 cat */
   void collectDeep(const String& dir, int cat) {
     File d = SD_MMC.open(dir);
@@ -134,7 +107,6 @@ namespace {
       Serial.println("[SD ] /music not found, created it");
       buildPlaylist(0);
       rebuildView();
-      rebuildNursery();
       return true;
     }
     File root = SD_MMC.open(MUSIC_DIR);
@@ -142,7 +114,6 @@ namespace {
       if (root) root.close();
       buildPlaylist(0);
       rebuildView();
-      rebuildNursery();
       return false;
     }
 
@@ -171,7 +142,6 @@ namespace {
 
     buildPlaylist(0);
     rebuildView();
-    rebuildNursery();
     Serial.printf("[SD ] %d MP3, %d category(ies) in %s\n", s_total, s_catCount, MUSIC_DIR);
     return s_scanOk;
   }
@@ -196,7 +166,6 @@ void clear() {
   s_total = s_catCount = 0;
   buildPlaylist(0);
   rebuildView();
-  rebuildNursery();
 }
 
 bool rescan() { clear(); return scan(); }
@@ -229,7 +198,6 @@ bool index(CatalogArchive& archive, bool reading, bool apply) {
     s_total = tracks;
     buildPlaylist(0);
     rebuildView();
-    rebuildNursery();
   }
   return true;
 }
@@ -286,7 +254,6 @@ void setCategoryFilter(uint64_t mask, bool enabled) {
   s_catMask   = mask;
   s_catFilter = enabled;
   rebuildView();
-  rebuildNursery();
 }
 
 int viewCatCount() { return s_viewCount; }
@@ -341,28 +308,6 @@ bool prepareTrack(int index, int& playlistIndex) {
     }
   }
   return false;
-}
-
-int nurseryCount() { return s_nurseryCount; }
-
-const char* nurseryName(int view) {
-  if (view < 0 || view >= s_nurseryCount) return "";
-  const String& p = s_tracks[s_nursery[view]].path;
-  int k = p.lastIndexOf('/');
-  return (k >= 0) ? p.c_str() + k + 1 : p.c_str();
-}
-
-int nurseryGlobal(int view) {
-  if (view < 0 || view >= s_nurseryCount) return -1;
-  return s_nursery[view];
-}
-
-bool selectNursery() {
-  s_curCat   = NURSERY_CATEGORY;
-  s_curCount = 0;
-  for (int i = 0; i < s_nurseryCount; i++) s_cur[s_curCount++] = s_nursery[i];
-  Serial.printf("[SD ] nursery playlist: %d track(s)\n", s_curCount);
-  return s_curCount > 0;
 }
 
 }

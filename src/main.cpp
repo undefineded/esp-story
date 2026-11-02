@@ -14,6 +14,7 @@
  *    Storage  - TF 卡挂载与 /music 扫描
  *    Player   - ESP32-audioI2S 封装 + 人声 EQ 预设
  *    Story    - /story 故事扫描 + 时间轴插画同步
+ *    Video    - /video MJPEG AVI 视频播放 (索引 + 时间轴取帧)
  *    Input    - 按键 / 编码器 (SET 支持长按)
  *    Hall     - 霍尔开关状态
  *    Fram     - I2C 铁电存储器 (U2 MB85RC16, 配置持久化)
@@ -24,7 +25,7 @@
  *  主页 (开机默认界面, 四个功能块):
  *    音乐 - /music (一级子文件夹为分类, 置顶"全部歌曲"递归收录全部 mp3)
  *    故事 - /story/<故事名>/ (mp3 + 插画 + timeline.lrc)
- *    童谣 - 分类名含"童谣/儿歌/nursery/rhyme"的曲目汇总成一个播放列表
+ *    视频 - /video/*.avi (MJPEG) + 同名 mp3 音轨, 全屏播放
  *    设置 - 亮度/旋转/EQ/刷新列表/无线开关/绑定码
  *    编码器/NEXT/LAST: 移动焦点        OK 单击 / SET 短按: 进入
  *    主页不再用"OK 双击"进设置, 也不再靠"SET 长按"切换音乐/故事模式。
@@ -60,6 +61,7 @@
 #include "storage.h"
 #include "player.h"
 #include "story.h"
+#include "video.h"
 #include "input.h"
 #include "hall.h"
 #include "fram.h"
@@ -74,27 +76,32 @@
 #include "network.h"
 #include "nfc.h"
 #include "hostlink.h"
+#include "sysmon.h"
 #ifdef STORY_AUDIO_PREVIEW
 #include <SD_MMC.h>
 #endif
 
 /* ---------------- 界面状态机 ---------------- */
 
-enum class Screen : uint8_t { Home, MusicList, TrackList, NurseryList, Main, Settings,
+enum class Screen : uint8_t { Home, MusicList, TrackList, VideoList, Main, Settings,
                               StoryCategoryList, StoryList, StoryPlay, StoryAudio, StoryError,
+                              VideoPlay, VideoError,
                               NoContent, Empty, Locked, Bind };
 
 static Screen s_screen   = Screen::Home;
 static Screen s_settingsBack = Screen::Home;   // 设置界面来源屏 (保存后返回该屏)
 static Screen s_lockedBack   = Screen::Home;   // 锁定前所在屏 (解锁后返回)
 static Screen s_bindBack     = Screen::Home;   // 绑定码页返回屏
-static int    s_homeSel  = 0;      // 主页当前选中块: 0 音乐 / 1 故事 / 2 童谣 / 3 设置
+static int    s_homeSel  = 0;      // 主页当前选中块: 0 音乐 / 1 故事 / 2 视频 / 3 设置
 static int    s_sel      = 0;      // 设置界面当前选中项
 static int    s_musicSel = 0;      // 音乐分类列表当前选中项
 static int    s_trackSel = 0;      // 当前歌曲列表选中项
 static int    s_trackPlaying = 0;  // 当前歌曲列表中"正在播放"的曲目下标
 static int    s_storySel = 0;      // 当前故事目录选中项
 static int    s_storyCatSel = 0;   // /story 一级分类选中项
+static int    s_videoSel = 0;      // 视频列表选中项
+static uint32_t s_videoStartAt = 0;  // 本次起播时刻 (片名显示 3 秒)
+static uint32_t s_videoActAt   = 0;  // 最近一次操作时刻 (控制条显示 4 秒)
 static String s_storyPath;         // 当前浏览的故事目录 (/story 或更深)
 static int    s_storyPlayIndex = 0;  // 当前目录播放列表中的序号
 static int    s_storyPlayCount = 1;  // 当前目录可播放条目数
@@ -114,7 +121,9 @@ static void showStoryListAt(const String& path);
 static void startStory(int view);
 static void playStoryActual(int actual);
 static void showTrackList();
-static void showNurseryList();
+static void showVideoList();
+static void playVideo(int i);
+static void stopVideoToList();
 static void showNoContent();
 static void showEmpty(const char* title, const char* line1, const char* line2);
 static void showBindCode(Screen back);
@@ -138,6 +147,7 @@ static void showHome() {
 
 static void goHome() {
   if (Story::active()) Story::stop();
+  if (Video::active()) Video::stop();
   showHome();
 }
 
@@ -170,7 +180,6 @@ static void applyParentalConfig() {
 
   if (Parental::allowlistEnabled()) {
     int ci = Storage::currentCategory();
-    /* 童谣是跨分类汇总, 没有单一分类可判断; 构建列表时已按白名单过滤 */
     if (ci >= 0 && !categoryVisible(ci) && s_screen != Screen::Locked) {
       if (Story::active()) {
         Story::stop();
@@ -190,8 +199,6 @@ static void applyParentalConfig() {
   /* 白名单变化后可见列表可能整体改变, 当前列表页需要重绘 */
   if (s_screen == Screen::MusicList) {
     showMusicList();
-  } else if (s_screen == Screen::NurseryList) {
-    showNurseryList();
   } else if (s_screen == Screen::StoryList || s_screen == Screen::StoryError) {
     showStoryList();
   } else if (s_screen == Screen::StoryCategoryList) {
@@ -207,14 +214,12 @@ static void changeVolume(int delta) {
   Session::setVolume(v);            // 变化时落盘 (3 字节小记录, 拧旋钮也不拖慢 UI)
 }
 
-/* 把"当前分类 + 当前曲目 uuid"写进 FRAM; 内容未变时 Session 内部直接跳过。
-   童谣汇总用固定名字"童谣"记忆, 开机后按名字恢复。 */
+/* 把"当前分类 + 当前曲目 uuid"写进 FRAM; 内容未变时 Session 内部直接跳过。 */
 static void rememberPosition() {
   PlayerStatus st = Player::status();
   int ci = Storage::currentCategory();
   const char* cat = "";
-  if (ci == Storage::NURSERY_CATEGORY) cat = "童谣";
-  else if (ci > 0)                    cat = Storage::catName(ci);   // 0 = 全部歌曲, 存空串
+  if (ci > 0) cat = Storage::catName(ci);   // 0 = 全部歌曲, 存空串
   uint32_t id = (st.index >= 0)
               ? Storage::trackId(Storage::viewTrackGlobal(st.index))
               : 0;
@@ -241,8 +246,6 @@ static void exitSettings() {
     showMusicList();
   } else if (s_settingsBack == Screen::TrackList) {
     showTrackList();
-  } else if (s_settingsBack == Screen::NurseryList) {
-    showNurseryList();
   } else if (s_settingsBack == Screen::StoryList || s_settingsBack == Screen::StoryError) {
     showStoryList();
   } else if (s_settingsBack == Screen::StoryCategoryList) {
@@ -381,11 +384,15 @@ static void restoreBindBack() {
       s_screen      = Screen::StoryAudio;   // 返回音频故事播放页
       s_audioRedraw = true;
       break;
+    case Screen::VideoPlay:
+      s_screen     = Screen::VideoPlay;     // 视频已在显示绑定码前暂停
+      s_videoActAt = millis();
+      break;
+    case Screen::VideoList:
+      showVideoList();
+      break;
     case Screen::TrackList:
       showTrackList();
-      break;
-    case Screen::NurseryList:
-      showNurseryList();
       break;
     case Screen::StoryList:
     case Screen::StoryError:
@@ -432,50 +439,92 @@ static void playMusicIndex(int i) {
   Ui::update(Player::status(), Hall::detected());
 }
 
-/* 童谣列表按下播放: 此时才把预览列表切换为当前播放列表 */
-static void playNurseryIndex(int i) {
-  if (!Storage::selectNursery()) return;
-  playMusicIndex(i);
-}
-
-/* 绘制当前分类的歌曲列表 (正在播放的曲目高亮), 无曲目则回分类列表。
-   如果当前播放的是童谣汇总, 仍按童谣列表显示, 避免页脚提示和列表来源不一致。 */
+/* 绘制当前分类的歌曲列表 (正在播放的曲目高亮), 无曲目则回分类列表。 */
 static void showTrackList() {
   int n = Storage::count();
   if (n == 0) { showEmpty("这个分类还没有歌", "请添加 MP3 后刷新列表", nullptr); return; }
   PlayerStatus st = Player::status();
-  bool nursery = (Storage::currentCategory() == Storage::NURSERY_CATEGORY);
   s_trackPlaying = (st.index >= 0 && st.index < n) ? st.index : 0;
   s_trackSel     = s_trackPlaying;
-  s_screen = nursery ? Screen::NurseryList : Screen::TrackList;
-  Ui::drawTrackList(n, s_trackSel, s_trackPlaying, nursery);
+  s_screen = Screen::TrackList;
+  Ui::drawTrackList(n, s_trackSel, s_trackPlaying);
 }
 
-/* 童谣汇总列表: 分类名含"童谣/儿歌"的曲目集合, 复用歌曲列表 UI。
-   浏览阶段只读预览列表, 不替换当前播放列表; 按下 OK 才真正切换 (见 playNurseryIndex)。 */
-static void showNurseryList() {
-  int n = Storage::nurseryCount();
+/* ---------------- 视频模式 ---------------- */
+
+/* /video 列表: 进入时重新扫描目录, 新拷入的视频不用刷新整卡索引 */
+static void showVideoList() {
+  int n = Video::scan();
   if (n == 0) {
-    showEmpty("还没有童谣", "把儿歌放进 /music/童谣", "然后在设置中刷新列表");
+    showEmpty("还没有视频", "把 MJPEG AVI 放进 /video", "用 tools/build_video.mjs 转换");
+    return;
+  }
+  if (s_videoSel >= n) s_videoSel = 0;
+  if (s_videoSel < 0)  s_videoSel = 0;
+  const int playing = Video::active() ? Video::index() : -1;
+  s_screen = Screen::VideoList;
+  Ui::drawVideoList(n, s_videoSel, playing);
+}
+
+/* 停止视频并回到列表 (返回后列表照常可用) */
+static void stopVideoToList() {
+  Video::stop();
+  showVideoList();
+}
+
+/* 暂停/继续: 画面计时和音轨必须同时停, 否则恢复后会对不上 */
+static void toggleVideoPause() {
+  if (!Video::active()) return;
+  const bool next = !Video::paused();
+  Video::pause(next);
+  if (Video::hasAudio()) Player::toggle();
+  s_videoActAt = millis();
+}
+
+/* 打开并起播第 i 个视频: 解析 AVI 索引可能耗时, 先提交等待页 */
+static void playVideo(int i) {
+  if (!Parental::canPlay()) return;
+  const int n = Video::count();
+  if (i < 0 || i >= n) return;
+  s_videoSel = i;
+
+  if (Story::active()) Story::stop();
+  Ui::drawVideoLoadingBegin(Video::title(i));
+  Display::present(true);
+
+  if (!Video::open(i)) {
+    s_screen = Screen::VideoError;
+    Ui::boot("视频无法播放", Video::errorText());
     return;
   }
 
-  bool active = (Storage::currentCategory() == Storage::NURSERY_CATEGORY &&
-                 Storage::count() == n);
-  PlayerStatus st = Player::status();
-  /* 正在播别的分类时不要在新列表里误标"播放中" */
-  int playing = (active && st.index >= 0 && st.index < n) ? st.index : -1;
-  s_trackPlaying = playing;
-  s_trackSel     = (playing >= 0) ? playing : 0;
-  s_screen = Screen::NurseryList;
-  Ui::drawTrackList(n, s_trackSel, s_trackPlaying, true);
+  Player::setAutoNext(false);              // 视频只放一遍, 结束由本文件处理
+  if (Video::hasAudio()) Player::playPath(Video::audioPath(), true);
+  else                   Player::stop();   // 静音视频: 别把上一首音乐留在后台
+
+  Video::start();
+  s_screen       = Screen::VideoPlay;
+  s_videoStartAt = millis();
+  s_videoActAt   = s_videoStartAt;
+  Ui::drawVideoBar(0, Video::durationMs(), Player::status().volume, false, true, true);
+  Serial.printf("[VID] play #%d %s (%d frames, %d ms)%s\n", i, Video::name(i),
+                Video::frameCount(), Video::durationMs(),
+                Video::hasAudio() ? "" : " [silent]");
 }
 
-/* 记忆里的分类是否就是 actual (0=全部歌曲, NURSERY_CATEGORY=童谣汇总) */
+/* 列表内切换上一个/下一个视频 */
+static void switchVideo(int delta) {
+  const int n = Video::count();
+  if (n <= 0) return;
+  int cur = Video::index();
+  if (cur < 0) cur = s_videoSel;
+  playVideo((cur + delta + n) % n);
+}
+
+/* 记忆里的分类是否就是 actual (0=全部歌曲) */
 static bool sessionMatchesCategory(int actual) {
   const char* cat = Session::category();
-  if (actual == Storage::NURSERY_CATEGORY) return strcmp(cat, "童谣") == 0;
-  if (actual == 0)                         return cat[0] == 0;
+  if (actual == 0) return cat[0] == 0;
   return cat[0] != 0 && strcmp(cat, Storage::catName(actual)) == 0;
 }
 
@@ -490,6 +539,22 @@ static int sessionTrackIndex() {
 static void startMusicCategory(int viewCi) {
   int ci = Storage::viewCatActual(viewCi);
   if (ci < 0 || !categoryVisible(ci)) return;
+
+  /* 这个分类的播放列表已经在播放器里 (播放中或暂停): 直接回播放页。
+     否则下面会重新选分类并起播, 从主页再进一次列表就会把正在放的歌
+     从头重放一遍。 */
+  PlayerStatus cur = Player::status();
+  if (!Story::active() && cur.playing && Storage::currentCategory() == ci &&
+      cur.index >= 0 && cur.index < Storage::count()) {
+    s_musicSel     = viewCi;
+    s_trackSel     = cur.index;
+    s_trackPlaying = cur.index;
+    s_screen       = Screen::Main;
+    Ui::drawStatic();
+    Ui::update(cur, Hall::detected());
+    return;
+  }
+
   if (!Storage::selectCategory(ci)) {          // 该分类无曲目: 停留列表
     Serial.printf("[MUS] category %d has no track\n", ci);
     return;
@@ -527,21 +592,16 @@ static bool restoreSessionPlayback() {
   if (!id || !Parental::canPlay()) return false;      // 没有记忆或被家长限制
 
   const char* cat = Session::category();
-
-  if (strcmp(cat, "童谣") == 0) {                     // 童谣汇总列表
-    if (!Storage::selectNursery()) return false;
-  } else {
-    int view = -1;
-    for (int i = 0; i < Storage::viewCatCount(); i++) {
-      int actual = Storage::viewCatActual(i);
-      bool match = (cat[0] == 0) ? (actual == 0)
-                                 : (strcmp(Storage::viewCatName(i), cat) == 0);
-      if (match) { view = i; break; }
-    }
-    if (view < 0) return false;                       // 记住的分类不在了
-    if (!Storage::selectCategory(Storage::viewCatActual(view))) return false;
-    s_musicSel = view;
+  int view = -1;
+  for (int i = 0; i < Storage::viewCatCount(); i++) {
+    int actual = Storage::viewCatActual(i);
+    bool match = (cat[0] == 0) ? (actual == 0)
+                               : (strcmp(Storage::viewCatName(i), cat) == 0);
+    if (match) { view = i; break; }
   }
+  if (view < 0) return false;                         // 记住的分类不在了
+  if (!Storage::selectCategory(Storage::viewCatActual(view))) return false;
+  s_musicSel = view;
 
   int idx = sessionTrackIndex();
   if (idx < 0) idx = 0;                               // 列表里匹配不到 -> 从第一首开始
@@ -769,6 +829,26 @@ static void startStoryActual(int actual) {
 /* BLE 下发的播放控制: 在 main loop 里执行, 保证 UI/Player 访问在同一任务 */
 static void handleBleCommand(const Ble::Command& c) {
   if (FileXfer::busy()) return;
+
+  /* 视频播放中: 手机端的播放/暂停/切换同样作用在视频上, 否则音轨会和画面对不上。
+     手机点播故事/音乐时先停掉视频, 再走下面的原有逻辑。 */
+  if (Video::active()) {
+    switch (c.action) {
+      case Ble::Action::Play:   if (Video::paused())  toggleVideoPause(); return;
+      case Ble::Action::Pause:  if (!Video::paused()) toggleVideoPause(); return;
+      case Ble::Action::Toggle: toggleVideoPause(); return;
+      case Ble::Action::Next:   switchVideo(1);  return;
+      case Ble::Action::Prev:   switchVideo(-1); return;
+      case Ble::Action::Stop:   Video::stop(); showVideoList(); return;
+      case Ble::Action::PlayStory:
+      case Ble::Action::PlayMusic:
+        Video::stop();
+        s_screen = Screen::VideoList;
+        break;
+      default: break;
+    }
+  }
+
   switch (c.action) {
     case Ble::Action::Volume:
       setVolumeLimited(c.value);
@@ -850,11 +930,15 @@ static void armLock(Parental::Lock lk) {
                s_screen == Screen::StoryList || s_screen == Screen::StoryCategoryList ||
                s_screen == Screen::StoryError) {
       s_lockedBack = Screen::StoryList;
+    } else if (s_screen == Screen::VideoPlay || s_screen == Screen::VideoList ||
+               s_screen == Screen::VideoError) {
+      s_lockedBack = Screen::VideoList;
     } else {
       s_lockedBack = Screen::MusicList;
     }
-    if (Story::active()) Story::stop();
-    else                 Player::stop();
+    if (Story::active())      Story::stop();
+    else if (Video::active()) Video::stop();
+    else                      Player::stop();
     s_screen = Screen::Locked;
   }
   if (s_lockShown == lk) return;
@@ -882,6 +966,36 @@ static void armLock(Parental::Lock lk) {
 }
 
 /* ---------------- setup / loop ---------------- */
+
+#ifdef TFT_BL_SWEEP
+/* 背光啸叫排查: 每 4 秒换一个调光频率, 屏幕显示当前值, 串口同步打印。
+   用法: platformio.ini 的 build_flags 加 -DTFT_BL_SWEEP, 烧录后听哪个频率最安静,
+   再把 -DTFT_BL_FREQ=<那个值> 固定下来。 */
+static void runBacklightSweep() {
+  static const uint32_t kFreqs[] = {1000, 2000, 4000, 5000, 8000, 12000,
+                                    16000, 20000, 25000, 30000, 35000};
+  Display::setBrightness(60);          // 100% 时没有 PWM, 听不出问题
+  for (uint32_t hz : kFreqs) {
+    Display::setBacklightFreq(hz);
+    char b[24];
+    snprintf(b, sizeof(b), "%u Hz", (unsigned)hz);
+    auto& g = Display::canvas();
+    g.fillScreen(TFT_BLACK);
+    g.setFont(&lgfx::fonts::Font4);
+    g.setTextColor(TFT_WHITE, TFT_BLACK);
+    g.drawCenterString(b, 160, 92);
+    g.setFont(&lgfx::fonts::Font2);
+    g.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    g.drawCenterString("listen for the whine", 160, 126);
+    Display::present(true);
+    Serial.printf("[BL] sweep %u Hz\n", (unsigned)hz);
+    delay(4000);
+  }
+  Display::setBacklightFreq(TFT_BL_FREQ);
+  Display::setBrightness(Settings::data().brightness);
+  Serial.println("[BL] sweep done");
+}
+#endif
 
 void setup() {
   Serial.setRxBufferSize(32768);    // 上位机文件传输分块较大
@@ -931,12 +1045,13 @@ void setup() {
     Ui::boot("SD CARD ERROR", "Insert TF card then reset");
   } else {
     auto result = Catalog::begin();
+    Video::scan();                     // /video 不进媒体索引: 每次启动单独扫, 缺目录会创建
     if (result == Catalog::Result::ScanFailed) {
       Ui::boot("列表读取失败", "请在设置中刷新列表");
     } else if (result == Catalog::Result::SaveFailed) {
       Ui::boot("索引保存失败", "本次列表可用，请检查SD卡");
-    } else if (Storage::totalCount() == 0 && Story::count() == 0) {
-      Ui::boot("NO MEDIA FOUND", "Copy files to /music or /story");
+    } else if (Storage::totalCount() == 0 && Story::count() == 0 && Video::count() == 0) {
+      Ui::boot("NO MEDIA FOUND", "Copy files to /music, /story or /video");
     } else {
       Ui::boot("MUSIC PLAYER", "Ready - press OK to select");
     }
@@ -944,7 +1059,7 @@ void setup() {
     Serial.printf("[SD ] %d folder(s):", Storage::catCount() - 1);
     for (int i = 1; i < Storage::catCount(); i++)
       Serial.printf(" %s(%d)", Storage::catName(i), Storage::catTrackCount(i));
-    Serial.println();
+    Serial.printf(" | %d video(s)\n", Video::count());
   }
   Display::present(true);
   delay(600);
@@ -977,6 +1092,9 @@ void setup() {
   }
 
   restoreSessionSelection();        // 音乐列表光标回到上次分类
+#ifdef TFT_BL_SWEEP
+  runBacklightSweep();              // 临时: 背光频率扫频, -DTFT_BL_SWEEP
+#endif
   /* 有可用的收听记忆就直接回播放页 (曲目已载入但暂停, 按 OK 继续); 否则回主页 */
   if (!restoreSessionPlayback()) showHome();
 #ifdef POWER_TEST_AUTOPLAY
@@ -992,6 +1110,13 @@ void setup() {
 }
 
 void loop() {
+  // 每帧结束时主动让出 1ms，既给音频任务/idle 留出 CPU，也让上位机能
+  // 从"执行时间 / 总时间"估算主循环占用率。传输期间不让出，避免拖慢 SD。
+  struct FrameScope {
+    FrameScope() { SysMon::frameBegin(); }
+    ~FrameScope() { SysMon::frameEnd(!FileXfer::busy()); }
+  } frameScope;
+
   // 即使页面处理提前 return，也在所有绘制完成后提交；输入仍可高速轮询。
   // 熄屏时跳过推屏: 省下每秒几十次整屏 SPI 传输。
   struct PresentOnExit {
@@ -1034,10 +1159,17 @@ void loop() {
   for (int i = 0; i < 4 && Ble::takeCommand(bleCmd); i++) handleBleCommand(bleCmd);
 
   PlayerStatus ps = Player::status();
-  Parental::tick(ps.playing && !ps.paused);
+  /* 视频可能没有音轨 (静音 AVI), 只按播放器状态判断会在看视频时误休眠 */
+  const bool mediaPlaying = (ps.playing && !ps.paused) ||
+                            (Video::active() && !Video::paused());
+  Parental::tick(mediaPlaying);
 
-  /* 电源管理: 播放中空闲只熄屏; 无播放空闲进深度休眠 (进去就不返回了) */
-  bool woke = Power::loop(ps.playing && !ps.paused);
+  /* 电源管理: 播放中空闲只熄屏; 无播放空闲进深度休眠 (进去就不返回了)。
+     熄屏后本函数会在下面直接 return, 界面分支里的按键读取都不会执行,
+     所以必须先把输入扫一遍: 否则 Input::lastActivityMs() 永远不变,
+     "播放中熄屏"后就再也收不到唤醒动作, 只能断电重启。 */
+  if (Power::screenOff()) Input::poll();
+  bool woke = Power::loop(mediaPlaying, Video::active() && !Video::paused());
 
   if (Ble::takeConfigChanged()) applyParentalConfig();
 
@@ -1062,6 +1194,7 @@ void loop() {
     s_lockShown = Parental::Lock::None;
     if      (s_lockedBack == Screen::StoryCategoryList) showStoryCategoryList();
     else if (s_lockedBack == Screen::StoryList) showStoryList();
+    else if (s_lockedBack == Screen::VideoList) showVideoList();
     else if (s_lockedBack == Screen::Home)      goHome();
     else                                        showMusicList();
     return;
@@ -1071,13 +1204,15 @@ void loop() {
   bool bleConnected = Ble::connected();
   if (bleConnected && !s_bleWasConnected && !Parental::bound() &&
       s_screen != Screen::Bind && s_screen != Screen::Locked) {
+    if (Video::active() && !Video::paused()) toggleVideoPause();  // 别让画面在配对页后面空转
     showBindCode(s_screen);
   }
   s_bleWasConnected = bleConnected;
 
   /* 唤醒那一下只用来点亮屏幕, 不顺带执行按键功能 */
   if (woke) return;
-  /* 熄屏期间不跑界面逻辑: 省电, 也避免误触 (后台任务已在上面跑过了) */
+  /* 熄屏期间不跑界面逻辑: 省电, 也避免误触 (输入已在上面由 Input::poll() 扫过,
+     后台任务也都在上面跑过了) */
   if (Power::screenOff()) return;
 
   switch (s_screen) {
@@ -1106,7 +1241,7 @@ void loop() {
       switch (s_homeSel) {
         case 0:  showMusicList();   break;
         case 1:  showStoryCategoryList(); break;
-        case 2:  showNurseryList(); break;
+        case 2:  showVideoList(); break;
         default: enterSettings();   break;
       }
       return;
@@ -1155,24 +1290,14 @@ void loop() {
     break;
   }
 
-  /* ---------------- 歌曲列表 / 童谣汇总列表 ---------------- */
-  case Screen::TrackList:
-  case Screen::NurseryList: {
-    const bool nursery = (s_screen == Screen::NurseryList);
-    int n = nursery ? Storage::nurseryCount() : Storage::count();
-    if (n == 0) {
-      if (nursery) showNurseryList();
-      else         showTrackList();
-      return;
-    }
+  /* ---------------- 歌曲列表 ---------------- */
+  case Screen::TrackList: {
+    int n = Storage::count();
+    if (n == 0) { showTrackList(); return; }
 
     int8_t enc = Input::encEvent();
     if (enc == 2) { goHome(); return; }                         // SET 长按: 回主页
-    if (enc == 1) {                                             // SET 短按: 播放选中曲目
-      if (nursery) playNurseryIndex(s_trackSel);
-      else         playMusicIndex(s_trackSel);
-      return;
-    }
+    if (enc == 1) { playMusicIndex(s_trackSel); return; }        // SET 短按: 播放选中曲目
 
     int8_t nx = Input::nextEvent();
     int8_t pv = Input::prevEvent();
@@ -1186,40 +1311,121 @@ void loop() {
     int move = Input::encoderSteps() + (nx == 1 ? 1 : 0) + (pv == 1 ? -1 : 0);
     if (move != 0 && n > 0) {
       s_trackSel = (int)((s_trackSel + move % n + n) % n);
-      Ui::updateTrackList(n, s_trackSel, s_trackPlaying, nursery);
+      Ui::updateTrackList(n, s_trackSel, s_trackPlaying);
       return;
     }
 
     switch (Input::okEvent()) {
       case 1:                                                   // 单击: 播放选中曲目
-        if (nursery) playNurseryIndex(s_trackSel);
-        else         playMusicIndex(s_trackSel);
+        playMusicIndex(s_trackSel);
         return;
       case 3: {                                                 // 长按: 收藏/取消收藏
-        int gi = nursery ? Storage::nurseryGlobal(s_trackSel)
-                         : Storage::viewTrackGlobal(s_trackSel);
+        int gi = Storage::viewTrackGlobal(s_trackSel);
         if (gi >= 0) {
           bool on = Favorites::toggle(gi);
           Serial.printf("[FAV] track %d -> %s\n", gi, on ? "on" : "off");
-          Ui::drawTrackList(n, s_trackSel, s_trackPlaying, nursery);
+          Ui::drawTrackList(n, s_trackSel, s_trackPlaying);
         }
         return;
       }
       default: break;
     }
 
-    /* 自动续播换曲时同步"播放中"高亮。
-       童谣列表未真正切为当前播放列表时, 不在这里写会话记忆。 */
+    /* 自动续播换曲时同步"播放中"高亮, 并更新 FRAM 记忆 */
     static uint32_t lastSync = 0;
-    if (millis() - lastSync > 500 && (!nursery || Storage::currentCategory() == Storage::NURSERY_CATEGORY)) {
+    if (millis() - lastSync > 500) {
       lastSync = millis();
       int cur = Player::status().index;
       if (cur >= 0 && cur < n && cur != s_trackPlaying) {
         s_trackPlaying = cur;
-        Ui::updateTrackList(n, s_trackSel, s_trackPlaying, nursery);
+        Ui::updateTrackList(n, s_trackSel, s_trackPlaying);
       }
-      rememberPosition();           // 在列表页自动续播时也要更新记忆
+      rememberPosition();
     }
+    break;
+  }
+
+  /* ---------------- 视频列表 ---------------- */
+  case Screen::VideoList: {
+    int n = Video::count();
+    if (n == 0) { showVideoList(); return; }
+
+    int8_t enc = Input::encEvent();
+    if (enc == 2) { goHome(); return; }                          // SET 长按: 回主页
+    if (enc == 1) { playVideo(s_videoSel); return; }              // SET 短按: 播放选中视频
+
+    int8_t nx = Input::nextEvent();
+    int8_t pv = Input::prevEvent();
+    if (nx == 2 || pv == 2) {                                     // 长按: 回到正在播放的视频
+      if (Video::active()) {
+        s_screen     = Screen::VideoPlay;
+        s_videoActAt = millis();
+      }
+      return;
+    }
+
+    int move = Input::encoderSteps() + (nx == 1 ? 1 : 0) + (pv == 1 ? -1 : 0);
+    if (move != 0) {
+      s_videoSel = (int)((s_videoSel + move % n + n) % n);
+      Ui::updateVideoList(n, s_videoSel, Video::active() ? Video::index() : -1);
+      return;
+    }
+
+    if (Input::okEvent() == 1) { playVideo(s_videoSel); return; }
+    break;
+  }
+
+  /* ---------------- 视频播放 ---------------- */
+  case Screen::VideoPlay: {
+    Video::loop();                                   // 到点就解码下一帧并画进画布
+
+    if (Video::takeFinished()) {                     // 放完: 自动下一个, 末尾回列表
+      const int n = Video::count();
+      const int next = Video::index() + 1;
+      if (next < n) playVideo(next);
+      else          stopVideoToList();
+      return;
+    }
+
+    int8_t enc = Input::encEvent();
+    if (enc == 2) { Video::stop(); goHome(); return; }   // SET 长按: 停止并回主页
+    if (enc == 1) { toggleVideoPause(); return; }        // SET 短按: 暂停/继续
+
+    int8_t nx = Input::nextEvent();
+    int8_t pv = Input::prevEvent();
+    if (nx == 1) { switchVideo(1);  return; }            // 短按: 下一个视频
+    if (pv == 1) { switchVideo(-1); return; }            // 短按: 上一个视频
+    if (nx == 2) {                                       // 长按: 暂停并看列表
+      if (!Video::paused()) toggleVideoPause();
+      showVideoList();
+      return;
+    }
+    if (pv == 2) { stopVideoToList(); return; }          // 长按 LAST: 停止回列表
+
+    switch (Input::okEvent()) {
+      case 1: toggleVideoPause(); break;                 // 单击: 暂停/继续
+      case 3: stopVideoToList(); return;                 // 长按: 停止并返回列表
+      default: break;
+    }
+
+    int steps = Input::encoderSteps();
+    if (steps) { changeVolume(steps); s_videoActAt = millis(); }
+
+    /* 控制条: 暂停时或操作后 4 秒内显示; 片名只在起播 3 秒内和暂停时显示 */
+    const bool bar   = Video::paused() || (millis() - s_videoActAt < 4000);
+    const bool title = bar && (Video::paused() || (millis() - s_videoStartAt < 3000));
+    Ui::drawVideoStats(Video::actualFps(), Video::droppedFrames());
+    Ui::drawVideoBar(Video::positionMs(), Video::durationMs(),
+                     Player::status().volume, Video::paused(), bar, title);
+    break;
+  }
+
+  /* ---------------- 视频打不开 ---------------- */
+  case Screen::VideoError: {
+    Input::encoderSteps();                            // 丢弃旋钮步数
+    int8_t enc = Input::encEvent();
+    if (enc == 2) { goHome(); return; }
+    if (enc == 1 || Input::okEvent() == 1) { showVideoList(); return; }
     break;
   }
 

@@ -4,6 +4,7 @@ export type View =
   | 'writer'
   | 'library'
   | 'files'
+  | 'center'
   | 'device'
   | 'extensions'
   | 'settings'
@@ -51,6 +52,13 @@ export const VIEW_META: Record<View, ViewMeta> = {
     eyebrow: 'FILES',
     title: '文件',
     description: '像 Windows 资源管理器一样管理 TF 卡：拖放、粘贴、上传和下载。'
+  },
+  center: {
+    view: 'center',
+    label: '设备中心',
+    eyebrow: 'DEVICE CENTER',
+    title: '设备中心',
+    description: 'CPU、内存、Flash、TF 卡与设备内部配置，一屏掌握故事盒的运行状态。'
   },
   device: {
     view: 'device',

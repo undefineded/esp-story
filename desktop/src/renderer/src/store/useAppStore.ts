@@ -2,8 +2,10 @@ import { create } from 'zustand'
 import type {
   ActivityEntry,
   ConnectionStatus,
+  DeviceConfigPatch,
   DeviceEvent,
   DeviceInfo,
+  DeviceSystemStats,
   LogEntry,
   NfcCard,
   NfcStatus,
@@ -77,6 +79,8 @@ interface AppStore {
   connection: ConnectionStatus
   ports: PortInfo[]
   device?: DeviceInfo
+  deviceStats?: DeviceSystemStats
+  deviceStatsError?: string
   nfc: NfcStatus
   card?: NfcCard
   history: NfcCard[]
@@ -112,6 +116,8 @@ interface AppStore {
   demoPlaceCard: () => void
   demoRemoveCard: () => void
   pingDevice: () => Promise<{ uptime: number; heap: number } | null>
+  fetchDeviceStats: (silent?: boolean) => Promise<DeviceSystemStats | null>
+  updateDeviceConfig: (patch: DeviceConfigPatch, quiet?: boolean) => Promise<void>
 }
 
 function emptyConnection(): ConnectionStatus {
@@ -170,7 +176,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     const connected = status.state === 'connected'
     if (connected && status.device) {
       const nfc = { ...emptyNfc(), ...status.device.nfc }
-      set({ connection: status, device: status.device, nfc })
+      set({ connection: status, device: status.device, nfc, deviceStatsError: undefined })
       if (!wasConnected) {
         wasConnected = true
         addActivity('connect', '设备已连接', `${status.device.name} · ${status.port ?? ''}`)
@@ -182,7 +188,15 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     if (status.state === 'disconnected' || status.state === 'error') {
       wasConnected = false
-      set({ connection: status, device: status.device, card: undefined, nfc: emptyNfc(), write: idleWrite() })
+      set({
+        connection: status,
+        device: status.device,
+        deviceStats: undefined,
+        deviceStatsError: undefined,
+        card: undefined,
+        nfc: emptyNfc(),
+        write: idleWrite()
+      })
       if (status.state === 'error' && status.message) addLog('error', status.message)
       return
     }
@@ -316,6 +330,8 @@ export const useAppStore = create<AppStore>((set, get) => {
     connection: emptyConnection(),
     ports: [],
     device: undefined,
+    deviceStats: undefined,
+    deviceStatsError: undefined,
     nfc: emptyNfc(),
     card: undefined,
     history: [],
@@ -615,6 +631,30 @@ export const useAppStore = create<AppStore>((set, get) => {
       } catch (err) {
         get().showToast('error', 'Ping 失败', err instanceof Error ? err.message : String(err))
         return null
+      }
+    },
+
+    fetchDeviceStats: async (silent = true) => {
+      try {
+        const stats = await bridge.systemStats()
+        set({ deviceStats: stats, deviceStatsError: undefined })
+        return stats
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        set({ deviceStatsError: message })
+        if (!silent) get().showToast('error', '读取设备状态失败', message)
+        return null
+      }
+    },
+
+    updateDeviceConfig: async (patch, quiet = false) => {
+      try {
+        const stats = await bridge.setSystemConfig(patch)
+        set({ deviceStats: stats, deviceStatsError: undefined })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        set({ deviceStatsError: message })
+        if (!quiet) get().showToast('error', '同步设置失败', message)
       }
     }
   }

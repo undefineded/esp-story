@@ -1,8 +1,10 @@
 import type {
   AppSettings,
   ConnectionStatus,
+  DeviceConfigPatch,
   DeviceEvent,
   DeviceInfo,
+  DeviceSystemStats,
   FileBridge,
   FsDownloadResult,
   FsListing,
@@ -104,6 +106,8 @@ export class MockBridge implements NfcBridge {
   private logId = 0
   private startedAt = Date.now()
   private writing = false
+  private volume = 12
+  private brightness = 100
 
   private fsRoot: MockNode = {
     name: '',
@@ -146,7 +150,18 @@ export class MockBridge implements NfcBridge {
       board: 'ESP32-S3',
       name: 'StoryBox-3F2A',
       role: 'storybox',
-      features: ['nfc', 'nfc.ndef', 'nfc.raw', 'nfc.write-verify', 'fs', 'fs.read', 'fs.write', 'fs.sd'],
+      features: [
+        'nfc',
+        'nfc.ndef',
+        'nfc.raw',
+        'nfc.write-verify',
+        'fs',
+        'fs.read',
+        'fs.write',
+        'fs.sd',
+        'sys.stats',
+        'sys.control'
+      ],
       nfc: this.nfc
     }
   }
@@ -409,6 +424,105 @@ export class MockBridge implements NfcBridge {
 
   async ping(): Promise<{ uptime: number; heap: number }> {
     return { uptime: Date.now() - this.startedAt, heap: 219384 }
+  }
+
+  async systemStats(): Promise<DeviceSystemStats> {
+    const now = Date.now()
+    const uptime = Math.floor((now - this.startedAt) / 1000)
+    const load = Math.round(
+      Math.max(5, Math.min(94, 29 + Math.sin(now / 7200) * 8 + Math.cos(now / 1900) * 3 + (this.writing ? 18 : 0)))
+    )
+    const heapTotal = 327680
+    const heapFree = Math.round(219384 + Math.sin(now / 5400) * 7200)
+    const psramTotal = 8 * 1024 * 1024
+    const psramFree = Math.round(7.62 * 1024 * 1024 + Math.sin(now / 8100) * 18000)
+    const flashSize = 16 * 1024 * 1024
+    const appSize = 2473504
+    const appFree = 0x7f0000 - appSize
+    const storageTotal = 32 * 1024 * 1024 * 1024
+    const storageUsed = this.fsUsedBytes()
+    return {
+      uptime,
+      cpu: {
+        load,
+        cores: 2,
+        freq: 240,
+        model: 'ESP32-S3',
+        revision: 0,
+        sdk: 'v4.4.7'
+      },
+      ram: {
+        heapTotal,
+        heapFree,
+        heapMin: Math.round(heapFree - 14600),
+        psramTotal,
+        psramFree
+      },
+      rom: {
+        flashSize,
+        appSize,
+        appTotal: appSize + appFree,
+        appFree,
+        partition: 'factory'
+      },
+      storage: {
+        ready: true,
+        total: storageTotal,
+        used: storageUsed,
+        free: storageTotal - storageUsed,
+        tracks: 3,
+        stories: 3
+      },
+      settings: {
+        volume: this.volume,
+        volumeMax: 21,
+        brightness: this.brightness,
+        brightnessMin: 10,
+        rotation: 3,
+        eq: 'VOCAL',
+        screenOffMin: 5,
+        sleepMin: 1,
+        ble: true,
+        wifi: false,
+        ap: false,
+        childLock: false,
+        bound: true,
+        name: this.device.name,
+        fw: this.device.fw,
+        proto: 4,
+        role: 'storybox'
+      },
+      network: {
+        wifi: false,
+        ap: false,
+        apSsid: 'StoryBox-3F2A'
+      },
+      player: {
+        playing: false,
+        paused: true,
+        hasTrack: true,
+        story: true,
+        title: '月亮邮递员 · 第 03 集',
+        codec: 'MP3',
+        curSec: 83,
+        durSec: 326,
+        bitrate: 128,
+        sampleRate: 44100,
+        volume: this.volume
+      }
+    }
+  }
+
+  async setSystemConfig(patch: DeviceConfigPatch): Promise<DeviceSystemStats> {
+    if (typeof patch.volume === 'number') {
+      this.volume = Math.max(0, Math.min(21, Math.round(patch.volume)))
+      await delay(60)
+    }
+    if (typeof patch.brightness === 'number') {
+      this.brightness = Math.max(10, Math.min(100, Math.round(patch.brightness)))
+      await delay(60)
+    }
+    return this.systemStats()
   }
 
   /* ---------- in-memory TF card ---------- */

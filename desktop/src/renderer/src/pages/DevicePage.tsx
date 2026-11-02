@@ -351,7 +351,7 @@ export function DevicePage() {
                 <div className="panel-title">
                   <Terminal size={15} /> USB 协议速览
                 </div>
-                <div className="panel-sub">新行分隔 JSON · v2</div>
+                <div className="panel-sub">SBX4 二进制帧 · JSON v4</div>
               </div>
               <Pill tone="violet">可扩展</Pill>
             </div>
@@ -363,6 +363,18 @@ export function DevicePage() {
                       <code>sys · hello</code>
                     </td>
                     <td>握手，返回板卡、固件与能力列表</td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>sys · stats</code>
+                    </td>
+                    <td>CPU / RAM / Flash / TF 卡与内部配置（设备中心）</td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>sys · set</code>
+                    </td>
+                    <td>写回设备音量与屏幕亮度</td>
                   </tr>
                   <tr>
                     <td>

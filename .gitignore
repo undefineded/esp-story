@@ -4,6 +4,11 @@
 .vscode/launch.json
 .vscode/ipch
 
-# 根目录的临时/参考文件 (音频搬运、电路网表), 不纳入版本管理
+# 根目录的临时/参考文件 (音频/视频素材、电路网表), 不纳入版本管理
 /*.mp3
+/*.mp4
+/*.mov
 Netlist_*.enet
+
+# 视频转码输出 (tools/build_video.mjs 默认目录)
+/out-video/

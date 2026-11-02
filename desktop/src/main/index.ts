@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { SettingsStore } from './settings'
 import { NfcSession, listPorts } from './serial'
 import { transferWindow } from '@shared/transfer'
-import type { AppSettings, FsProgress, RawReadRequest } from '@shared/types'
+import type { AppSettings, DeviceConfigPatch, FsProgress, RawReadRequest } from '@shared/types'
 
 // 独立数据目录：避免复用 Electron 默认 profile 时被旧缓存/单例锁影响。
 // 软件渲染在这类没有 GPU 进程权限的环境里更稳定，桌面工具的性能足够。
@@ -316,6 +316,10 @@ function registerIpc(): void {
       session.writeRaw(req)
   )
   ipcMain.handle('device:ping', () => session.ping())
+  ipcMain.handle('device:system-stats', () => session.systemStats())
+  ipcMain.handle('device:set-system-config', (_event, patch: DeviceConfigPatch) =>
+    session.setSystemConfig(patch)
+  )
 
   ipcMain.on('win:minimize', () => mainWindow?.minimize())
   ipcMain.on('win:close', () => mainWindow?.close())

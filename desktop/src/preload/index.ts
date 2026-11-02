@@ -2,8 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppSettings,
   ConnectionStatus,
+  DeviceConfigPatch,
   DeviceEvent,
   DeviceInfo,
+  DeviceSystemStats,
   FileBridge,
   FsDownloadResult,
   FsListing,
@@ -85,6 +87,9 @@ const bridge: NfcBridge = {
   writeRaw: (req: { kind: 'page' | 'block'; start: number; data: string; key?: string }) =>
     ipcRenderer.invoke('device:write-raw', req) as Promise<WriteAccepted>,
   ping: () => ipcRenderer.invoke('device:ping') as Promise<{ uptime: number; heap: number }>,
+  systemStats: () => ipcRenderer.invoke('device:system-stats') as Promise<DeviceSystemStats>,
+  setSystemConfig: (patch: DeviceConfigPatch) =>
+    ipcRenderer.invoke('device:set-system-config', patch) as Promise<DeviceSystemStats>,
   files,
   onFsProgress: (cb) => on<FsProgress>('fs:progress', cb),
   windowControls: {

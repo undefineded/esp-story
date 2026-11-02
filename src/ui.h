@@ -23,8 +23,18 @@ namespace Ui {
   /* 音乐分类 */
   void drawMusicList(int count, int selected);      // 分类列表整屏绘制, 进入该屏时调用 (名称取自 Storage::catName)
   void updateMusicList(int count, int selected);    // 选择变化时的增量刷新 (只重绘变化的行)
-  void drawTrackList(int count, int selected, int playing, bool nursery = false);  // 当前歌曲列表整屏绘制, 进入该屏时调用 (名称取自 Storage::name)
-  void updateTrackList(int count, int selected, int playing, bool nursery = false);  // 增量刷新 (选中行/播放中高亮)
+  void drawTrackList(int count, int selected, int playing);  // 当前歌曲列表整屏绘制, 进入该屏时调用 (名称取自 Storage::name)
+  void updateTrackList(int count, int selected, int playing);  // 增量刷新 (选中行/播放中高亮)
+
+  /* 视频模式 */
+  void drawVideoList(int count, int selected, int playing);   // /video 列表 (名称取自 Video::name)
+  void updateVideoList(int count, int selected, int playing);
+  void drawVideoLoadingBegin(const char* title);              // 解析 AVI 索引期间的等待页
+  void videoFrameReset();                                     // 起播: 清屏并允许首帧铺满
+  bool drawVideoFrame(const uint8_t* data, size_t len, bool qoi);  // 解码一帧 (QOI 或 MJPEG) 到画布
+  void drawVideoBar(uint32_t curMs, uint32_t durMs, uint8_t volume,
+                    bool paused, bool show, bool showTitle);  // 底部控制条 + 片名
+  void drawVideoStats(int fps, int dropped);                  // 右上角实际帧率角标
 
   /* 故事模式 */
   void drawStoryCategoryList(int count, int selected);  // /story 一级分组 (音频故事/图文故事)

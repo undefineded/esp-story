@@ -9,7 +9,9 @@
 #include "storage.h"
 #include "favorites.h"
 #include "story.h"
+#include "video.h"
 #include "home_scenes.h"
+#include "home_video_scene.h"
 #include <LovyanGFX.hpp>
 
 /* 字体统一由 Fonts:: 提供原生尺寸 efont 点阵，前景/背景双色覆盖文字区域。 */
@@ -157,7 +159,7 @@ void drawCover() {
 
 /* ---------------- 信息列 ---------------- */
 
-/* 分类徽章 (静态): 显示当前分类名; 童谣汇总显示"童谣"。
+/* 分类徽章 (静态): 显示当前分类名。
    宽度随文字自适应, 左右各 6px 内边距 (对照 ui.html .category 的 padding: 0 6px) */
 void drawCategoryBadge(const String& label) {
   auto& g = Display::canvas();
@@ -174,8 +176,7 @@ void drawCategoryBadge(const String& label) {
 void drawCategory() {
   String label = "音乐";
   int ci = Storage::currentCategory();
-  if (ci == Storage::NURSERY_CATEGORY)      label = "童谣";
-  else if (ci > 0 && ci < Storage::catCount()) label = Storage::catName(ci);
+  if (ci > 0 && ci < Storage::catCount()) label = Storage::catName(ci);
   drawCategoryBadge(label);
 }
 
@@ -490,7 +491,7 @@ struct HomeTheme { const char* title; const char* subtitle; uint32_t sky, ink; }
 const HomeTheme HOME_THEMES[] = {
   {"音乐舞台", "听见好心情", 0xf9dfad, 0x694c51},
   {"故事森林", "打开新世界", 0xdcebd5, 0x315c52},
-  {"童谣花园", "一起唱首歌", 0xf8dfd4, 0x795e67},
+  {"视频剧场", "看动画学知识", 0xf8dfd4, 0x795e67},
   {"工具小屋", "准备好出发", 0xe2e3f3, 0x505878},
 };
 uint16_t homeColor(uint32_t rgb) {
@@ -498,7 +499,7 @@ uint16_t homeColor(uint32_t rgb) {
 }
 void homeTile(int i, bool selected) {
   auto& g = Display::canvas();
-  static const char* TITLE[] = {"音乐", "故事", "童谣", "设置"};
+  static const char* TITLE[] = {"音乐", "故事", "视频", "设置"};
   static const uint32_t FILL[] = {0xf5d67f, 0xa8d7b9, 0xefb5b0, 0xc5c0e8};
   static const uint32_t INK[] = {0x886631, 0x386a56, 0x8b5362, 0x655887};
   const int x = 8 + i * 78, y = selected ? 176 : 182;
@@ -518,9 +519,12 @@ void homeTile(int i, bool selected) {
     g.fillRect(x + 15, y + 8, 6, 11, ink);
     g.drawLine(x + 10, y + 20, x + 18, y + 20, ink);
   } else if (i == 2) {
-    g.fillCircle(x + 12, y + 14, 5, ink);
-    g.fillCircle(x + 16, y + 9, 3, ink);
-    g.fillTriangle(x + 19, y + 9, x + 22, y + 11, x + 18, y + 12, ink);
+    /* 视频: 小放映机 (镜头 + 播放三角) */
+    g.fillRoundRect(x + 5, y + 8, 14, 11, 2, ink);
+    g.fillCircle(x + 10, y + 13, 2, fill);
+    g.fillTriangle(x + 13, y + 10, x + 13, y + 17, x + 18, y + 13, fill);
+    g.fillRect(x + 19, y + 10, 6, 3, ink);
+    g.fillRect(x + 19, y + 15, 6, 3, ink);
   } else {
     g.fillCircle(x + 13, y + 13, 6, ink);
     g.fillRect(x + 11, y + 5, 4, 16, ink);
@@ -604,7 +608,9 @@ void drawHome(int selected, uint8_t volume) {
   g.drawString("按下探索", 41, 129);
   g.drawFastHLine(113, 129, 8, paper);
   g.drawFastVLine(117, 125, 8, paper);
-  g.pushImage(174, 34, 128, 128, HOME_SCENES[selected]);
+  /* 第 3 格 (视频剧场) 由代码绘制, 其余三格来自 home-scenes.png 的烘焙数据 */
+  const uint16_t* scene = (selected == 2) ? HOME_VIDEO_SCENE : HOME_SCENES[selected];
+  g.pushImage(174, 34, 128, 128, scene);
   g.fillRect(0, 167, 320, 2, ink);
   for (int i = 0; i < 4; i++) homeTile(i, i == selected);
   g.setFont(Fonts::small());
@@ -969,11 +975,10 @@ namespace {
     g.fillTriangle(x, y + 7, x + 15, y + 7, x + 7, y + 16, color);
   }
 
-  /* 曲目行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影
-     nursery=true 时从童谣预览列表取名, 此时 Storage::name 仍是原播放列表 */
-  void trackRow(int y, int viewIndex, bool playing, bool selected, bool nursery) {
-    const char* name = nursery ? Storage::nurseryName(viewIndex) : Storage::name(viewIndex);
-    int gi = nursery ? Storage::nurseryGlobal(viewIndex) : Storage::viewTrackGlobal(viewIndex);
+  /* 曲目行卡片: 白底 + 描边; 选中: 黄底 + 墨色描边 + 3px 硬阴影 */
+  void trackRow(int y, int viewIndex, bool playing, bool selected) {
+    const char* name = Storage::name(viewIndex);
+    int gi = Storage::viewTrackGlobal(viewIndex);
     bool fav = (gi >= 0) && Favorites::isFav(gi);
     auto& g = Display::canvas();
     if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
@@ -1004,48 +1009,47 @@ namespace {
   }
 
   /* 只重绘一行槽位 (含清行) */
-  void trackRepaintRow(int r, int top, int count, int selected, int playing, bool nursery) {
+  void trackRepaintRow(int r, int top, int count, int selected, int playing) {
     auto& g = Display::canvas();
     int y = TRACK_Y0 + r * TRACK_RH;
     g.fillRect(8, y, 306, TRACK_RH, cPaper);
     int i = top + r;
-    if (i < count) trackRow(y, i, i == playing, i == selected, nursery);
+    if (i < count) trackRow(y, i, i == playing, i == selected);
   }
 
-  void trackRows(int count, int selected, int playing, bool nursery) {
+  void trackRows(int count, int selected, int playing) {
     int top = trackTop(selected, count);
     for (int r = 0; r < TRACK_VIS; r++)
-      trackRepaintRow(r, top, count, selected, playing, nursery);
+      trackRepaintRow(r, top, count, selected, playing);
   }
 
   int s_tlTop = -1, s_tlCount = -1, s_tlSel = -1, s_tlPlay = -1;
 }
 
-void drawTrackList(int count, int selected, int playing, bool nursery) {
+void drawTrackList(int count, int selected, int playing) {
   palette();
   auto& g = Display::canvas();
   g.fillScreen(cPaper);
   drawTopBarBase();
-  trackRows(count, selected, playing, nursery);
+  trackRows(count, selected, playing);
 
   g.setFont(Fonts::body());
   g.setTextColor(cText, cPaper);
-  g.drawCenterString(nursery ? "童谣 · OK播放  长按SET回主页"
-                             : "OK播放 长按收藏 长按SET回主页", 160, 212);
+  g.drawCenterString("OK播放 长按收藏 长按SET回主页", 160, 212);
 
   s_tlTop = trackTop(selected, count); s_tlCount = count;
   s_tlSel = selected;                  s_tlPlay  = playing;
 }
 
 /* 增量刷新: 选中行 / "播放中"高亮 各自变化时只重绘对应行 (不清屏) */
-void updateTrackList(int count, int selected, int playing, bool nursery) {
+void updateTrackList(int count, int selected, int playing) {
   palette();
-  if (s_tlTop < 0 || s_tlCount != count) { drawTrackList(count, selected, playing, nursery); return; }
+  if (s_tlTop < 0 || s_tlCount != count) { drawTrackList(count, selected, playing); return; }
 
   int top = trackTop(selected, count);
   if (top != s_tlTop) {
     for (int r = 0; r < TRACK_VIS; r++)
-      trackRepaintRow(r, top, count, selected, playing, nursery);
+      trackRepaintRow(r, top, count, selected, playing);
   } else {
     int idx[4] = { s_tlSel, s_tlPlay, selected, playing };
     for (int k = 0; k < 4; k++) {
@@ -1054,7 +1058,7 @@ void updateTrackList(int count, int selected, int playing, bool nursery) {
       if (duplicate) continue;
       int r = idx[k] - top;
       if (r >= 0 && r < TRACK_VIS)
-        trackRepaintRow(r, top, count, selected, playing, nursery);
+        trackRepaintRow(r, top, count, selected, playing);
     }
   }
   s_tlTop = top; s_tlCount = count; s_tlSel = selected; s_tlPlay = playing;
@@ -1486,6 +1490,279 @@ void drawStoryBar(int panel, int total, uint32_t curSec, uint32_t durSec,
     }
     s_sbLastW = w;
   }
+}
+
+/* ---------------- 视频模式 ----------------
+   /video 列表沿用歌曲列表的卡片布局; 播放页是整屏 MJPEG 画面 +
+   底部 30px 控制条 (暂停键 / 进度 / 时间), 起播 3 秒后自动隐藏。 */
+
+namespace {
+  const int VL_Y0 = 36, VL_RH = 42, VL_VIS = 4;
+
+  String fmtMs(uint32_t ms) {
+    char b[16];
+    snprintf(b, sizeof(b), "%02u:%02u", (unsigned)(ms / 60000), (unsigned)((ms / 1000) % 60));
+    return String(b);
+  }
+
+  /* 胶片图标 20x16 */
+  void iconFilm(int x, int y, uint16_t color) {
+    auto& g = Display::canvas();
+    g.fillRoundRect(x, y, 20, 16, 3, color);
+    for (int i = 0; i < 3; i++) {
+      g.fillRect(x + 3 + i * 5, y + 2, 2, 2, cPaper);
+      g.fillRect(x + 3 + i * 5, y + 12, 2, 2, cPaper);
+    }
+    g.fillTriangle(x + 8, y + 5, x + 8, y + 11, x + 13, y + 8, cPaper);
+  }
+
+  void videoRow(int y, int viewIndex, bool playing, bool selected) {
+    auto& g = Display::canvas();
+    if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, cInk);
+    g.fillRoundRect(10, y, 300, 38, 6, selected ? cInk : TFT_WHITE);
+    g.fillRoundRect(12, y + 2, 296, 34, 5, selected ? cYellow : TFT_WHITE);
+    if (!selected) g.drawRoundRect(10, y, 300, 38, 6, cTrackBd);
+
+    iconFilm(24, y + 11, playing ? cCoral : cAqua);
+    uint16_t bg = selected ? cYellow : TFT_WHITE;
+    g.setFont(Fonts::title());
+    g.setTextColor(playing ? cCoral : cText, bg);
+    g.drawString(fit(String(Video::title(viewIndex)), 200).c_str(), 54, y + 9);
+
+    if (playing) {
+      g.setFont(Fonts::small());
+      g.setTextColor(cCoral, bg);
+      g.drawRightString("播放中", 296, y + 14);
+    }
+  }
+
+  int videoTop(int selected, int count) {
+    int top = (selected >= VL_VIS) ? selected - VL_VIS + 1 : 0;
+    if (top > count - VL_VIS) top = count - VL_VIS;
+    if (top < 0) top = 0;
+    return top;
+  }
+
+  void videoRepaintRow(int r, int top, int count, int selected, int playing) {
+    auto& g = Display::canvas();
+    int y = VL_Y0 + r * VL_RH;
+    g.fillRect(8, y, 306, VL_RH, cPaper);
+    int i = top + r;
+    if (i < count) videoRow(y, i, i == playing, i == selected);
+  }
+
+  int s_vlTop = -1, s_vlCount = -1, s_vlSel = -1, s_vlPlay = -1;
+}
+
+void drawVideoList(int count, int selected, int playing) {
+  palette();
+  auto& g = Display::canvas();
+  g.fillScreen(cPaper);
+  drawTopBarBase();
+
+  int top = videoTop(selected, count);
+  for (int r = 0; r < VL_VIS; r++) videoRepaintRow(r, top, count, selected, playing);
+
+  g.setFont(Fonts::body());
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString("OK播放  NEXT/LAST选择  长按SET回主页", 160, 212);
+
+  s_vlTop = top; s_vlCount = count; s_vlSel = selected; s_vlPlay = playing;
+}
+
+void updateVideoList(int count, int selected, int playing) {
+  palette();
+  if (s_vlTop < 0 || s_vlCount != count) { drawVideoList(count, selected, playing); return; }
+
+  int top = videoTop(selected, count);
+  if (top != s_vlTop) {
+    for (int r = 0; r < VL_VIS; r++) videoRepaintRow(r, top, count, selected, playing);
+  } else {
+    int idx[4] = { s_vlSel, s_vlPlay, selected, playing };
+    for (int k = 0; k < 4; k++) {
+      bool duplicate = false;
+      for (int j = 0; j < k; ++j) duplicate |= idx[j] == idx[k];
+      if (duplicate) continue;
+      int r = idx[k] - top;
+      if (r >= 0 && r < VL_VIS) videoRepaintRow(r, top, count, selected, playing);
+    }
+  }
+  s_vlTop = top; s_vlCount = count; s_vlSel = selected; s_vlPlay = playing;
+}
+
+/* 解析 AVI 索引期间的等待页 (复用故事加载页的圆环动画) */
+void drawVideoLoadingBegin(const char* title) {
+  palette();
+  auto& g = Display::canvas();
+  g.fillScreen(cPaper);
+  drawTopBarBase();
+  drawStoryLoadingSpin(0);
+
+  /* 环心胶片图标 */
+  g.fillRoundRect(SL_CX - 18, SL_CY - 14, 36, 28, 4, cCoral);
+  g.drawRoundRect(SL_CX - 18, SL_CY - 14, 36, 28, 4, cInk);
+  for (int i = 0; i < 4; i++) {
+    g.fillRect(SL_CX - 14 + i * 8, SL_CY - 11, 4, 3, cPaper);
+    g.fillRect(SL_CX - 14 + i * 8, SL_CY + 8, 4, 3, cPaper);
+  }
+  g.fillTriangle(SL_CX - 5, SL_CY - 6, SL_CX - 5, SL_CY + 6, SL_CX + 6, SL_CY, cPaper);
+
+  g.setFont(Fonts::story());
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString(fit(String(title ? title : ""), 288).c_str(), 160, 168);
+
+  g.setFont(Fonts::body());
+  g.setTextColor(cText, cPaper);
+  g.drawCenterString("正在准备视频…", 160, 194);
+}
+
+namespace {
+  /* 视频控制条: 首次(或换了新画面)整条重铺, 之后只改变化区域 */
+  const int VB_Y = 210, VB_H = 30;
+  const int VB_BTN_X = 8, VB_BTN_Y = 215, VB_BTN_W = 22, VB_BTN_H = 20;
+  const int VB_PR_X = 38, VB_PR_Y = 222, VB_PR_W = 196, VB_PR_H = 6;
+  const int VB_TXT_X = 238, VB_TXT_W = 74;
+
+  bool     s_vbFull    = true;   // 需要整条重铺 (新帧覆盖了控制条)
+  bool     s_vbShown   = false;
+  bool     s_vbPaused  = false;
+  bool     s_vbTitle   = false;
+  int      s_vbCur     = -1, s_vbDur = -1;
+  int      s_vbVol     = -1;
+  int      s_vbW       = -1;
+  uint32_t s_vbVolUntil = 0;
+  bool     s_vbVolShown = false;
+  bool     s_vFbFirst   = true;
+
+  void videoBtnIcon(bool paused) {
+    auto& g = Display::canvas();
+    const int cx = VB_BTN_X + VB_BTN_W / 2, cy = VB_BTN_Y + VB_BTN_H / 2;
+    g.fillRoundRect(VB_BTN_X, VB_BTN_Y, VB_BTN_W, VB_BTN_H, 6, cYellow);
+    if (paused) g.fillTriangle(cx - 4, cy - 5, cx - 4, cy + 5, cx + 5, cy, cInk);
+    else {
+      g.fillRect(cx - 4, cy - 5, 3, 10, cInk);
+      g.fillRect(cx + 2, cy - 5, 3, 10, cInk);
+    }
+  }
+}
+
+/* 起播时清屏, 让第一帧铺满整个画面 */
+void videoFrameReset() { s_vFbFirst = true; }
+
+bool drawVideoFrame(const uint8_t* data, size_t len, bool qoi) {
+  palette();
+  if (!data || len == 0) return false;
+  auto& g = Display::canvas();
+  if (s_vFbFirst) { s_vFbFirst = false; g.fillScreen(TFT_BLACK); }
+  /* QOI: 查表/差分/RLE, 无 Huffman/IDCT, 软解快 3~5 倍; JPEG 走原有解码器 */
+  bool ok = qoi ? g.drawQoi(data, (uint32_t)len, 0, 0, SCR_W, SCR_H)
+                : g.drawJpg(data, (uint32_t)len, 0, 0, SCR_W, SCR_H);
+  s_vbFull = true;                 // 新画面盖住了控制条, 下一帧控制条整条重铺
+  return ok;
+}
+
+void drawVideoBar(uint32_t curMs, uint32_t durMs, uint8_t volume,
+                  bool paused, bool show, bool showTitle) {
+  if (!show) { s_vbShown = false; return; }
+  palette();
+  auto& g = Display::canvas();
+  char b[32];
+
+  const bool full = s_vbFull || !s_vbShown;
+  if (full) {
+    g.fillRect(0, VB_Y, SCR_W, VB_H, cInk);
+    g.fillRect(0, VB_Y, SCR_W, 2, cYellow);
+    videoBtnIcon(paused);
+    g.fillRoundRect(VB_PR_X, VB_PR_Y, VB_PR_W, VB_PR_H, 2, cTrack);
+    g.drawRoundRect(VB_PR_X, VB_PR_Y, VB_PR_W, VB_PR_H, 2, cTrackBd);
+    s_vbCur = s_vbDur = -1;
+    s_vbW = -1;
+    s_vbVol = (int)volume;         // 首次铺条不弹音量提示, 直接显示时间
+    s_vbVolShown = false;
+    s_vbPaused = !paused;          // 强制重画按钮
+    s_vbShown = true;
+    s_vbFull  = false;
+  }
+
+  /* 片名: 起播 3 秒内 / 暂停时显示在左上角 */
+  if (showTitle != s_vbTitle || (full && showTitle)) {
+    s_vbTitle = showTitle;
+    if (showTitle) {
+      String t = fit(String(Video::title(Video::index())), 212);
+      g.setFont(Fonts::body());
+      int w = g.textWidth(t) + 20;
+      g.fillRoundRect(8, 8, w, 26, 7, cInk);
+      g.setTextColor(TFT_WHITE, cInk);
+      g.drawString(t.c_str(), 18, 11);
+    }
+  }
+
+  if (paused != s_vbPaused) {
+    s_vbPaused = paused;
+    videoBtnIcon(paused);
+  }
+
+  bool volChanged = ((int)volume != s_vbVol);
+  if (volChanged) {
+    s_vbVol = (int)volume;
+    s_vbVolUntil = millis() + 1500;
+  }
+
+  /* 右下角: 平时显示时间, 调音量后 1.5s 内改显音量 */
+  if (millis() < s_vbVolUntil) {
+    if (!s_vbVolShown) {
+      s_vbVolShown = true;
+      g.setFont(Fonts::small());
+      g.setTextColor(cTrack, cInk);
+      g.fillRect(VB_TXT_X, VB_Y + 10, VB_TXT_W, 13, cInk);
+      snprintf(b, sizeof(b), "VOL %02u", (unsigned)volume);
+      g.drawRightString(b, 312, VB_Y + 10);
+    }
+  } else if (s_vbVolShown || (int)curMs != s_vbCur || (int)durMs != s_vbDur) {
+    s_vbVolShown = false;
+    s_vbCur = (int)curMs; s_vbDur = (int)durMs;
+    g.setFont(Fonts::small());
+    g.setTextColor(cTrack, cInk);
+    g.fillRect(VB_TXT_X, VB_Y + 10, VB_TXT_W, 13, cInk);
+    snprintf(b, sizeof(b), "%s/%s", fmtMs(curMs).c_str(), fmtMs(durMs).c_str());
+    g.drawRightString(b, 312, VB_Y + 10);
+  }
+
+  int w = 0;
+  if (durMs > 0) {
+    w = (int)((uint64_t)(VB_PR_W - 2) * (uint64_t)curMs / durMs);
+    if (w > VB_PR_W - 2) w = VB_PR_W - 2;
+    if (w < 0) w = 0;
+  }
+  if (w != s_vbW) {
+    if (w < s_vbW) {
+      g.fillRoundRect(VB_PR_X, VB_PR_Y, VB_PR_W, VB_PR_H, 2, cTrack);
+      g.drawRoundRect(VB_PR_X, VB_PR_Y, VB_PR_W, VB_PR_H, 2, cTrackBd);
+    }
+    if (w > 1) {
+      g.fillRect(VB_PR_X + 1, VB_PR_Y + 1, w, VB_PR_H - 2, cBlue);
+      if (w > 4) g.fillRect(VB_PR_X + 1 + w - 4, VB_PR_Y + 1, 4, VB_PR_H - 2, cYellow);
+    }
+    s_vbW = w;
+  }
+}
+
+/* 右上角帧率角标: 每帧都会被新画面盖住, 所以每轮循环都要重画 (内容不变时
+   Display::present 的差分不会真的走 SPI)。丢帧时显示 "-N"。 */
+void drawVideoStats(int fps, int dropped) {
+  palette();
+  auto& g = Display::canvas();
+  char b[24];
+  if (dropped > 0) snprintf(b, sizeof(b), "%dFPS -%d", fps, dropped);
+  else             snprintf(b, sizeof(b), "%dFPS", fps);
+
+  g.setFont(Fonts::small());
+  int w = g.textWidth(b) + 12;
+  if (w > 72) w = 72;
+  const int x = 312 - w;
+  g.fillRoundRect(x, 8, w, 18, 6, cInk);
+  g.setTextColor(cYellow, cInk);
+  g.drawString(b, x + 6, 10);
 }
 
 } // namespace Ui

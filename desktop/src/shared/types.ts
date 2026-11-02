@@ -60,6 +60,98 @@ export interface DeviceInfo {
   nfc: NfcStatus;
 }
 
+/* ---------- 设备中心: 系统状态与内部配置 ---------- */
+
+export interface DeviceCpuStats {
+  load: number;
+  cores: number;
+  freq: number;
+  model: string;
+  revision: number;
+  sdk: string;
+}
+
+export interface DeviceRamStats {
+  heapTotal: number;
+  heapFree: number;
+  heapMin: number;
+  psramTotal: number;
+  psramFree: number;
+}
+
+export interface DeviceRomStats {
+  flashSize: number;
+  appSize: number;
+  appTotal: number;
+  appFree: number;
+  partition: string;
+}
+
+export interface DeviceStorageStats {
+  ready: boolean;
+  total: number;
+  used: number;
+  free: number;
+  tracks: number;
+  stories: number;
+}
+
+export interface DeviceSettingsStats {
+  volume: number;
+  volumeMax: number;
+  brightness: number;
+  brightnessMin: number;
+  rotation: number;
+  eq: string;
+  screenOffMin: number;
+  sleepMin: number;
+  ble: boolean;
+  wifi: boolean;
+  ap: boolean;
+  childLock: boolean;
+  bound: boolean;
+  name: string;
+  fw: string;
+  proto: number;
+  role: string;
+}
+
+export interface DeviceNetworkStats {
+  wifi: boolean;
+  ap: boolean;
+  apSsid: string;
+}
+
+export interface DevicePlayerStats {
+  playing: boolean;
+  paused: boolean;
+  hasTrack: boolean;
+  story: boolean;
+  title: string;
+  codec: string;
+  curSec: number;
+  durSec: number;
+  bitrate: number;
+  sampleRate: number;
+  volume: number;
+}
+
+export interface DeviceSystemStats {
+  uptime: number;
+  cpu: DeviceCpuStats;
+  ram: DeviceRamStats;
+  rom: DeviceRomStats;
+  storage: DeviceStorageStats;
+  settings: DeviceSettingsStats;
+  network: DeviceNetworkStats;
+  player: DevicePlayerStats;
+}
+
+export interface DeviceConfigPatch {
+  volume?: number;
+  brightness?: number;
+}
+
 export type NdefKind = 'text' | 'uri' | 'mime' | 'external' | 'empty' | 'unknown';
 
 export interface NdefRecord {
@@ -282,6 +374,8 @@ export interface NfcBridge {
   writeNdef(req: { ndef: string; verify?: boolean }): Promise<WriteAccepted>;
   writeRaw(req: { kind: 'page' | 'block'; start: number; data: string; key?: string }): Promise<WriteAccepted>;
   ping(): Promise<{ uptime: number; heap: number }>;
+  systemStats(): Promise<DeviceSystemStats>;
+  setSystemConfig(patch: DeviceConfigPatch): Promise<DeviceSystemStats>;
   files: FileBridge;
   onFsProgress(cb: (progress: FsProgress) => void): () => void;
   windowControls: WindowControls;

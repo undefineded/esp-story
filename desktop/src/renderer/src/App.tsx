@@ -9,6 +9,7 @@ import { ReaderPage } from './pages/ReaderPage'
 import { WriterPage } from './pages/WriterPage'
 import { LibraryPage } from './pages/LibraryPage'
 import { FileManagerPage } from './pages/FileManagerPage'
+import { DeviceCenterPage } from './pages/DeviceCenterPage'
 import { DevicePage } from './pages/DevicePage'
 import { ExtensionsPage } from './pages/ExtensionsPage'
 import { SettingsPage } from './pages/SettingsPage'
@@ -23,6 +24,8 @@ function Page({ view }: { view: ReturnType<typeof useAppStore.getState>['view'] 
       return <LibraryPage />
     case 'files':
       return <FileManagerPage />
+    case 'center':
+      return <DeviceCenterPage />
     case 'device':
       return <DevicePage />
     case 'extensions':
