@@ -35,6 +35,8 @@ void init() {
     s_palette.track_border = g.color565(164, 178, 185);
     s_palette.button = g.color565(49, 90, 130);
     s_palette.button_border = g.color565(111, 149, 184);
+    s_palette.green = g.color565(73, 185, 92);
+    s_palette.green_dark = g.color565(35, 123, 49);
     s_palette.card_light = g.color565(191, 244, 186);
     s_palette.card_dark = g.color565(45, 206, 27);
     s_top_bar = s_palette.coral;

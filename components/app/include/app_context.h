@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 
 #include "media_records.h"
@@ -27,6 +28,11 @@ void stepVolume(int steps);
 
 // Apply an equalizer preset (0..3) to the running playback service.
 void applyEq(uint8_t preset);
+
+// Favorites are indexed by position in the full catalog track list (FAV v1
+// bitmap layout). Returns false when the FRAM record is unavailable.
+bool favorite(std::size_t index);
+bool setFavorite(std::size_t index, bool enabled);
 
 // Persist settings (no-op when FRAM is unavailable). Returns false on a failed
 // verified write so the caller can surface "保存失败".

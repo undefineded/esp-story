@@ -22,6 +22,8 @@ struct Palette {
     uint16_t track_border;  // #a4b2b9
     uint16_t button;        // #315a82
     uint16_t button_border; // #6f95b8
+    uint16_t green;         // #49b95c now-playing dot
+    uint16_t green_dark;    // #237b31
     uint16_t card_light;    // #bff4ba hall card body
     uint16_t card_dark;     // #2dce1b hall card chip
 };

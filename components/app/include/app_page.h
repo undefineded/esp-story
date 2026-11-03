@@ -29,6 +29,9 @@ protected:
 // alive so a push/pop never touches the heap while audio is streaming.
 Page* createHomePage();
 Page* createSettingsPage();
+Page* createMusicListPage();
+Page* createTrackListPage();
+Page* createPlayerPage();
 
 // Navigation stack helpers.
 void pushPage(Page* page);

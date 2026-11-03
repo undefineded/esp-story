@@ -5,6 +5,7 @@
 
 #include "app_context.h"
 #include "app_page.h"
+#include "app_services.h"
 #include "app_theme.h"
 #include "config.h"
 #include "display.h"
@@ -40,6 +41,14 @@ Page* s_stack[kMaxDepth] = {};
 int s_depth = 0;
 
 Audio::Playback* s_playback = nullptr;
+
+// Service objects live for the whole application; pages only see references.
+Storage::SdVolume g_volume;
+Storage::AccessGate g_gate;
+Media::Library g_library(g_gate);
+Audio::Playback g_playback(g_gate);
+Media::Playlist g_playlist;
+CatalogPtr s_catalog;
 
 char s_notice[96] = {};
 uint32_t s_notice_until = 0;
@@ -143,25 +152,20 @@ void run() {
     ESP_LOGW(kTag, "FRAM not confirmed in this build; settings are RAM-only");
 #endif
 
-    static Storage::SdVolume volume;
-    s_context.sd_mounted = volume.mount() == ESP_OK;
+    s_context.sd_mounted = g_volume.mount() == ESP_OK;
     ESP_LOGI(kTag, "SD mount: %s", s_context.sd_mounted ? "ok" : "unavailable");
 
-    static Storage::AccessGate gate;
-    static Media::Library library(gate);
-    static Audio::Playback playback(gate);
-    s_playback = &playback;
-    ESP_ERROR_CHECK(playback.begin());
-    playback.setVolume(static_cast<unsigned>(s_context.volume));
-    playback.setEq(static_cast<Audio::EqPreset>(s_context.settings.eq));
+    s_playback = &g_playback;
+    ESP_ERROR_CHECK(g_playback.begin());
+    g_playback.setVolume(static_cast<unsigned>(s_context.volume));
+    g_playback.setEq(static_cast<Audio::EqPreset>(s_context.settings.eq));
 
-    if (s_context.sd_mounted) {
-        if (library.loadCache(Storage::SdVolume::root)) {
-            s_context.catalog_ready = true;
-            ESP_LOGI(kTag, "media index loaded");
-        } else {
-            ESP_LOGI(kTag, "media index missing; scan deferred to the library page");
-        }
+    s_catalog = g_library.snapshot();
+    if (s_context.sd_mounted && g_library.loadCache(Storage::SdVolume::root)) {
+        s_context.catalog_ready = true;
+        ESP_LOGI(kTag, "media index loaded");
+    } else if (s_context.sd_mounted) {
+        ESP_LOGI(kTag, "media index missing; first library page will scan");
     }
 
     goHome();
@@ -248,6 +252,65 @@ void stepVolume(int steps) {
 void applyEq(uint8_t preset) {
     s_context.settings.eq = preset > 3 ? 0 : preset;
     if (s_playback) s_playback->setEq(static_cast<Audio::EqPreset>(s_context.settings.eq));
+}
+
+CatalogPtr catalog() { return s_catalog; }
+Media::Playlist& playlist() { return g_playlist; }
+Audio::Playback& playback() { return g_playback; }
+
+Media::Catalog emptyCatalog() { return Media::Catalog{}; }
+
+bool refreshCatalog() {
+    if (!s_context.sd_mounted) return false;
+    // Playback holds a file lease for the whole track; maintenance needs every
+    // lease released, so stop first and re-allow playback afterwards.
+    g_playback.stopAndWait(3000);
+    const auto result = g_library.scan(Storage::SdVolume::root);
+    g_playback.allowPlayback();
+    if (result != Media::ScanResult::Ok && result != Media::ScanResult::LimitExceeded) {
+        ESP_LOGW(kTag, "media scan failed: %d", static_cast<int>(result));
+        return false;
+    }
+    s_catalog = g_library.snapshot();
+    s_context.catalog_ready = true;
+    const auto saved = g_library.saveCache(Storage::SdVolume::root);
+    if (saved != Storage::UploadResult::Ok) {
+        ESP_LOGW(kTag, "media index save: %d", static_cast<int>(saved));
+    }
+    ESP_LOGI(kTag, "catalog: %u categories, %u tracks",
+             static_cast<unsigned>(s_catalog->categories.size()),
+             static_cast<unsigned>(s_catalog->tracks.size()));
+    return true;
+}
+
+bool playCurrent(bool auto_start) {
+    const auto* track = g_playlist.current();
+    if (!track) return false;
+    uint64_t request = 0;
+    const auto result = g_playback.play(track->path.c_str(), auto_start, request);
+    if (result != ESP_OK) ESP_LOGW(kTag, "play %s: %s", track->path.c_str(), esp_err_to_name(result));
+    return result == ESP_OK;
+}
+
+bool stopPlayback() { return g_playback.stopAndWait(3000) == ESP_OK; }
+
+void pausePlayback(bool paused) {
+    uint64_t request = 0;
+    g_playback.pause(paused, request);
+}
+
+bool favorite(std::size_t index) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (s_records_store) return s_records_store->favorite(static_cast<unsigned>(index));
+#endif
+    return false;
+}
+
+bool setFavorite(std::size_t index, bool enabled) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (s_records_store) return s_records_store->setFavorite(static_cast<unsigned>(index), enabled);
+#endif
+    return false;
 }
 
 bool saveSettings() {
