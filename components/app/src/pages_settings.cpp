@@ -2,6 +2,7 @@
 #include "app_page.h"
 #include "app_services.h"
 #include "app_theme.h"
+#include "ble_service.h"
 #include "display.h"
 #include "fonts.h"
 
@@ -221,7 +222,8 @@ private:
             case 5: notify("刷新列表：P2 接入"); break;
             case 6:
                 ctx().settings.ble = ctx().settings.ble ? 0 : 1;
-                notify(ctx().settings.ble ? "蓝牙广播将在 P4 接入" : "蓝牙广播将在 P4 接入");
+                Ble::setAdvertisingEnabled(ctx().settings.ble != 0);
+                notify(ctx().settings.ble ? "蓝牙广播已开启" : "蓝牙广播已关闭");
                 saveSettings();
                 break;
             default: openBindCode(); break;

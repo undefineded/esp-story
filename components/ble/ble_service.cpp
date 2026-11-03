@@ -1,0 +1,567 @@
+#include "ble_service.h"
+
+#include <cstdio>
+#include <cstring>
+
+#include "cJSON.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "sdkconfig.h"
+
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+#include "host/ble_hs.h"
+#include "host/util/util.h"
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "os/os_mbuf.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+#endif
+
+namespace Ble {
+namespace {
+
+constexpr const char* kTag = "ble";
+constexpr std::size_t kLineCapacity = 520;
+constexpr int kQueueDepth = 8;
+
+Hooks s_public_hooks;
+Snapshot s_public_snapshot;
+char s_name[24] = "StoryBox";
+
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+
+// Same 128-bit UUIDs as the Arduino firmware so existing clients keep working.
+const ble_uuid128_t kServiceUuid = BLE_UUID128_INIT(
+    0x5b, 0x4a, 0x3f, 0x2e, 0x1d, 0x0c, 0x9b, 0x8a,
+    0x5f, 0x4e, 0x4d, 0x3c, 0x01, 0x00, 0x7a, 0x6b);
+const ble_uuid128_t kRxUuid = BLE_UUID128_INIT(
+    0x5b, 0x4a, 0x3f, 0x2e, 0x1d, 0x0c, 0x9b, 0x8a,
+    0x5f, 0x4e, 0x4d, 0x3c, 0x02, 0x00, 0x7a, 0x6b);
+const ble_uuid128_t kTxUuid = BLE_UUID128_INIT(
+    0x5b, 0x4a, 0x3f, 0x2e, 0x1d, 0x0c, 0x9b, 0x8a,
+    0x5f, 0x4e, 0x4d, 0x3c, 0x03, 0x00, 0x7a, 0x6b);
+
+struct Line {
+    char text[kLineCapacity];
+};
+
+Hooks s_hooks;
+QueueHandle_t s_line_queue = nullptr;
+QueueHandle_t s_command_queue = nullptr;
+Snapshot s_snapshot;
+bool s_advertising = true;
+bool s_authed = false;
+bool s_hello_pending = false;
+uint8_t s_own_addr_type = BLE_OWN_ADDR_PUBLIC;
+uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
+uint16_t s_rx_handle = 0;
+uint16_t s_tx_handle = 0;
+int64_t s_connected_at = 0;
+int64_t s_last_state_at = 0;
+char s_rx[kLineCapacity];
+std::size_t s_rx_length = 0;
+bool s_rx_overflow = false;
+
+int64_t millisNow() {
+    return static_cast<int64_t>(esp_timer_get_time() / 1000);
+}
+
+void pushAction(Action action, int32_t value = 0) {
+    if (!s_command_queue) return;
+    Command command{action, value};
+    xQueueSend(s_command_queue, &command, 0);
+}
+
+bool sendText(const char* text) {
+    if (s_conn == BLE_HS_CONN_HANDLE_NONE) return false;
+    const std::size_t length = std::strlen(text);
+    if (!length) return false;
+    std::size_t sent = 0;
+    uint16_t mtu = ble_att_mtu(s_conn);
+    if (mtu < 23) mtu = 23;
+    const std::size_t chunk = mtu - 3;
+    while (sent < length) {
+        std::size_t size = length - sent;
+        if (size > chunk) size = chunk;
+        os_mbuf* packet = ble_hs_mbuf_from_flat(text + sent, static_cast<uint16_t>(size));
+        if (!packet) return false;
+        if (ble_gatts_notify_custom(s_conn, s_tx_handle, packet) != 0) return false;
+        sent += size;
+    }
+    return true;
+}
+
+void sendDoc(cJSON* root) {
+    char buffer[760];
+    const bool ok = cJSON_PrintPreallocated(root, buffer, sizeof(buffer), false);
+    cJSON_Delete(root);
+    if (!ok) {
+        ESP_LOGW(kTag, "tx overflow");
+        return;
+    }
+    const std::size_t length = std::strlen(buffer);
+    if (length + 1 >= sizeof(buffer)) return;
+    buffer[length] = '\n';
+    buffer[length + 1] = '\0';
+    sendText(buffer);
+}
+
+void sendOk(int32_t id) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    if (id) cJSON_AddNumberToObject(root, "id", id);
+    cJSON_AddBoolToObject(root, "ok", true);
+    sendDoc(root);
+}
+
+void sendError(int32_t id, const char* code) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    if (id) cJSON_AddNumberToObject(root, "id", id);
+    cJSON_AddBoolToObject(root, "ok", false);
+    cJSON_AddStringToObject(root, "err", code);
+    sendDoc(root);
+}
+
+void addState(cJSON* data) {
+    cJSON_AddBoolToObject(data, "play", s_snapshot.playing);
+    cJSON_AddBoolToObject(data, "paused", s_snapshot.paused);
+    cJSON_AddNumberToObject(data, "vol", s_snapshot.volume);
+    cJSON_AddNumberToObject(data, "volMin", s_snapshot.volume_min);
+    cJSON_AddNumberToObject(data, "volMax", s_snapshot.volume_max);
+    cJSON_AddStringToObject(data, "mode", s_snapshot.mode);
+    cJSON_AddStringToObject(data, "title", s_snapshot.title);
+    cJSON_AddNumberToObject(data, "cur", s_snapshot.current);
+    cJSON_AddNumberToObject(data, "dur", s_snapshot.duration);
+    cJSON_AddNumberToObject(data, "used", s_snapshot.used);
+    if (s_snapshot.lock && s_snapshot.lock[0]) cJSON_AddStringToObject(data, "lock", s_snapshot.lock);
+}
+
+void sendHello(int32_t id) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    if (id) cJSON_AddNumberToObject(root, "id", id);
+    cJSON_AddStringToObject(root, "evt", "hello");
+    cJSON_AddStringToObject(root, "fw", "storybox-idf");
+    cJSON_AddStringToObject(root, "name", s_name);
+    const bool bound = s_hooks.bound && s_hooks.bound(s_hooks.context);
+    const bool has_pin = s_hooks.has_pin && s_hooks.has_pin(s_hooks.context);
+    cJSON_AddBoolToObject(root, "bound", bound);
+    cJSON_AddBoolToObject(root, "hasPin", has_pin);
+    cJSON_AddNumberToObject(root, "volMin", s_snapshot.volume_min);
+    cJSON_AddNumberToObject(root, "volMax", s_snapshot.volume_max);
+    if (!bound && s_hooks.bind_code) {
+        cJSON_AddStringToObject(root, "code", s_hooks.bind_code(s_hooks.context));
+    }
+    sendDoc(root);
+}
+
+void sendStateEvent() {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    cJSON_AddStringToObject(root, "evt", "state");
+    addState(root);
+    sendDoc(root);
+}
+
+void handleCtrl(cJSON* request, int32_t id) {
+    const char* action = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "action"));
+    if (!action) action = "";
+    const cJSON* value_item = cJSON_GetObjectItemCaseSensitive(request, "value");
+    const int value = cJSON_IsNumber(value_item) ? static_cast<int>(value_item->valuedouble) : 0;
+
+    if (std::strcmp(action, "volume") == 0) {
+        pushAction(Action::Volume, value);
+        sendOk(id);
+        return;
+    }
+    if (std::strcmp(action, "story") == 0) {
+        pushAction(Action::PlayStory, value);
+        sendOk(id);
+        return;
+    }
+    if (std::strcmp(action, "music") == 0) {
+        pushAction(Action::PlayMusic, value);
+        sendOk(id);
+        return;
+    }
+    if (std::strcmp(action, "stop") == 0) {
+        pushAction(Action::Stop);
+        sendOk(id);
+        return;
+    }
+    if (std::strcmp(action, "play") == 0) pushAction(Action::Play);
+    else if (std::strcmp(action, "pause") == 0) pushAction(Action::Pause);
+    else if (std::strcmp(action, "toggle") == 0) pushAction(Action::Toggle);
+    else if (std::strcmp(action, "next") == 0) pushAction(Action::Next);
+    else if (std::strcmp(action, "prev") == 0) pushAction(Action::Prev);
+    else {
+        sendError(id, "BAD_ACTION");
+        return;
+    }
+    sendOk(id);
+}
+
+void handleGet(cJSON* request, int32_t id) {
+    const char* what = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "what"));
+    if (!what) what = "state";
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    if (id) cJSON_AddNumberToObject(root, "id", id);
+    cJSON_AddBoolToObject(root, "ok", true);
+    if (std::strcmp(what, "state") == 0) {
+        cJSON* data = cJSON_AddObjectToObject(root, "data");
+        addState(data);
+        sendDoc(root);
+        return;
+    }
+    if (std::strcmp(what, "config") == 0) {
+        cJSON* data = cJSON_AddObjectToObject(root, "data");
+        cJSON_AddNumberToObject(data, "volMin", s_snapshot.volume_min);
+        cJSON_AddNumberToObject(data, "volMax", s_snapshot.volume_max);
+        cJSON_AddNumberToObject(data, "used", s_snapshot.used);
+        sendDoc(root);
+        return;
+    }
+    // Catalog listings are not routed over BLE yet (the desktop app uses USB).
+    cJSON* data = cJSON_AddObjectToObject(root, "data");
+    cJSON_AddNumberToObject(data, "total", 0);
+    cJSON_AddNumberToObject(data, "offset", 0);
+    cJSON_AddArrayToObject(data, "items");
+    sendDoc(root);
+}
+
+void handlePin(cJSON* request, int32_t id) {
+    const char* action = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "action"));
+    const char* pin = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "pin"));
+    if (!action) action = "";
+    if (std::strcmp(action, "verify") == 0) {
+        const bool valid = s_hooks.verify_pin && s_hooks.verify_pin(s_hooks.context, pin ? pin : "");
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddNumberToObject(root, "v", 1);
+        if (id) cJSON_AddNumberToObject(root, "id", id);
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddBoolToObject(root, "valid", valid);
+        sendDoc(root);
+        return;
+    }
+    // Setting a PIN requires the authenticated settings page; not exposed yet.
+    sendError(id, "NOT_SUPPORTED");
+}
+
+void processLine(const char* line) {
+    cJSON* request = cJSON_Parse(line);
+    if (!request) {
+        sendError(0, "BAD_JSON");
+        return;
+    }
+    const cJSON* id_item = cJSON_GetObjectItemCaseSensitive(request, "id");
+    const int32_t id = cJSON_IsNumber(id_item) ? static_cast<int32_t>(id_item->valuedouble) : 0;
+    const char* cmd = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "cmd"));
+    if (!cmd) cmd = "";
+
+    if (std::strcmp(cmd, "hello") == 0) {
+        sendHello(id);
+        cJSON_Delete(request);
+        return;
+    }
+    if (std::strcmp(cmd, "bind") == 0) {
+        const char* code = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "code"));
+        char token[40] = {};
+        if (!s_hooks.bind || !s_hooks.bind(s_hooks.context, code ? code : "", token, sizeof(token))) {
+            sendError(id, "BIND");
+            cJSON_Delete(request);
+            return;
+        }
+        s_authed = true;
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddNumberToObject(root, "v", 1);
+        if (id) cJSON_AddNumberToObject(root, "id", id);
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddStringToObject(root, "token", token);
+        sendDoc(root);
+        cJSON_Delete(request);
+        return;
+    }
+    if (std::strcmp(cmd, "auth") == 0) {
+        const char* token = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "token"));
+        const char* pin = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "pin"));
+        bool ok = token && s_hooks.verify_token && s_hooks.verify_token(s_hooks.context, token);
+        if (!ok && pin && s_hooks.verify_pin) ok = s_hooks.verify_pin(s_hooks.context, pin);
+        const bool bound = s_hooks.bound && s_hooks.bound(s_hooks.context);
+        const bool has_pin = s_hooks.has_pin && s_hooks.has_pin(s_hooks.context);
+        // Legacy rule: a bound device without a PIN has no verifiable secret.
+        if (!ok && bound && !has_pin) ok = true;
+        if (!ok) {
+            sendError(id, "AUTH");
+            cJSON_Delete(request);
+            return;
+        }
+        s_authed = true;
+        sendOk(id);
+        cJSON_Delete(request);
+        return;
+    }
+    if (!s_authed) {
+        sendError(id, "AUTH");
+        cJSON_Delete(request);
+        return;
+    }
+    if (std::strcmp(cmd, "sync") == 0) {
+        const cJSON* epoch_item = cJSON_GetObjectItemCaseSensitive(request, "epoch");
+        const cJSON* tz_item = cJSON_GetObjectItemCaseSensitive(request, "tz");
+        const auto epoch = cJSON_IsNumber(epoch_item) ? static_cast<uint32_t>(epoch_item->valuedouble) : 0u;
+        const auto tz = cJSON_IsNumber(tz_item) ? static_cast<int16_t>(tz_item->valuedouble) : int16_t{480};
+        if (s_hooks.sync_time) s_hooks.sync_time(s_hooks.context, epoch, tz);
+        sendOk(id);
+        cJSON_Delete(request);
+        return;
+    }
+    if (std::strcmp(cmd, "get") == 0) {
+        handleGet(request, id);
+        cJSON_Delete(request);
+        return;
+    }
+    if (std::strcmp(cmd, "ctrl") == 0) {
+        handleCtrl(request, id);
+        cJSON_Delete(request);
+        return;
+    }
+    if (std::strcmp(cmd, "pin") == 0) {
+        handlePin(request, id);
+        cJSON_Delete(request);
+        return;
+    }
+    sendError(id, "BAD_CMD");
+    cJSON_Delete(request);
+}
+
+void startAdvertising() {
+    if (!s_advertising || s_conn != BLE_HS_CONN_HANDLE_NONE) return;
+    ble_hs_adv_fields fields{};
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.uuids128 = &kServiceUuid;
+    fields.num_uuids128 = 1;
+    fields.uuids128_is_complete = 1;
+    fields.name = reinterpret_cast<const uint8_t*>(s_name);
+    fields.name_len = static_cast<uint8_t>(std::strlen(s_name));
+    fields.name_is_complete = 1;
+    if (ble_gap_adv_set_fields(&fields) != 0) {
+        ESP_LOGW(kTag, "advertising fields rejected");
+    }
+    ble_gap_adv_params params{};
+    params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    const int rc = ble_gap_adv_start(s_own_addr_type, nullptr, BLE_HS_FOREVER, &params,
+                                     [](ble_gap_event* event, void*) -> int {
+                                         if (event->type == BLE_GAP_EVENT_CONNECT) {
+                                             if (event->connect.status == 0) {
+                                                 s_conn = event->connect.conn_handle;
+                                                 s_connected_at = millisNow();
+                                                 s_hello_pending = true;
+                                                 s_authed = false;
+                                                 s_rx_length = 0;
+                                                 s_rx_overflow = false;
+                                                 ble_gap_adv_stop();
+                                             } else {
+                                                 startAdvertising();
+                                             }
+                                             return 0;
+                                         }
+                                         if (event->type == BLE_GAP_EVENT_DISCONNECT) {
+                                             s_conn = BLE_HS_CONN_HANDLE_NONE;
+                                             s_authed = false;
+                                             startAdvertising();
+                                             return 0;
+                                         }
+                                         return 0;
+                                     },
+                                     nullptr);
+    if (rc != 0 && rc != BLE_HS_EALREADY) ESP_LOGW(kTag, "adv start rc=%d", rc);
+}
+
+int accessCallback(uint16_t, uint16_t attr_handle, ble_gatt_access_ctxt* ctxt, void*) {
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR || attr_handle != s_rx_handle) return BLE_ATT_ERR_UNLIKELY;
+    const uint16_t length = OS_MBUF_PKTLEN(ctxt->om);
+    uint8_t buffer[256];
+    if (length > sizeof(buffer)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    if (os_mbuf_copydata(ctxt->om, 0, length, buffer) != 0) return BLE_ATT_ERR_UNLIKELY;
+    for (uint16_t i = 0; i < length; ++i) {
+        const char c = static_cast<char>(buffer[i]);
+        if (c == '\n') {
+            if (!s_rx_overflow && s_rx_length) {
+                Line line{};
+                std::memcpy(line.text, s_rx, s_rx_length);
+                line.text[s_rx_length < kLineCapacity ? s_rx_length : kLineCapacity - 1] = '\0';
+                if (s_line_queue) xQueueSend(s_line_queue, &line, 0);
+            }
+            s_rx_length = 0;
+            s_rx_overflow = false;
+            continue;
+        }
+        if (s_rx_length + 1 >= sizeof(s_rx)) {
+            s_rx_overflow = true;
+            continue;
+        }
+        s_rx[s_rx_length++] = c;
+    }
+    return 0;
+}
+
+const ble_gatt_chr_def kCharacteristics[] = {
+    {
+        &kRxUuid.u,          // uuid
+        accessCallback,      // access_cb
+        nullptr,             // arg
+        nullptr,             // descriptors
+        static_cast<ble_gatt_chr_flags>(BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP),
+        0,                   // min_key_size
+        &s_rx_handle,        // val_handle
+        nullptr,             // cpfd
+    },
+    {
+        &kTxUuid.u,
+        nullptr,
+        nullptr,
+        nullptr,
+        BLE_GATT_CHR_F_NOTIFY,
+        0,
+        &s_tx_handle,
+        nullptr,
+    },
+    {},
+};
+
+const ble_gatt_svc_def kServices[] = {
+    {
+        BLE_GATT_SVC_TYPE_PRIMARY,
+        &kServiceUuid.u,
+        nullptr,           // includes
+        kCharacteristics,  // characteristics
+    },
+    {},
+};
+
+void onSync() {
+    ble_hs_util_ensure_addr(0);
+    ble_hs_id_infer_auto(0, &s_own_addr_type);
+    startAdvertising();
+}
+
+void onReset(int reason) { ESP_LOGW(kTag, "host reset %d", reason); }
+
+void hostTask(void*) {
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
+
+#endif  // CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+
+}  // namespace
+
+void begin(const char* device_name, Hooks hooks) {
+    s_public_hooks = hooks;
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    std::snprintf(s_name, sizeof(s_name), "%s", device_name ? device_name : "StoryBox");
+    s_hooks = hooks;
+    s_line_queue = xQueueCreate(kQueueDepth, sizeof(Line));
+    s_command_queue = xQueueCreate(kQueueDepth, sizeof(Command));
+    if (!s_line_queue || !s_command_queue) {
+        ESP_LOGE(kTag, "cannot allocate queues");
+        return;
+    }
+    if (nimble_port_init() != ESP_OK) {
+        ESP_LOGE(kTag, "nimble_port_init failed");
+        return;
+    }
+    ble_hs_cfg.sync_cb = onSync;
+    ble_hs_cfg.reset_cb = onReset;
+    ble_svc_gap_device_name_set(s_name);
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+    const int count = ble_gatts_count_cfg(kServices);
+    const int added = ble_gatts_add_svcs(kServices);
+    if (count != 0 || added != 0) {
+        ESP_LOGE(kTag, "GATT registration failed: %d/%d", count, added);
+        return;
+    }
+    nimble_port_freertos_init(hostTask);
+    ESP_LOGI(kTag, "BLE service '%s' starting", s_name);
+#else
+    (void)device_name;
+    (void)hooks;
+    ESP_LOGW(kTag, "Bluetooth disabled in this build");
+#endif
+}
+
+void loop() {
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    if (s_hello_pending && s_conn != BLE_HS_CONN_HANDLE_NONE &&
+        millisNow() - s_connected_at >= 500) {
+        s_hello_pending = false;
+        sendHello(0);
+    }
+    Line line;
+    for (int i = 0; i < 4; ++i) {
+        if (!s_line_queue || xQueueReceive(s_line_queue, &line, 0) != pdTRUE) break;
+        processLine(line.text);
+    }
+    if (s_conn != BLE_HS_CONN_HANDLE_NONE && s_authed &&
+        millisNow() - s_last_state_at >= 1000) {
+        s_last_state_at = millisNow();
+        sendStateEvent();
+    }
+#endif
+}
+
+void setAdvertisingEnabled(bool enabled) {
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    s_advertising = enabled;
+    if (enabled) {
+        startAdvertising();
+    } else {
+        ble_gap_adv_stop();
+    }
+#else
+    (void)enabled;
+#endif
+}
+
+bool advertisingEnabled() {
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    return s_advertising;
+#else
+    return false;
+#endif
+}
+
+bool connected() {
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    return s_conn != BLE_HS_CONN_HANDLE_NONE;
+#else
+    return false;
+#endif
+}
+
+void setSnapshot(const Snapshot& snapshot) {
+    s_public_snapshot = snapshot;
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    s_snapshot = snapshot;
+#endif
+}
+
+bool takeCommand(Command& out) {
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    return s_command_queue && xQueueReceive(s_command_queue, &out, 0) == pdTRUE;
+#else
+    (void)out;
+    return false;
+#endif
+}
+
+const char* deviceName() { return s_name; }
+
+}

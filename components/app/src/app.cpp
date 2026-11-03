@@ -7,6 +7,7 @@
 #include "app_page.h"
 #include "app_services.h"
 #include "app_theme.h"
+#include "ble_service.h"
 #include "config.h"
 #include "display.h"
 #include "esp_log.h"
@@ -65,10 +66,152 @@ Persistence::ParentalStore<Board::FramDevice>* s_parental_store = nullptr;
 Persistence::ParentalPolicy s_policy;
 bool s_parental_ready = false;
 uint32_t s_parental_save_at = 0;
+uint32_t s_ble_publish_at = 0;
 
 uint32_t randomU32() { return esp_random(); }
 
 uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
+
+// ---- BLE hooks: the app owns the PCTL record, the service only asks --------
+
+bool bleBind(void*, const char* code, char* token, std::size_t capacity) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_parental_store || !s_parental_ready) return false;
+    Persistence::ParentalRecord record = s_parental_store->value();
+    if (!Persistence::parentalBind(record, randomU32, code, token, capacity)) return false;
+    if (!s_parental_store->save(record)) return false;
+    s_policy.begin(s_parental_store->value(), nowMs());
+    return true;
+#else
+    (void)code; (void)token; (void)capacity;
+    return false;
+#endif
+}
+
+bool bleVerifyToken(void*, const char* token) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_parental_store || !token) return false;
+    return Persistence::parentalVerifyToken(s_parental_store->value(), token);
+#else
+    (void)token;
+    return false;
+#endif
+}
+
+bool bleVerifyPin(void*, const char* pin) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_parental_store || !pin) return false;
+    return Persistence::parentalVerifyPin(s_parental_store->value(), pin);
+#else
+    (void)pin;
+    return false;
+#endif
+}
+
+void bleSyncTime(void*, uint32_t epoch, int16_t timezone) {
+    if (s_parental_ready) s_policy.syncTime(epoch, timezone, nowMs());
+}
+
+bool bleHasPin(void*) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    return s_parental_store && Persistence::parentalHasPin(s_parental_store->value());
+#else
+    return false;
+#endif
+}
+
+bool bleBound(void*) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    return s_parental_store && Persistence::parentalBound(s_parental_store->value());
+#else
+    return false;
+#endif
+}
+
+const char* bleBindCode(void*) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    return s_parental_store ? Persistence::parentalBindCode(s_parental_store->value()) : "";
+#else
+    return "";
+#endif
+}
+
+Ble::Hooks makeBleHooks() {
+    Ble::Hooks hooks{};
+    hooks.bind = bleBind;
+    hooks.verify_token = bleVerifyToken;
+    hooks.verify_pin = bleVerifyPin;
+    hooks.sync_time = bleSyncTime;
+    hooks.has_pin = bleHasPin;
+    hooks.bound = bleBound;
+    hooks.bind_code = bleBindCode;
+    return hooks;
+}
+
+void handleBleCommands() {
+    Ble::Command command;
+    for (int i = 0; i < 4; ++i) {
+        if (!Ble::takeCommand(command)) break;
+        switch (command.action) {
+            case Ble::Action::Volume:
+                setVolume(command.value);
+                break;
+            case Ble::Action::Play:
+                pausePlayback(false);
+                break;
+            case Ble::Action::Pause:
+                pausePlayback(true);
+                break;
+            case Ble::Action::Toggle:
+                pausePlayback(g_playback.snapshot().state == Audio::PlaybackState::Playing);
+                break;
+            case Ble::Action::Next:
+                if (g_playlist.move(1)) playCurrent(true);
+                break;
+            case Ble::Action::Prev:
+                if (g_playlist.move(-1)) playCurrent(true);
+                break;
+            case Ble::Action::Stop:
+                stopPlayback();
+                break;
+            case Ble::Action::PlayStory:
+                openStory(static_cast<std::size_t>(command.value < 0 ? 0 : command.value));
+                break;
+            case Ble::Action::PlayMusic: {
+                const auto snapshot = s_catalog;
+                if (!snapshot || command.value < 0 ||
+                    static_cast<std::size_t>(command.value) >= snapshot->tracks.size()) {
+                    break;
+                }
+                const auto& track = snapshot->tracks[static_cast<std::size_t>(command.value)];
+                if (g_playlist.select(snapshot, 0) && g_playlist.seekId(track.id)) {
+                    playCurrent(true);
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+void publishBleState() {
+    Ble::Snapshot snapshot{};
+    const auto state = g_playback.snapshot();
+    snapshot.playing = state.state == Audio::PlaybackState::Playing;
+    snapshot.paused = state.state == Audio::PlaybackState::Paused;
+    snapshot.volume = s_context.volume;
+    snapshot.volume_min = 0;
+    snapshot.volume_max = 21;
+    const auto* track = g_playlist.current();
+    snapshot.mode = (snapshot.playing || snapshot.paused) ? "music" : "idle";
+    snapshot.title = track ? track->name.c_str() : "";
+    snapshot.current = state.sample_rate ? static_cast<uint32_t>(state.submitted_frames / state.sample_rate) : 0;
+    snapshot.duration = 0;
+    snapshot.used = parentalUsedSeconds();
+    snapshot.lock = parentalLockCode();
+    Ble::setSnapshot(snapshot);
+}
 
 void drawBoot(const char* title, const char* line) {
     auto& g = Display::canvas();
@@ -116,6 +259,7 @@ void run() {
     Fonts::begin();
     Input::begin();
     Hall::begin();
+    Ble::begin("StoryBox", makeBleHooks());
     Theme::init();
     drawBoot("正在启动", "");
     Display::present(true);
@@ -242,6 +386,15 @@ void run() {
             page->invalidate();
         }
         parentalSaveIfDirty(now);
+
+        // BLE control channel: drain commands, then publish a 1 Hz state
+        // snapshot for the mini-program.
+        Ble::loop();
+        handleBleCommands();
+        if (now - s_ble_publish_at >= 1000) {
+            s_ble_publish_at = now;
+            publishBleState();
+        }
 
         if (s_notice_until && now >= s_notice_until) {
             s_notice_until = 0;
@@ -432,6 +585,20 @@ const char* lockReasonText(Persistence::PolicyLock lock) {
         case Persistence::PolicyLock::Bedtime: return "已到就寝时间";
         case Persistence::PolicyLock::Remote: return "家长已远程锁定";
         case Persistence::PolicyLock::ClockRequired: return "需要先同步时间";
+        default: return "";
+    }
+}
+
+uint32_t parentalUsedSeconds() {
+    if (!s_parental_ready) return 0;
+    return s_policy.record().used;
+}
+
+const char* parentalLockCode() {
+    switch (parentalLock()) {
+        case Persistence::PolicyLock::DailyLimit: return "daily";
+        case Persistence::PolicyLock::Bedtime: return "bedtime";
+        case Persistence::PolicyLock::Remote: return "remote";
         default: return "";
     }
 }

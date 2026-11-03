@@ -46,6 +46,8 @@ bool categoryAllowed(int category);
 void parentalTick(bool playing);
 void parentalSaveIfDirty(uint32_t now_ms);
 const char* lockReasonText(Persistence::PolicyLock lock);
+uint32_t parentalUsedSeconds();
+const char* parentalLockCode();
 
 Media::Catalog emptyCatalog();
 

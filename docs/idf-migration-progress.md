@@ -236,6 +236,25 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
   默认配置 `0x16e8a0` 与确认 FRAM 配置 `0x174640` 均构建通过（后者编译了 FRAM 分支；
   首次构建曾遇到 `esp_lcd_panel_rgb.c` 的编译器段错误，重跑即通过，疑为并行内存压力）。
 
+### P4（第一批）：BLE 控制通道（NimBLE）
+
+- `sdkconfig.defaults` 打开 NimBLE 外设模式（1 连接、MTU 247、host 任务栈 4 KiB）。
+- 新增 `components/ble`：与旧固件**相同的 128 位 UUID**（service/RX/TX），
+  RX 累积字节流按 `\n` 拆行入队，TX 按 MTU-3 分片 notify；JSON 收发沿用
+  `{"v":1,"id":..,"ok":..}` 形状，握手/状态字段与小程序一致。
+- 协议：`hello`（含 fw/name/bound/hasPin/volMin/volMax，未绑定时给 bind code）、
+  `bind`（校验绑定码 → 返回 token）、`auth`（token 或 PIN，含“已绑定但无 PIN 放行”的
+  旧规则）、`sync`（校时进策略核）、`get state/config`、`ctrl play|pause|toggle|next|prev|
+  stop|volume|story|music`、`pin verify`；每秒向已认证连接推一条 `evt:"state"`。
+- 应用层：`Ble::begin()` 在显示/输入之后启动；主循环里 `Ble::loop()` 拆包、
+  应用消费命令队列（音量/播放/切曲/点播故事或音乐），并每秒发布一次状态快照
+  （播放态、音量、当前曲名、已用时长、锁定原因）。设置页「蓝牙广播」开关已接通。
+- 尚未迁移：`get stories/music` 列表（返回空列表占位，列表浏览仍走 USB）、
+  `set` 家长配置项、`pin set`、`reset`/`unbind` 命令。
+- 验证：打开 BT 后重新生成 sdkconfig 并构建通过，`storybox.bin` = `0x1be250`
+  （比无 BT 版本多约 320 KiB 的协议栈）；USB 联合诊断配置在开启 BT 后同样构建通过
+  （`0x1942a0`）。目前只能在编译层验证，**没有真机射频/配对验收**。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
