@@ -358,6 +358,18 @@ bool hostRoute(void*, cJSON* request, const char* command, const char* action, c
                     saveSettings();
                 }
             }
+        } else if (std::strcmp(action, "rescan") == 0) {
+            // Rebuild the media index on demand (hosts that changed the card
+            // outside the protocol need this).
+            if (!s_context.sd_mounted) {
+                *error = "NO_SD";
+                return true;
+            }
+            if (!refreshCatalog()) {
+                *error = "RESCAN_FAILED";
+                return true;
+            }
+            s_context.catalog_ready = true;
         } else if (std::strcmp(action, "stats") != 0) {
             *error = "BAD_ACT";
             return true;
