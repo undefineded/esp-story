@@ -347,6 +347,22 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
   播放/视频/主机活跃、0 分钟禁用；产品配置 `0x1c73d0`，深睡配置 `0x1c9e60`
   （`sdkconfig.power`）。真机熄屏电流、唤醒灵敏度与深睡电流未测。
 
+### P6（第三批）：OTA 双槽分区
+
+- 新增 [partitions.ota.csv](partitions.ota.csv)：16 MB Flash 的双槽布局 ——
+  `nvs` 0x9000、`otadata` 0xf000（IDF 引导器要求这个位置）、`phy_init` 0x11000、
+  `ota_0` 0x20000 / 3 MiB、`ota_1` 0x320000 / 3 MiB。当前镜像 1.9 MB，
+  每槽余量 41%。
+- 新增 `sdkconfig.ota` 选择该分区表（`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME`）。
+  构建已验证：`storybox.bin` = `0x1c73d0`，最小 app 分区 `0x300000`，
+  且生成 `ota_data_initial.bin`（烧录地址 0xf000）。
+- **刷写风险已写明**：这是分区表变更，需要整片擦除并重新初始化的 NVS；
+  FRAM 与 TF 卡内容不受影响。默认分区表仍是单槽 `factory`，不影响现有设备。
+- 尚未实现：升级数据通道（USB 的 raw 通道目前只允许 `fs write_chunk`，
+  需要给 OTA 单开一条通道）、`esp_ota` 起停封装、回滚策略
+  （`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` 需要固件启动后调用
+  `esp_ota_mark_app_valid_cancel_rollback()`，本轮未开启）。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。

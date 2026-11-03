@@ -1,0 +1,5 @@
+# Dual-slot OTA layout. The layout change wipes the flash (nvs included), so
+# flashing this variant requires a full erase and re-provisioning; the FRAM and
+# the TF card are untouched.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.ota.csv"
