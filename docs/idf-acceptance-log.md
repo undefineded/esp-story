@@ -100,3 +100,43 @@ I pn532: [NFC] I2C scan: 0x50 0x51 0x52 0x53 0x54 0x55 0x56 0x57
 - PN532 按用户要求暂停调试：原生服务在探测失败后不再每 3.5 s 重试（`3a02810`），
   I2C NACK 从每 3.5 s 3 行降到 5 分钟一次；第 7 组整体挂起。
 - 音量：整晚未改动，未写 FRAM（该镜像 FRAM 未确认，音量只在 RAM）。
+
+## 2026-11-04 第二轮：FRAM / 界面 / 小程序 gap
+
+用户上板后报三件事：配置重启丢失、列表/播放器与旧版完全不一致、蓝牙和小程序有 gap。
+
+### FRAM 持久化
+
+- 根因不是硬件：`build-ui` 的 `CONFIG_STORYBOX_FRAM_CONFIRMED` 是关闭的，整条 FRAM 路径被
+  编译掉。I2C 扫描 `0x50..0x57` 全部应答，符合 MB85RC16 的 bank 别名。
+- 默认开启 + 运行时 8 bank 写读探测后，真机启动日志：
+
+```
+I (1503) fram: legacy FRAM online (8 bank probes passed)
+I (1513) app: FRAM ready: brightness=40 rotation=3 eq=0 volume=0 favorites=yes
+```
+
+- 用 `build-usb-product`（n=3）做写→重启→读：brightness 55、eq bass、rotation 1、volume 7
+  全部保持；判定 **PASS**。测试后恢复 `40 / 3 / vocal / 0`，没有留下大音量。
+- 结论：**FRAM 持久化已通**；家长记录（`bound:true`）也能从 FRAM 恢复。
+
+### BLE
+
+- 设备名改为 `StoryBox-CBD6`（BT MAC 后两字节），与小程序 `StoryBox-` 前缀一致；
+  名字放 scan response，避免 31 字节广播包溢出。
+- 启动日志：`BLE service 'StoryBox-CBD6' starting`、`GAP procedure initiated: advertise`
+  （itvl 160/320），无 `advertising fields rejected` / `scan response fields rejected`。
+- 手机侧扫描、绑定、童锁、`evt:state` 的 `mode/title/dur` 仍需实测（本轮无手机）。
+
+### 界面
+
+- 代码已按 `src/ui.cpp` 恢复 42px 列表行、旧图标/字体、播放器封面卡/信息列/控制条、
+  音频故事复用播放器布局、视频控制条进度与时间。
+- **没有像素级真机证据**：串口只能确认编译/启动，需要目视确认列表与播放器。
+
+### 本轮其它观察
+
+- PN532 仍不在线：`probe failed: NoDevice`，I2C 扫描仍能看到 `0x50..0x57`（FRAM），符合预期；
+  NACK 已按 5 分钟退避。
+- 主机测试：`file_reader`/`upload_transaction`/`transfer_frame` 仍是 Windows POSIX 语义问题；
+  `media_library` 的非 ASCII 目录在 MinGW 下可能失败。其余相关测试通过。

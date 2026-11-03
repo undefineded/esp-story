@@ -5,9 +5,11 @@
 
 #include "cJSON.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
 #if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
@@ -24,7 +26,10 @@ namespace Ble {
 namespace {
 
 constexpr const char* kTag = "ble";
-constexpr std::size_t kLineCapacity = 520;
+// The mini-program sends allowStories/allowCats as one JSON array; a full
+// allowlist is several hundred bytes. 520 bytes overflowed and the command was
+// dropped without an answer, which the phone reported as a response timeout.
+constexpr std::size_t kLineCapacity = 1024;
 constexpr int kQueueDepth = 8;
 
 Hooks s_public_hooks;
@@ -86,16 +91,32 @@ bool sendText(const char* text) {
     while (sent < length) {
         std::size_t size = length - sent;
         if (size > chunk) size = chunk;
-        os_mbuf* packet = ble_hs_mbuf_from_flat(text + sent, static_cast<uint16_t>(size));
-        if (!packet) return false;
-        if (ble_gatts_notify_custom(s_conn, s_tx_handle, packet) != 0) return false;
+        // A response can need several notifications (hello/config are larger
+        // than one MTU). If the controller's buffers are momentarily full the
+        // old code dropped the tail and the phone only saw a timeout; retry the
+        // chunk a few times instead.
+        int rc = BLE_HS_ENOMEM;
+        for (int attempt = 0; attempt < 4 && rc != 0; ++attempt) {
+            os_mbuf* packet = ble_hs_mbuf_from_flat(text + sent, static_cast<uint16_t>(size));
+            if (!packet) {
+                vTaskDelay(pdMS_TO_TICKS(4));
+                continue;
+            }
+            rc = ble_gatts_notify_custom(s_conn, s_tx_handle, packet);
+            if (rc != 0) vTaskDelay(pdMS_TO_TICKS(4));
+        }
+        if (rc != 0) {
+            ESP_LOGW(kTag, "notify failed rc=%d at %u/%u", rc, static_cast<unsigned>(sent),
+                     static_cast<unsigned>(length));
+            return false;
+        }
         sent += size;
     }
     return true;
 }
 
 void sendDoc(cJSON* root) {
-    char buffer[760];
+    char buffer[1024];
     const bool ok = cJSON_PrintPreallocated(root, buffer, sizeof(buffer), false);
     cJSON_Delete(root);
     if (!ok) {
@@ -609,20 +630,32 @@ void processLine(const char* line) {
 
 void startAdvertising() {
     if (!s_advertising || s_conn != BLE_HS_CONN_HANDLE_NONE) return;
+    // The legacy Arduino firmware advertised "<name>-XXXX" from the BT MAC and
+    // kept the 128-bit service UUID in the advertising packet. The mini-program
+    // scans for the "StoryBox-" prefix, so a bare "StoryBox" is invisible to its
+    // device list. The full name is 13 bytes; together with the UUID it no
+    // longer fits the 31-byte advertising packet, so the name goes into the scan
+    // response exactly like NimBLEAdvertising::setScanResponse(true) did.
     ble_hs_adv_fields fields{};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.uuids128 = &kServiceUuid;
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
-    fields.name = reinterpret_cast<const uint8_t*>(s_name);
-    fields.name_len = static_cast<uint8_t>(std::strlen(s_name));
-    fields.name_is_complete = 1;
     if (ble_gap_adv_set_fields(&fields) != 0) {
         ESP_LOGW(kTag, "advertising fields rejected");
+    }
+    ble_hs_adv_fields response{};
+    response.name = reinterpret_cast<const uint8_t*>(s_name);
+    response.name_len = static_cast<uint8_t>(std::strlen(s_name));
+    response.name_is_complete = 1;
+    if (ble_gap_adv_rsp_set_fields(&response) != 0) {
+        ESP_LOGW(kTag, "scan response fields rejected");
     }
     ble_gap_adv_params params{};
     params.conn_mode = BLE_GAP_CONN_MODE_UND;
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    params.itvl_min = 160;
+    params.itvl_max = 320;
     const int rc = ble_gap_adv_start(s_own_addr_type, nullptr, BLE_HS_FOREVER, &params,
                                      [](ble_gap_event* event, void*) -> int {
                                          if (event->type == BLE_GAP_EVENT_CONNECT) {
@@ -654,7 +687,7 @@ void startAdvertising() {
 int accessCallback(uint16_t, uint16_t attr_handle, ble_gatt_access_ctxt* ctxt, void*) {
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR || attr_handle != s_rx_handle) return BLE_ATT_ERR_UNLIKELY;
     const uint16_t length = OS_MBUF_PKTLEN(ctxt->om);
-    uint8_t buffer[256];
+    uint8_t buffer[512];
     if (length > sizeof(buffer)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     if (os_mbuf_copydata(ctxt->om, 0, length, buffer) != 0) return BLE_ATT_ERR_UNLIKELY;
     for (uint16_t i = 0; i < length; ++i) {
@@ -743,7 +776,12 @@ void hostTask(void*) {
 void begin(const char* device_name, Hooks hooks) {
     s_public_hooks = hooks;
 #if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
-    std::snprintf(s_name, sizeof(s_name), "%s", device_name ? device_name : "StoryBox");
+    // Match the Arduino firmware and the mini-program's "StoryBox-" scan filter:
+    // the suffix is the last two bytes of the Bluetooth MAC.
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_BT);
+    const char* base = (device_name && device_name[0]) ? device_name : "StoryBox";
+    std::snprintf(s_name, sizeof(s_name), "%s-%02X%02X", base, mac[4], mac[5]);
     s_hooks = hooks;
     s_line_queue = xQueueCreate(kQueueDepth, sizeof(Line));
     s_command_queue = xQueueCreate(kQueueDepth, sizeof(Command));

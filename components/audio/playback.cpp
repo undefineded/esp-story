@@ -91,11 +91,14 @@ void Playback::execute(const Command& command) {
         ++current_.generation;
         equalizer_.reset();
         current_.submitted_frames = 0;
-        current_.sample_rate = current_.bitrate = 0;
+        current_.sample_rate = current_.bitrate = current_.duration = 0;
         std::strcpy(current_.path, command.path);
         const auto result = stream_.open("/sdcard", command.path);
         if (result != ESP_OK) finish(PlaybackState::Failed, result);
-        else current_.state = command.auto_start ? PlaybackState::Playing : PlaybackState::Paused;
+        else {
+            current_.duration = stream_.duration();
+            current_.state = command.auto_start ? PlaybackState::Playing : PlaybackState::Paused;
+        }
     } else if (command.action == Action::Pause && current_.state == PlaybackState::Playing) {
         // Keep decoded PCM and file position. Already queued DMA may drain.
         current_.state = PlaybackState::Paused;
@@ -129,6 +132,7 @@ void Playback::step() {
             finish(PlaybackState::Failed, ESP_ERR_NOT_SUPPORTED); return;
         }
         current_.bitrate = stream_.bitrate();
+        current_.duration = stream_.duration();
         pending_frames_ = stream_.frames();
         pending_offset_ = 0;
         equalizer_.configure(current_.sample_rate, eq_.load());

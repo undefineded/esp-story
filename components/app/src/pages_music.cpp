@@ -1,6 +1,6 @@
 #include <cstdio>
+#include <cstring>
 #include <string>
-#include <vector>
 
 #include "app_context.h"
 #include "app_page.h"
@@ -8,14 +8,26 @@
 #include "app_theme.h"
 #include "display.h"
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "fonts.h"
+#include "player_view.h"
 
+// Music pages rebuilt from the Arduino UI (src/ui.cpp). The layout constants,
+// fonts and icons intentionally match that implementation: 42px rows with a
+// leading note/folder/heart glyph, and the player's cover card + information
+// column + ink transport bar. The migrated build had drifted to a simplified
+// 38px row and a dark player, which no longer matched the shipped device.
 namespace App {
 namespace {
 
 constexpr int kVisibleRows = 4;
 constexpr int kListRowY = 36;
-constexpr int kListRowHeight = 38;
+constexpr int kListRowHeight = 42;
+constexpr int kInfoX = 112;
+constexpr int kInfoW = 198;
+constexpr int kTitleHeight = 22;
+
+uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
 int wrap(int value, int count) {
     if (count <= 0) return 0;
@@ -23,7 +35,14 @@ int wrap(int value, int count) {
     return value < 0 ? value + count : value;
 }
 
-void drawTopBar(lgfx::LGFXBase& g, const char* title) {
+std::string stripExtension(const std::string& name) {
+    const auto dot = name.find_last_of('.');
+    return dot == std::string::npos || dot == 0 ? name : name.substr(0, dot);
+}
+
+// ---- shared chrome (old drawTopBarBase / drawVolume / drawLogo) ------------
+
+void drawTopBar(lgfx::LGFXBase& g) {
     const auto& c = Theme::colors();
     Theme::setTopBarColor(c.coral);
     g.fillRect(0, 0, 320, 30, c.coral);
@@ -32,49 +51,58 @@ void drawTopBar(lgfx::LGFXBase& g, const char* title) {
     g.setFont(Fonts::body());
     g.setTextColor(TFT_WHITE, c.coral);
     g.drawString("小小故事盒", 36, 7);
-    g.drawRightString(title, 310, 7);
     Theme::drawHallIcon(g, ctx().hall, c.coral);
     Theme::drawChildLockBadge(g, ctx().child_locked, c.coral);
 }
 
 void drawCaption(lgfx::LGFXBase& g, const char* text) {
     const auto& c = Theme::colors();
-    g.setFont(Fonts::small());
-    g.setTextColor(c.text, c.paper);
-    g.drawCenterString(text, 160, 224);
-}
-
-// Row card used by both lists: optional icon slot, title and right-hand value.
-void drawListRow(lgfx::LGFXBase& g, int y, int height, const std::string& title,
-                 const std::string& right, bool selected, bool marker) {
-    const auto& c = Theme::colors();
-    const uint16_t background = selected ? c.yellow : TFT_WHITE;
-    if (selected) g.fillRoundRect(13, y + 3, 300, height, 6, c.ink);
-    g.fillRoundRect(10, y, 300, height, 6, selected ? c.ink : TFT_WHITE);
-    g.fillRoundRect(12, y + 2, 296, height - 4, 5, background);
-    if (!selected) g.drawRoundRect(10, y, 300, height, 6, c.track_border);
-
-    char text[96];
-    Theme::fitText(g, title.c_str(), 236, text, sizeof(text));
     g.setFont(Fonts::body());
-    g.setTextColor(c.text, background);
-    g.drawString(text, 24, y + 8);
-
-    if (!right.empty()) {
-        g.setFont(Fonts::small());
-        g.drawRightString(right.c_str(), 296, y + 11);
-    }
-    if (marker) {
-        g.fillCircle(308, y + height / 2, 5, c.green);
-    }
+    g.setTextColor(c.text, c.paper);
+    g.drawCenterString(text, 160, 212);
 }
+
+// ---- old icons -----------------------------------------------------------
+
+void iconNote(lgfx::LGFXBase& g, int x, int y, uint16_t color) {
+    const auto& c = Theme::colors();
+    g.fillCircle(x + 6, y + 14, 5, color);
+    g.drawCircle(x + 6, y + 14, 5, c.ink);
+    g.fillRect(x + 10, y + 2, 3, 14, c.ink);
+    g.fillRect(x + 13, y + 2, 7, 4, c.ink);
+}
+
+void iconFolder(lgfx::LGFXBase& g, int x, int y, uint16_t color) {
+    const auto& c = Theme::colors();
+    g.fillRect(x, y + 2, 10, 5, color);
+    g.drawRect(x, y + 2, 10, 5, c.ink);
+    g.fillRoundRect(x, y + 5, 22, 15, 3, color);
+    g.drawRoundRect(x, y + 5, 22, 15, 3, c.ink);
+}
+
+void iconFav(lgfx::LGFXBase& g, int x, int y, uint16_t color) {
+    g.fillCircle(x + 4, y + 5, 4, color);
+    g.fillCircle(x + 11, y + 5, 4, color);
+    g.fillTriangle(x, y + 7, x + 15, y + 7, x + 7, y + 16, color);
+}
+
+// Row card: white fill + outline; selected: yellow fill, ink outline and the
+// 3px hard shadow used by every card in the Arduino UI.
+void drawRowCard(lgfx::LGFXBase& g, int y, bool selected) {
+    const auto& c = Theme::colors();
+    if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, c.ink);
+    g.fillRoundRect(10, y, 300, 38, 6, selected ? c.ink : TFT_WHITE);
+    g.fillRoundRect(12, y + 2, 296, 34, 5, selected ? c.yellow : TFT_WHITE);
+    if (!selected) g.drawRoundRect(10, y, 300, 38, 6, c.track_border);
+}
+
+// ---- music category list -------------------------------------------------
 
 class MusicListPage final : public Page {
 public:
     const char* id() const override { return "music-list"; }
 
     void enter() override {
-        selected_ = 0;
         catalog_ = catalog();
         invalidate();
         if (!ctx().catalog_ready) requestScan();
@@ -91,7 +119,7 @@ public:
             case Key::Prev: selected_ = wrap(selected_ - 1, count); break;
             case Key::Ok:
             case Key::Set: openSelection(); break;
-            case Key::SetLong: goHome(); break;
+            case Key::SetLong:
             case Key::OkDouble: goHome(); break;
             default: break;
         }
@@ -101,6 +129,7 @@ public:
         auto latest = catalog();
         if (latest != catalog_) {
             catalog_ = latest;
+            if (selected_ >= entryCount()) selected_ = 0;
             invalidate();
         }
     }
@@ -109,44 +138,62 @@ public:
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
         g.fillScreen(c.paper);
-        drawTopBar(g, "音乐");
+        drawTopBar(g);
 
         const int total = entryCount();
-        int top = selected_ - (kVisibleRows - 1);
-        if (top > total - kVisibleRows) top = total - kVisibleRows;
-        if (top < 0) top = 0;
-
-        g.fillRect(8, kListRowY, 310, 172, c.paper);
+        const int top = listTop(selected_, total);
+        g.fillRect(8, kListRowY, 306, kListRowHeight * kVisibleRows, c.paper);
         for (int row = 0; row < kVisibleRows; ++row) {
             const int index = top + row;
             if (index >= total) break;
             const int y = kListRowY + row * kListRowHeight;
-            if (index == 0) {
-                drawListRow(g, y, kListRowHeight, "全部歌曲",
-                            std::to_string(catalog_ ? catalog_->tracks.size() : 0u),
-                            index == selected_, false);
-            } else if (catalog_ && index - 1 < static_cast<int>(catalog_->categories.size())) {
-                const auto& name = catalog_->categories[index - 1];
-                drawListRow(g, y, kListRowHeight, name, categoryCount(index),
-                            index == selected_, false);
-            }
+            const bool selected = index == selected_;
+            drawRowCard(g, y, selected);
+
+            const uint16_t tint = selected ? c.coral : c.aqua;
+            if (index == 0) iconNote(g, 24, y + 8, tint);
+            else iconFolder(g, 24, y + 10, tint);
+
+            const uint16_t background = selected ? c.yellow : TFT_WHITE;
+            char title[96];
+            const char* name = index == 0 ? "全部歌曲"
+                                          : catalog_->categories[static_cast<std::size_t>(index - 1)].c_str();
+            Theme::fitText(g, name, 206, title, sizeof(title));
+            g.setFont(Fonts::title());
+            g.setTextColor(c.text, background);
+            g.drawString(title, 54, y + 9);
+
+            char suffix[16];
+            std::snprintf(suffix, sizeof(suffix), "%d首", categoryCount(index));
+            g.setFont(Fonts::small());
+            g.setTextColor(c.text, background);
+            g.drawRightString(suffix, 296, y + 14);
         }
 
-        drawCaption(g, "旋钮选择  OK 进入  SET 长按回主页");
+        drawCaption(g, "OK播放  长按SET回主页");
     }
 
 private:
+    static int listTop(int selected, int count) {
+        int top = selected >= kVisibleRows ? selected - kVisibleRows + 1 : 0;
+        if (top > count - kVisibleRows) top = count - kVisibleRows;
+        return top < 0 ? 0 : top;
+    }
+
     int entryCount() const {
         return 1 + (catalog_ ? static_cast<int>(catalog_->categories.size()) : 0);
     }
 
-    std::string categoryCount(int entry) const {
-        if (!catalog_) return "0";
-        std::size_t count = 0;
+    int categoryCount(int entry) const {
+        if (!catalog_) return 0;
+        // Entry 0 is "all songs": the scanner stores loose /music MP3s with
+        // category 0, so summing category 0 would only count the top level.
+        if (entry == 0) return static_cast<int>(catalog_->tracks.size());
+        int count = 0;
         for (const auto& track : catalog_->tracks) {
             if (track.category == entry) ++count;
         }
-        return std::to_string(count);
+        return count;
     }
 
     void openSelection() {
@@ -154,23 +201,28 @@ private:
             notify("列表为空，先刷新");
             return;
         }
-        if (!playlist().select(catalog_, selected_)) {
-            notify("该分类没有曲目");
-            return;
-        }
-        if (!App::playCurrent(false)) {
-            notify("播放器加载失败");
-            return;
+        const bool already_current =
+            currentStory() < 0 && playlist().category() == selected_ && playlist().size() > 0 &&
+            (playback().snapshot().state == Audio::PlaybackState::Playing ||
+             playback().snapshot().state == Audio::PlaybackState::Paused);
+        if (!already_current) {
+            if (!playlist().select(catalog_, selected_)) {
+                notify("该分类没有曲目");
+                return;
+            }
+            if (!App::playCurrent(true)) {
+                notify("播放器加载失败");
+                return;
+            }
         }
         pushPage(createPlayerPage());
-        pushPage(createTrackListPage());
     }
 
     void requestScan() {
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
         g.fillScreen(c.paper);
-        drawTopBar(g, "音乐");
+        drawTopBar(g);
         Theme::drawSmileFace(g, 160, 96, 16);
         g.setFont(Fonts::title());
         g.setTextColor(c.text, c.paper);
@@ -181,6 +233,7 @@ private:
         const bool ok = refreshCatalog();
         ctx().catalog_ready = ok;
         catalog_ = catalog();
+        selected_ = 0;
         invalidate();
         if (!ok) notify("扫描失败，请检查 TF 卡");
     }
@@ -188,6 +241,8 @@ private:
     int selected_ = 0;
     CatalogPtr catalog_;
 };
+
+// ---- current track list --------------------------------------------------
 
 class TrackListPage final : public Page {
 public:
@@ -200,25 +255,36 @@ public:
 
     void handle(const Event& event) override {
         const int count = static_cast<int>(playlist().size());
-        if (!count) return;
+        if (!count) {
+            if (event.key == Key::SetLong || event.key == Key::OkDouble) goHome();
+            return;
+        }
         if (event.delta) {
-            moveBy(event.delta);
+            selected_ = wrap(selected_ + event.delta, count);
             return;
         }
         switch (event.key) {
-            case Key::Next: moveBy(1); break;
-            case Key::Prev: moveBy(-1); break;
-            case Key::NextLong:
-            case Key::Ok: {
+            case Key::Next: selected_ = wrap(selected_ + 1, count); break;
+            case Key::Prev: selected_ = wrap(selected_ - 1, count); break;
+            case Key::Ok:
+            case Key::Set: {
                 const int delta = selected_ - static_cast<int>(playlist().position());
                 if (delta) playlist().move(delta);
-                if (App::playCurrent(true)) pushPage(createPlayerPage());
+                if (App::playCurrent(true)) popPage();
                 break;
             }
-            case Key::SetLong: goHome(); break;
-            case Key::OkDouble: popPage(); break;
+            // Long NEXT/LAST returns to the player without stopping it, which is
+            // how the Arduino track list behaved.
+            case Key::NextLong:
+            case Key::PrevLong:
+            case Key::OkDouble:
+                popPage();
+                break;
             case Key::OkLong:
                 toggleFavorite();
+                break;
+            case Key::SetLong:
+                goHome();
                 break;
             default: break;
         }
@@ -228,39 +294,52 @@ public:
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
         g.fillScreen(c.paper);
-        drawTopBar(g, "歌曲");
+        drawTopBar(g);
 
         const int total = static_cast<int>(playlist().size());
-        int top = selected_ - (kVisibleRows - 1);
-        if (top > total - kVisibleRows) top = total - kVisibleRows;
-        if (top < 0) top = 0;
-
-        g.fillRect(8, kListRowY, 310, 172, c.paper);
+        const int top = listTop(selected_, total);
+        g.fillRect(8, kListRowY, 306, kListRowHeight * kVisibleRows, c.paper);
         for (int row = 0; row < kVisibleRows; ++row) {
             const int index = top + row;
             if (index >= total) break;
             const int y = kListRowY + row * kListRowHeight;
+            const bool selected = index == selected_;
+            const bool playing = index == static_cast<int>(playlist().position());
+            drawRowCard(g, y, selected);
+
+            const uint16_t background = selected ? c.yellow : TFT_WHITE;
             const int delta = index - static_cast<int>(playlist().position());
             const auto* track = trackAt(delta);
             if (!track) break;
-            std::string right;
-            if (App::favorite(globalIndex(delta))) right = "♥";
-            drawListRow(g, y, kListRowHeight, track->name, right,
-                        index == selected_, index == static_cast<int>(playlist().position()));
+
+            const bool favorite = App::favorite(globalIndex(delta));
+            if (favorite) iconFav(g, 24, y + 7, c.coral);
+            else iconNote(g, 24, y + 8, playing ? c.coral : c.aqua);
+
+            char title[96];
+            Theme::fitText(g, stripExtension(track->name).c_str(), 200, title, sizeof(title));
+            g.setFont(Fonts::title());
+            g.setTextColor(playing ? c.coral : c.text, background);
+            g.drawString(title, 54, y + 9);
+
+            if (playing) {
+                g.setFont(Fonts::small());
+                g.setTextColor(c.coral, background);
+                g.drawRightString("播放中", 296, y + 14);
+            }
         }
 
-        drawCaption(g, "OK 播放  长按OK收藏  SET 长按回主页");
+        drawCaption(g, "OK播放 长按收藏 长按SET回主页");
     }
 
 private:
-    void moveBy(int delta) {
-        const int count = static_cast<int>(playlist().size());
-        selected_ = wrap(selected_ + delta, count);
-        invalidate();
+    static int listTop(int selected, int count) {
+        int top = selected >= kVisibleRows ? selected - kVisibleRows + 1 : 0;
+        if (top > count - kVisibleRows) top = count - kVisibleRows;
+        return top < 0 ? 0 : top;
     }
 
-    // Walk a playlist copy so the active playback position is never disturbed
-    // by merely browsing the list.
+    // Walk a playlist copy so browsing never disturbs the active position.
     const Media::Track* trackAt(int delta) {
         scratch_ = playlist();
         if (!scratch_.move(delta)) return nullptr;
@@ -289,17 +368,21 @@ private:
     Media::Playlist scratch_;
 };
 
-// Player page shows the current playlist entry and drives playback commands.
+// ---- music player --------------------------------------------------------
+
 class PlayerPage final : public Page {
 public:
     const char* id() const override { return "player"; }
 
     void enter() override {
-        request_ = 0;
         last_generation_ = 0;
         drawn_second_ = 0xFFFFFFFF;
         last_state_ = -1;
+        drawn_volume_ = -1;
+        drawn_hall_ = -1;
+        view_.reset(nowMs());
         invalidate();
+        last_generation_ = playback().snapshot().generation;
     }
 
     void handle(const Event& event) override {
@@ -307,13 +390,12 @@ public:
             stepVolume(event.delta);
             return;
         }
+        const bool playing = playback().snapshot().state == Audio::PlaybackState::Playing;
         switch (event.key) {
-            case Key::Ok: {
-                const auto snapshot = playback().snapshot();
-                const bool playing = snapshot.state == Audio::PlaybackState::Playing;
+            case Key::Ok:
+            case Key::Set:
                 pausePlayback(playing);
                 break;
-            }
             case Key::Next:
                 if (playlist().move(1)) playCurrent(true);
                 break;
@@ -323,143 +405,92 @@ public:
             case Key::NextLong:
                 pushPage(createTrackListPage());
                 break;
+            // Long PREV and long OK stop and return to the category list, as in
+            // the Arduino player. The player always sits directly above it.
             case Key::PrevLong:
-                stopPlayback();
-                goHome();
-                break;
             case Key::OkLong:
                 stopPlayback();
                 popPage();
                 break;
-            case Key::Set:
-                pausePlayback(playback().snapshot().state == Audio::PlaybackState::Playing);
-                break;
             case Key::SetLong:
                 goHome();
                 break;
-            default:
-                break;
+            default: break;
         }
     }
 
-    void tick(uint32_t) override {
+    void tick(uint32_t now) override {
         const auto snapshot = playback().snapshot();
         const uint32_t seconds = snapshot.sample_rate ? snapshot.submitted_frames / snapshot.sample_rate : 0;
         const int state = static_cast<int>(snapshot.state);
-        if (seconds != drawn_second_ || state != last_state_) invalidate();
 
-        // A new generation means the decoder was restarted: repaint for the new
-        // track, and advance the playlist once when the old one reported EOF.
+        if (seconds != drawn_second_ || state != last_state_ ||
+            ctx().volume != drawn_volume_ || static_cast<int>(ctx().hall) != drawn_hall_) {
+            invalidate();
+        }
+
+        // New generation: the decoder restarted, so the playlist advances once
+        // when the previous track reported EOF.
         if (snapshot.generation != last_generation_) {
             const bool ended = snapshot.state == Audio::PlaybackState::Ended;
             last_generation_ = snapshot.generation;
+            last_state_ = -1;
             invalidate();
             if (ended && playlist().move(1)) playCurrent(true);
+        }
+
+        const auto model = data();
+        view_.tick(model, now);
+        if (view_.dirty()) {
+            view_.clearDirty();
+            invalidate();
         }
     }
 
     void draw() override {
-        auto& g = Display::canvas();
-        const auto& c = Theme::colors();
+        view_.draw(Display::canvas(), data());
         const auto snapshot = playback().snapshot();
-        const auto* track = playlist().current();
-        const uint32_t seconds = snapshot.sample_rate ? snapshot.submitted_frames / snapshot.sample_rate : 0;
-        const bool playing = snapshot.state == Audio::PlaybackState::Playing;
-
-        g.fillScreen(c.ink);
-        g.fillRect(0, 0, 320, 32, c.coral);
-        Theme::setTopBarColor(c.coral);
-        Theme::drawSmileFace(g, 19, 15, 10);
-        g.setFont(Fonts::body());
-        g.setTextColor(TFT_WHITE, c.coral);
-        g.drawString("小小故事盒", 36, 7);
-        char volume[16];
-        std::snprintf(volume, sizeof(volume), "音量:%d", ctx().volume);
-        g.drawRightString(volume, 310, 7);
-        Theme::drawHallIcon(g, ctx().hall, c.coral);
-        Theme::drawChildLockBadge(g, ctx().child_locked, c.coral);
-
-        // Cover card
-        g.fillRoundRect(13, 45, 92, 112, 8, c.yellow_light);
-        g.fillRoundRect(10, 42, 92, 112, 8, c.aqua);
-        g.fillRect(52, 70, 8, 46, c.ink);
-        g.drawLine(52, 70, 76, 78, c.ink);
-        g.fillCircle(45, 118, 12, c.ink);
-
-        g.setFont(Fonts::small());
-        g.setTextColor(c.yellow, c.ink);
-        g.drawString(playing ? "播放中" : "已暂停", 116, 46);
-
-        char title[96];
-        Theme::fitText(g, track ? track->name.c_str() : "未加载曲目", 190, title, sizeof(title));
-        g.setFont(Fonts::title());
-        g.setTextColor(TFT_WHITE, c.ink);
-        g.drawString(title, 116, 66);
-
-        g.setFont(Fonts::small());
-        g.drawString(snapshot.error == ESP_OK ? "MP3" : esp_err_to_name(snapshot.error), 116, 92);
-        if (snapshot.sample_rate) {
-            char format[40];
-            std::snprintf(format, sizeof(format), "%lu Hz  %lu kbps",
-                          static_cast<unsigned long>(snapshot.sample_rate),
-                          static_cast<unsigned long>(snapshot.bitrate / 1000));
-            g.drawString(format, 116, 110);
-        }
-
-        char position[32];
-        std::snprintf(position, sizeof(position), "%02u:%02u",
-                      static_cast<unsigned>(seconds / 60), static_cast<unsigned>(seconds % 60));
-        g.setFont(Fonts::body());
-        g.setTextColor(TFT_WHITE, c.ink);
-        g.drawString(position, 116, 130);
-
-        char count[32];
-        std::snprintf(count, sizeof(count), "%u/%u", static_cast<unsigned>(playlist().position() + 1),
-                      static_cast<unsigned>(playlist().size()));
-        g.setFont(Fonts::small());
-        g.drawRightString(count, 308, 134);
-
-        // Progress groove: total duration is not decoded yet, so the bar shows
-        // activity rather than a calibrated position.
-        g.fillRoundRect(116, 152, 192, 8, 3, c.track);
-        g.drawRoundRect(116, 152, 192, 8, 3, c.track_border);
-        if (playing) {
-            const int dot = 116 + static_cast<int>((seconds % 30) * 6);
-            g.fillCircle(dot > 300 ? 300 : dot, 156, 4, c.blue);
-        }
-
-        // Transport bar
-        g.fillRect(0, 188, 320, 52, c.yellow);
-        g.fillRect(0, 188, 320, 3, c.coral_dark);
-        g.fillRoundRect(41, 197, 52, 34, 10, c.button_border);
-        g.fillRoundRect(43, 199, 48, 30, 8, c.button);
-        g.fillRect(61, 208, 3, 12, TFT_WHITE);
-        g.fillTriangle(71, 208, 71, 220, 61, 214, TFT_WHITE);
-        g.fillRoundRect(227, 197, 52, 34, 10, c.button_border);
-        g.fillRoundRect(229, 199, 48, 30, 8, c.button);
-        g.fillRect(258, 208, 3, 12, TFT_WHITE);
-        g.fillTriangle(249, 208, 249, 220, 259, 214, TFT_WHITE);
-        g.fillRoundRect(119, 194, 82, 40, 12, c.yellow_light);
-        g.fillRoundRect(121, 196, 78, 36, 10, c.yellow);
-        if (playing) {
-            g.fillRect(150, 205, 6, 18, c.ink);
-            g.fillRect(160, 205, 6, 18, c.ink);
-        } else {
-            g.fillTriangle(150, 205, 150, 223, 166, 214, c.ink);
-        }
-        g.setFont(Fonts::small());
-        g.setTextColor(c.ink, c.yellow);
-        g.drawCenterString("OK 播放/暂停  长按OK停止  SET 长按回主页", 160, 232);
-
-        drawn_second_ = seconds;
+        drawn_second_ = snapshot.sample_rate ? snapshot.submitted_frames / snapshot.sample_rate : 0;
         last_state_ = static_cast<int>(snapshot.state);
+        drawn_volume_ = ctx().volume;
+        drawn_hall_ = ctx().hall ? 1 : 0;
     }
 
 private:
-    uint64_t request_ = 0;
+    static const char* categoryLabel(const Media::Track* track) {
+        if (!track || track->category <= 0) return "音乐";
+        const auto snapshot = App::catalog();
+        const auto index = static_cast<std::size_t>(track->category - 1);
+        if (!snapshot || index >= snapshot->categories.size()) return "音乐";
+        return snapshot->categories[index].c_str();
+    }
+
+    PlayerViewData data() const {
+        const auto snapshot = playback().snapshot();
+        const auto* track = playlist().current();
+        PlayerViewData model{};
+        model.title = track ? track->name.c_str() : "未发现音乐文件";
+        model.category = categoryLabel(track);
+        model.cover_label = "音乐播放";
+        model.has_track = track != nullptr;
+        model.playing = snapshot.state == Audio::PlaybackState::Playing ||
+                        snapshot.state == Audio::PlaybackState::Draining;
+        model.paused = snapshot.state == Audio::PlaybackState::Paused;
+        model.seconds = snapshot.sample_rate ? snapshot.submitted_frames / snapshot.sample_rate : 0;
+        model.duration = snapshot.duration;
+        model.bitrate = snapshot.bitrate;
+        model.index = static_cast<int>(playlist().position());
+        model.count = static_cast<int>(playlist().size());
+        model.volume = ctx().volume;
+        return model;
+    }
+
+    PlayerView view_;
     uint64_t last_generation_ = 0;
     uint32_t drawn_second_ = 0xFFFFFFFF;
     int last_state_ = -1;
+    int drawn_volume_ = -1;
+    int drawn_hall_ = -1;
 };
 
 MusicListPage& musicListInstance() { static MusicListPage instance; return instance; }

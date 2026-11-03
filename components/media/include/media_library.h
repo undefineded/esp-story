@@ -56,9 +56,11 @@ public:
     bool seekId(uint32_t id);
     std::size_t size() const { return indices_.size(); }
     std::size_t position() const { return position_; }
+    int category() const { return category_; }
 private:
     std::shared_ptr<const Catalog> catalog_;
     std::vector<std::size_t> indices_;
     std::size_t position_ = 0;
+    int category_ = 0;
 };
 }

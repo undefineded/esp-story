@@ -20,7 +20,7 @@ namespace {
 
 constexpr int kVisibleRows = 4;
 constexpr int kListRowY = 36;
-constexpr int kListRowHeight = 38;
+constexpr int kListRowHeight = 42;
 constexpr int kVideoWidth = 320;
 constexpr int kVideoHeight = 240;
 
@@ -32,7 +32,7 @@ int wrap(int value, int count) {
 
 uint64_t nowUs() { return static_cast<uint64_t>(esp_timer_get_time()); }
 
-void drawTopBar(lgfx::LGFXBase& g, const char* title) {
+void drawTopBar(lgfx::LGFXBase& g, const char* title = nullptr) {
     const auto& c = Theme::colors();
     Theme::setTopBarColor(c.coral);
     g.fillRect(0, 0, 320, 30, c.coral);
@@ -41,9 +41,20 @@ void drawTopBar(lgfx::LGFXBase& g, const char* title) {
     g.setFont(Fonts::body());
     g.setTextColor(TFT_WHITE, c.coral);
     g.drawString("小小故事盒", 36, 7);
-    g.drawRightString(title, 310, 7);
+    if (title && title[0]) g.drawRightString(title, 310, 7);
     Theme::drawHallIcon(g, ctx().hall, c.coral);
     Theme::drawChildLockBadge(g, ctx().child_locked, c.coral);
+}
+
+// Film glyph from the Arduino video list: 20x16 card with sprocket holes.
+void iconFilm(lgfx::LGFXBase& g, int x, int y, uint16_t color) {
+    const auto& c = Theme::colors();
+    g.fillRoundRect(x, y, 20, 16, 3, color);
+    for (int i = 0; i < 3; ++i) {
+        g.fillRect(x + 3 + i * 5, y + 2, 2, 2, c.paper);
+        g.fillRect(x + 3 + i * 5, y + 12, 2, 2, c.paper);
+    }
+    g.fillTriangle(x + 8, y + 5, x + 8, y + 11, x + 13, y + 8, c.paper);
 }
 
 class VideoListPage final : public Page {
@@ -86,48 +97,51 @@ public:
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
         g.fillScreen(c.paper);
-        drawTopBar(g, "视频");
+        drawTopBar(g);
 
         const int total = static_cast<int>(entries_.size());
-        int top = selected_ - (kVisibleRows - 1);
-        if (top > total - kVisibleRows) top = total - kVisibleRows;
-        if (top < 0) top = 0;
-
-        g.fillRect(8, kListRowY, 310, 172, c.paper);
+        const int top = listTop(selected_, total);
+        g.fillRect(8, kListRowY, 306, kListRowHeight * kVisibleRows, c.paper);
         for (int row = 0; row < kVisibleRows; ++row) {
             const int index = top + row;
             if (index >= total) break;
             const int y = kListRowY + row * kListRowHeight;
             const bool selected = index == selected_;
+            const bool playing = currentVideo() == index;
             const uint16_t background = selected ? c.yellow : TFT_WHITE;
-            if (selected) g.fillRoundRect(13, y + 3, 300, kListRowHeight, 6, c.ink);
-            g.fillRoundRect(10, y, 300, kListRowHeight, 6, selected ? c.ink : TFT_WHITE);
-            g.fillRoundRect(12, y + 2, 296, kListRowHeight - 4, 5, background);
-            if (!selected) g.drawRoundRect(10, y, 300, kListRowHeight, 6, c.track_border);
+            if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, c.ink);
+            g.fillRoundRect(10, y, 300, 38, 6, selected ? c.ink : TFT_WHITE);
+            g.fillRoundRect(12, y + 2, 296, 34, 5, background);
+            if (!selected) g.drawRoundRect(10, y, 300, 38, 6, c.track_border);
 
-            // Film glyph.
-            g.fillRoundRect(24, y + 11, 16, 14, 2, c.ink);
-            g.fillRect(27, y + 14, 3, 3, background);
-            g.fillRect(27, y + 19, 3, 3, background);
-            g.fillRect(34, y + 14, 3, 3, background);
-            g.fillRect(34, y + 19, 3, 3, background);
+            iconFilm(g, 24, y + 11, playing ? c.coral : c.aqua);
 
             char title[96];
-            Theme::fitText(g, entries_[index].title.c_str(), 210, title, sizeof(title));
-            g.setFont(Fonts::body());
-            g.setTextColor(c.text, background);
-            g.drawString(title, 48, y + 8);
+            Theme::fitText(g, entries_[index].title.c_str(), 200, title, sizeof(title));
+            g.setFont(Fonts::title());
+            g.setTextColor(playing ? c.coral : c.text, background);
+            g.drawString(title, 54, y + 9);
 
-            g.setFont(Fonts::small());
-            g.drawRightString("AVI", 296, y + 11);
+            if (playing) {
+                g.setFont(Fonts::small());
+                g.setTextColor(c.coral, background);
+                g.drawRightString("播放中", 296, y + 14);
+            }
         }
 
-        g.setFont(Fonts::small());
+        g.setFont(Fonts::body());
         g.setTextColor(c.text, c.paper);
-        g.drawCenterString(total ? "OK 播放  SET 长按回主页" : "/video 下没有 AVI 文件", 160, 224);
+        g.drawCenterString(total ? "OK播放  NEXT/LAST选择  长按SET回主页" : "/video 下没有 AVI 文件",
+                           160, 212);
     }
 
 private:
+    static int listTop(int selected, int count) {
+        int top = selected >= kVisibleRows ? selected - kVisibleRows + 1 : 0;
+        if (top > count - kVisibleRows) top = count - kVisibleRows;
+        return top < 0 ? 0 : top;
+    }
+
     void openVideo(std::size_t index);
     std::vector<Video::Entry> entries_;
     int selected_ = 0;
@@ -142,6 +156,7 @@ public:
     void enter() override {
         close();
         setVideoActive(true);
+        setCurrentVideo(-1);
         const auto entries = Video::scanLibrary(Storage::SdVolume::root);
         if (index_ >= entries.size()) {
             error_ = "没有视频";
@@ -160,6 +175,8 @@ public:
             invalidate();
             return;
         }
+        setCurrentVideo(static_cast<int>(index_));
+        title_ = entry.title;
         started_at_us_ = nowUs();
         paused_at_us_ = 0;
         paused_ms_ = 0;
@@ -182,6 +199,7 @@ public:
 
     void leave() override {
         close();
+        setCurrentVideo(-1);
         setVideoActive(false);
     }
 
@@ -289,37 +307,61 @@ private:
     void drawOverlay(std::size_t frame) {
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
-        // The frame covers the whole panel, so the bar is redrawn every frame.
-        g.fillRect(0, 210, 320, 30, c.ink);
-        g.fillRect(0, 210, 320, 2, c.yellow);
-        if (paused_) {
-            g.fillTriangle(10, 216, 10, 232, 22, 224, c.yellow);
-        } else {
-            g.fillRect(11, 216, 4, 16, c.yellow);
-            g.fillRect(18, 216, 4, 16, c.yellow);
-        }
         const uint32_t elapsed = elapsedMs();
         const uint32_t total = avi_.durationMs();
-        char position[48];
-        std::snprintf(position, sizeof(position), "%02u:%02u / %02u:%02u",
+
+        // The frame covers the whole panel, so the bar is redrawn every frame.
+        // Geometry follows the Arduino video bar: 30px ink bar, yellow top edge,
+        // 22x20 yellow pause button, progress groove and a right-aligned time.
+        g.fillRect(0, 210, 320, 30, c.ink);
+        g.fillRect(0, 210, 320, 2, c.yellow);
+        g.fillRoundRect(8, 215, 22, 20, 6, c.yellow);
+        const int cx = 8 + 11;
+        const int cy = 215 + 10;
+        if (paused_) {
+            g.fillTriangle(cx - 4, cy - 5, cx - 4, cy + 5, cx + 5, cy, c.ink);
+        } else {
+            g.fillRect(cx - 4, cy - 5, 3, 10, c.ink);
+            g.fillRect(cx + 2, cy - 5, 3, 10, c.ink);
+        }
+
+        constexpr int kProgressX = 38, kProgressY = 222, kProgressW = 196, kProgressH = 6;
+        g.fillRoundRect(kProgressX, kProgressY, kProgressW, kProgressH, 2, c.track);
+        g.drawRoundRect(kProgressX, kProgressY, kProgressW, kProgressH, 2, c.track_border);
+        int width = 0;
+        if (total > 0) width = static_cast<int>(static_cast<uint64_t>(kProgressW - 2) * elapsed / total);
+        if (width > kProgressW - 2) width = kProgressW - 2;
+        if (width > 1) {
+            g.fillRect(kProgressX + 1, kProgressY + 1, width, kProgressH - 2, c.blue);
+            if (width > 4) g.fillRect(kProgressX + 1 + width - 4, kProgressY + 1, 4, kProgressH - 2, c.yellow);
+        }
+
+        char time[48];
+        std::snprintf(time, sizeof(time), "%02u:%02u/%02u:%02u",
                       static_cast<unsigned>((elapsed / 1000) / 60), static_cast<unsigned>((elapsed / 1000) % 60),
                       static_cast<unsigned>((total / 1000) / 60), static_cast<unsigned>((total / 1000) % 60));
         g.setFont(Fonts::small());
-        g.setTextColor(TFT_WHITE, c.ink);
-        g.drawString(position, 30, 216);
+        g.setTextColor(c.track, c.ink);
+        g.drawRightString(time, 312, 219);
 
-        char volume[24];
-        std::snprintf(volume, sizeof(volume), "VOL %d", ctx().volume);
-        g.setTextColor(c.yellow, c.ink);
-        g.drawRightString(volume, 312, 216);
-
-        char stats[48];
-        std::snprintf(stats, sizeof(stats), "%u/%u", static_cast<unsigned>(frame + 1),
-                      static_cast<unsigned>(avi_.frames()));
-        g.setTextColor(TFT_WHITE, c.ink);
-        g.drawString(stats, 30, 228);
+        // Decode time badge at the top-right, like the Arduino FPS badge.
+        char stats[24];
         std::snprintf(stats, sizeof(stats), "%u ms", static_cast<unsigned>(last_decode_us_ / 1000));
-        g.drawRightString(stats, 312, 228);
+        g.setTextColor(c.yellow, c.ink);
+        g.drawRightString(stats, 312, 10);
+
+        // Title card for the first three seconds and while paused.
+        if (paused_ || elapsed < 3000) {
+            if (!title_.empty()) {
+                char title[96];
+                Theme::fitText(g, title_.c_str(), 212, title, sizeof(title));
+                g.setFont(Fonts::body());
+                const int box = g.textWidth(title) + 20;
+                g.fillRoundRect(8, 8, box, 26, 7, c.ink);
+                g.setTextColor(TFT_WHITE, c.ink);
+                g.drawString(title, 18, 11);
+            }
+        }
     }
 
     void togglePause() {
@@ -341,6 +383,7 @@ private:
     }
 
     std::size_t index_ = 0;
+    std::string title_;
     Video::AviIndex avi_;
     std::vector<uint8_t> buffer_;
     std::string error_;

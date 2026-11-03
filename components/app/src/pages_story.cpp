@@ -9,7 +9,9 @@
 #include "app_theme.h"
 #include "display.h"
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "fonts.h"
+#include "player_view.h"
 #include "sd_volume.h"
 #include "story_image.h"
 #include "story_timeline.h"
@@ -19,7 +21,11 @@ namespace {
 
 constexpr int kVisibleRows = 4;
 constexpr int kListRowY = 36;
-constexpr int kListRowHeight = 38;
+constexpr int kListRowHeight = 42;
+
+bool s_story_page_active = false;
+
+uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
 int wrap(int value, int count) {
     if (count <= 0) return 0;
@@ -27,7 +33,9 @@ int wrap(int value, int count) {
     return value < 0 ? value + count : value;
 }
 
-void drawTopBar(lgfx::LGFXBase& g, const char* title) {
+// The Arduino story pages drew the brand bar only; the path lived in the
+// bottom breadcrumb, so that is what the list below does too.
+void drawTopBar(lgfx::LGFXBase& g) {
     const auto& c = Theme::colors();
     Theme::setTopBarColor(c.coral);
     g.fillRect(0, 0, 320, 30, c.coral);
@@ -36,13 +44,56 @@ void drawTopBar(lgfx::LGFXBase& g, const char* title) {
     g.setFont(Fonts::body());
     g.setTextColor(TFT_WHITE, c.coral);
     g.drawString("小小故事盒", 36, 7);
-    g.drawRightString(title, 310, 7);
     Theme::drawHallIcon(g, ctx().hall, c.coral);
     Theme::drawChildLockBadge(g, ctx().child_locked, c.coral);
 }
 
-const char* kindLabel(Media::StoryKind kind) {
-    return kind == Media::StoryKind::Illustrated ? "图文" : "音频";
+void iconNote(lgfx::LGFXBase& g, int x, int y, uint16_t color) {
+    const auto& c = Theme::colors();
+    g.fillCircle(x + 6, y + 14, 5, color);
+    g.drawCircle(x + 6, y + 14, 5, c.ink);
+    g.fillRect(x + 10, y + 2, 3, 14, c.ink);
+    g.fillRect(x + 13, y + 2, 7, 4, c.ink);
+}
+
+void iconFolder(lgfx::LGFXBase& g, int x, int y, uint16_t color) {
+    const auto& c = Theme::colors();
+    g.fillRect(x, y + 2, 10, 5, color);
+    g.drawRect(x, y + 2, 10, 5, c.ink);
+    g.fillRoundRect(x, y + 5, 22, 15, 3, color);
+    g.drawRoundRect(x, y + 5, 22, 15, 3, c.ink);
+}
+
+void iconBook(lgfx::LGFXBase& g, int y, uint16_t color) {
+    const auto& c = Theme::colors();
+    g.fillRoundRect(22, y + 8, 20, 22, 3, color);
+    g.drawRoundRect(22, y + 8, 20, 22, 3, c.ink);
+    g.fillRect(25, y + 8, 3, 22, c.ink);
+}
+
+void drawRowCard(lgfx::LGFXBase& g, int y, bool selected) {
+    const auto& c = Theme::colors();
+    if (selected) g.fillRoundRect(13, y + 3, 300, 38, 6, c.ink);
+    g.fillRoundRect(10, y, 300, 38, 6, selected ? c.ink : TFT_WHITE);
+    g.fillRoundRect(12, y + 2, 296, 34, 5, selected ? c.yellow : TFT_WHITE);
+    if (!selected) g.drawRoundRect(10, y, 300, 38, 6, c.track_border);
+}
+
+// "故事 / 分类 / 子目录"
+std::string crumb(const std::string& path) {
+    if (path == "/story" || path.empty()) return "故事";
+    std::string value = path;
+    if (value.compare(0, 7, "/story/") == 0) value = value.substr(7);
+    std::string result;
+    std::size_t at = 0;
+    while (at < value.size()) {
+        const auto slash = value.find('/', at);
+        const auto end = slash == std::string::npos ? value.size() : slash;
+        if (!result.empty()) result += " / ";
+        result += value.substr(at, end - at);
+        at = end + 1;
+    }
+    return result.empty() ? "故事" : result;
 }
 
 // One row of the story browser: either a directory to descend into or a story
@@ -84,11 +135,6 @@ std::vector<BrowseEntry> entriesAt(const Media::Catalog& catalog, const std::str
     return directories;
 }
 
-std::string baseName(const std::string& path) {
-    const auto slash = path.find_last_of('/');
-    return slash == std::string::npos ? path : path.substr(slash + 1);
-}
-
 class StoryListPage final : public Page {
 public:
     const char* id() const override { return "story-list"; }
@@ -126,8 +172,7 @@ public:
             case Key::SetLong:
                 goHome();
                 break;
-            default:
-                break;
+            default: break;
         }
     }
 
@@ -143,29 +188,43 @@ public:
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
         g.fillScreen(c.paper);
-        drawTopBar(g, path_ == "/story" ? "故事" : baseName(path_).c_str());
+        drawTopBar(g);
 
         const int total = static_cast<int>(entries_.size());
-        int top = selected_ - (kVisibleRows - 1);
-        if (top > total - kVisibleRows) top = total - kVisibleRows;
-        if (top < 0) top = 0;
-
-        g.fillRect(8, kListRowY, 310, 172, c.paper);
+        const int top = listTop(selected_, total);
+        g.fillRect(8, kListRowY, 306, kListRowHeight * kVisibleRows, c.paper);
         for (int row = 0; row < kVisibleRows; ++row) {
             const int index = top + row;
             if (index >= total) break;
-            drawRow(g, kListRowY + row * kListRowHeight, entries_[index],
-                    index == selected_);
+            drawRow(g, kListRowY + row * kListRowHeight, entries_[index], index == selected_);
         }
 
         g.setFont(Fonts::small());
         g.setTextColor(c.text, c.paper);
-        g.drawCenterString(total ? "OK 打开  长按OK返回上级  SET 长按回主页"
-                                 : "这个文件夹没有故事",
-                           160, 224);
+        std::string hint = total ? crumb(path_) + " · OK进入/播放 · 长按OK返回"
+                                 : "这个文件夹没有故事";
+        char line[192];
+        Theme::fitText(g, hint.c_str(), 304, line, sizeof(line));
+        g.drawCenterString(line, 160, 214);
     }
 
 private:
+    static int listTop(int selected, int count) {
+        int top = selected >= kVisibleRows ? selected - kVisibleRows + 1 : 0;
+        if (top > count - kVisibleRows) top = count - kVisibleRows;
+        return top < 0 ? 0 : top;
+    }
+
+    int descendants(const std::string& path) const {
+        if (!catalog_) return 0;
+        const std::string prefix = path + "/";
+        int count = 0;
+        for (const auto& story : catalog_->stories) {
+            if (story.directory.compare(0, prefix.size(), prefix) == 0) ++count;
+        }
+        return count;
+    }
+
     void reload() {
         entries_.clear();
         if (!catalog_) return;
@@ -200,30 +259,37 @@ private:
     void drawRow(lgfx::LGFXBase& g, int y, const BrowseEntry& entry, bool selected) {
         const auto& c = Theme::colors();
         const uint16_t background = selected ? c.yellow : TFT_WHITE;
-        if (selected) g.fillRoundRect(13, y + 3, 300, kListRowHeight, 6, c.ink);
-        g.fillRoundRect(10, y, 300, kListRowHeight, 6, selected ? c.ink : TFT_WHITE);
-        g.fillRoundRect(12, y + 2, 296, kListRowHeight - 4, 5, background);
-        if (!selected) g.drawRoundRect(10, y, 300, kListRowHeight, 6, c.track_border);
+        drawRowCard(g, y, selected);
+
+        const bool playing = !entry.directory && currentStory() == static_cast<int>(entry.story);
+        const Media::StoryKind kind =
+            (!entry.directory && catalog_ && entry.story < catalog_->stories.size())
+                ? catalog_->stories[entry.story].kind
+                : Media::StoryKind::Audio;
 
         if (entry.directory) {
-            // Folder glyph, drawn rather than shipped as an asset.
-            g.fillRoundRect(24, y + 12, 16, 12, 2, c.aqua_dark);
-            g.fillRect(24, y + 9, 7, 4, c.aqua_dark);
-            g.fillRoundRect(24, y + 14, 16, 10, 2, c.aqua);
+            iconFolder(g, 24, y + 10, selected ? c.coral : c.aqua);
+        } else if (kind == Media::StoryKind::Audio) {
+            iconNote(g, 24, y + 8, playing ? c.coral : (selected ? c.coral : c.aqua));
+        } else {
+            iconBook(g, y, playing ? c.coral : (selected ? c.coral : c.aqua));
         }
 
         char title[96];
-        Theme::fitText(g, entry.label.c_str(), entry.directory ? 220 : 210, title, sizeof(title));
-        g.setFont(Fonts::body());
-        g.setTextColor(c.text, background);
-        g.drawString(title, entry.directory ? 48 : 24, y + 8);
+        Theme::fitText(g, entry.label.c_str(), 178, title, sizeof(title));
+        g.setFont(Fonts::title());
+        g.setTextColor(playing ? c.coral : c.text, background);
+        g.drawString(title, 52, y + 9);
 
         g.setFont(Fonts::small());
-        g.setTextColor(c.text, background);
         if (entry.directory) {
-            g.drawRightString(">", 296, y + 11);
-        } else if (catalog_ && entry.story < catalog_->stories.size()) {
-            g.drawRightString(kindLabel(catalog_->stories[entry.story].kind), 296, y + 11);
+            char suffix[20];
+            std::snprintf(suffix, sizeof(suffix), "%d个", descendants(entry.path));
+            g.setTextColor(c.text, background);
+            g.drawRightString(suffix, 296, y + 14);
+        } else if (playing) {
+            g.setTextColor(c.coral, background);
+            g.drawRightString("播放中", 296, y + 14);
         }
     }
 
@@ -231,7 +297,7 @@ private:
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
         g.fillScreen(c.paper);
-        drawTopBar(g, "故事");
+        drawTopBar(g);
         Theme::drawSmileFace(g, 160, 96, 16);
         g.setFont(Fonts::title());
         g.setTextColor(c.text, c.paper);
@@ -260,21 +326,26 @@ public:
     void setStory(std::size_t index) { index_ = index; }
 
     void enter() override {
+        s_story_page_active = true;
         catalog_ = App::catalog();
         shown_panel_ = -2;
         image_ok_ = true;
         started_ = false;
         last_generation_ = 0;
         timeline_ = Media::Timeline{};
+        view_.reset(nowMs());
         start();
         invalidate();
     }
 
     void leave() override {
+        s_story_page_active = false;
         if (started_) {
             stopPlayback();
             started_ = false;
         }
+        setCurrentStory(-1);
+        setNowPlaying("idle", "");
     }
 
     void handle(const Event& event) override {
@@ -283,7 +354,8 @@ public:
             return;
         }
         switch (event.key) {
-            case Key::Ok: {
+            case Key::Ok:
+            case Key::Set: {
                 const auto snapshot = playback().snapshot();
                 pausePlayback(snapshot.state == Audio::PlaybackState::Playing);
                 break;
@@ -292,7 +364,8 @@ public:
             case Key::Prev: {
                 if (!catalog_ || catalog_->stories.empty()) break;
                 const int count = static_cast<int>(catalog_->stories.size());
-                index_ = static_cast<std::size_t>(wrap(static_cast<int>(index_) + (event.key == Key::Next ? 1 : -1), count));
+                index_ = static_cast<std::size_t>(
+                    wrap(static_cast<int>(index_) + (event.key == Key::Next ? 1 : -1), count));
                 shown_panel_ = -2;
                 start();
                 invalidate();
@@ -300,19 +373,20 @@ public:
             }
             case Key::OkLong:
             case Key::NextLong:
+            case Key::PrevLong:
                 stopPlayback();
                 started_ = false;
+                setCurrentStory(-1);
                 popPage();
                 break;
             case Key::SetLong:
                 goHome();
                 break;
-            default:
-                break;
+            default: break;
         }
     }
 
-    void tick(uint32_t) override {
+    void tick(uint32_t now) override {
         if (!started_ || !catalog_ || index_ >= catalog_->stories.size()) return;
         const auto snapshot = playback().snapshot();
         if (snapshot.generation != last_generation_) {
@@ -326,33 +400,49 @@ public:
             ended_generation_ = snapshot.generation;
             stopPlayback();
             started_ = false;
+            setCurrentStory(-1);
             popPage();
+            return;
         }
+        if (catalog_->stories[index_].kind == Media::StoryKind::Audio) {
+            view_.tick(audioModel(), now);
+            if (view_.dirty()) {
+                view_.clearDirty();
+                invalidate();
+            }
+        }
+        drawn_second_ = seconds;
     }
 
     void draw() override {
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
-        const auto snapshot = playback().snapshot();
-        const uint32_t seconds = snapshot.sample_rate ? snapshot.submitted_frames / snapshot.sample_rate : 0;
         const Media::Story* story = (catalog_ && index_ < catalog_->stories.size())
                                         ? &catalog_->stories[index_]
                                         : nullptr;
 
         if (!story) {
             g.fillScreen(c.paper);
-            drawTopBar(g, "故事");
+            drawTopBar(g);
             g.setFont(Fonts::title());
             g.setTextColor(c.text, c.paper);
             g.drawCenterString("没有故事", 160, 110);
             return;
         }
 
-        const bool illustrated = story->kind == Media::StoryKind::Illustrated;
-        int panel = -1;
-        if (illustrated && !timeline_.panels().empty()) panel = timeline_.atSeconds(seconds);
+        if (story->kind == Media::StoryKind::Audio) {
+            // The Arduino audio-story page reused the full music player layout;
+            // only the cover label and category badge changed.
+            view_.draw(g, audioModel());
+            return;
+        }
 
-        if (illustrated && panel >= 0 && panel != shown_panel_) {
+        const auto snapshot = playback().snapshot();
+        const uint32_t seconds = snapshot.sample_rate ? snapshot.submitted_frames / snapshot.sample_rate : 0;
+        int panel = -1;
+        if (!timeline_.panels().empty()) panel = timeline_.atSeconds(seconds);
+
+        if (panel >= 0 && panel != shown_panel_) {
             g.fillScreen(TFT_BLACK);
             image_ok_ = Display::drawStoryImage(storageGate(), Storage::SdVolume::root,
                                                 timeline_.panels()[panel].path);
@@ -363,11 +453,11 @@ public:
                 g.drawCenterString("插画读取失败", 160, 110);
             }
             shown_panel_ = panel;
-        } else if (!illustrated || panel < 0) {
+        } else if (panel < 0) {
             if (shown_panel_ != -3) {
                 g.fillScreen(c.paper);
                 Theme::setTopBarColor(c.coral);
-                drawTopBar(g, "故事");
+                drawTopBar(g);
                 Theme::drawSmileFace(g, 160, 92, 18);
                 char title[96];
                 Theme::fitText(g, story->title.c_str(), 280, title, sizeof(title));
@@ -378,16 +468,18 @@ public:
             }
         }
 
-        // Control bar
+        // Control bar: same geometry as the Arduino story bar.
         g.fillRect(0, 202, 320, 38, c.ink);
         g.fillRect(0, 202, 320, 3, c.yellow);
         g.fillRoundRect(6, 207, 26, 26, 8, c.button_border);
-        g.fillRoundRect(7, 208, 24, 24, 7, c.button);
-        if (snapshot.state == Audio::PlaybackState::Playing) {
-            g.fillRect(15, 214, 3, 12, TFT_WHITE);
-            g.fillRect(21, 214, 3, 12, TFT_WHITE);
+
+        const bool playing = snapshot.state == Audio::PlaybackState::Playing;
+        g.fillRoundRect(8, 209, 22, 22, 6, c.yellow);
+        if (playing) {
+            g.fillRect(15, 214, 3, 12, c.ink);
+            g.fillRect(21, 214, 3, 12, c.ink);
         } else {
-            g.fillTriangle(15, 214, 15, 226, 24, 220, TFT_WHITE);
+            g.fillTriangle(15, 214, 15, 226, 24, 220, c.ink);
         }
 
         char title[96];
@@ -397,8 +489,8 @@ public:
         g.drawString(title, 38, 207);
 
         char page[32];
-        if (illustrated && !timeline_.panels().empty()) {
-            std::snprintf(page, sizeof(page), "%d/%d", panel + 1,
+        if (!timeline_.panels().empty()) {
+            std::snprintf(page, sizeof(page), "%02d/%02d", panel + 1,
                           static_cast<int>(timeline_.panels().size()));
         } else {
             std::snprintf(page, sizeof(page), "%02u:%02u",
@@ -406,7 +498,7 @@ public:
         }
         g.setFont(Fonts::small());
         g.setTextColor(c.yellow, c.ink);
-        g.drawRightString(page, 312, 209);
+        g.drawRightString(page, 312, 208);
 
         drawn_second_ = seconds;
     }
@@ -427,10 +519,37 @@ private:
             started_ = true;
             ended_generation_ = 0;
             last_generation_ = 0;
+            drawn_second_ = 0xFFFFFFFF;
+            setCurrentStory(static_cast<int>(index_));
+            setNowPlaying("story", story.title.c_str());
         } else {
             started_ = false;
+            setCurrentStory(-1);
+            setNowPlaying("idle", "");
             notify("故事音频加载失败");
         }
+    }
+
+    PlayerViewData audioModel() const {
+        const auto snapshot = playback().snapshot();
+        const Media::Story* story = (catalog_ && index_ < catalog_->stories.size())
+                                        ? &catalog_->stories[index_]
+                                        : nullptr;
+        PlayerViewData model{};
+        model.title = story ? story->title.c_str() : "";
+        model.category = (story && !story->category.empty()) ? story->category.c_str() : "音频故事";
+        model.cover_label = "音频故事";
+        model.has_track = story != nullptr;
+        model.playing = snapshot.state == Audio::PlaybackState::Playing ||
+                        snapshot.state == Audio::PlaybackState::Draining;
+        model.paused = snapshot.state == Audio::PlaybackState::Paused;
+        model.seconds = snapshot.sample_rate ? snapshot.submitted_frames / snapshot.sample_rate : 0;
+        model.duration = snapshot.duration;
+        model.bitrate = snapshot.bitrate;
+        model.index = static_cast<int>(index_);
+        model.count = catalog_ ? static_cast<int>(catalog_->stories.size()) : 0;
+        model.volume = ctx().volume;
+        return model;
     }
 
     std::size_t index_ = 0;
@@ -442,6 +561,7 @@ private:
     uint64_t last_generation_ = 0;
     uint64_t ended_generation_ = 0;
     uint32_t drawn_second_ = 0xFFFFFFFF;
+    PlayerView view_;
 };
 
 StoryListPage& storyListInstance() { static StoryListPage instance; return instance; }
@@ -450,7 +570,15 @@ StoryPlayerPage& storyPlayerInstance() { static StoryPlayerPage instance; return
 }  // namespace
 
 void openStory(std::size_t index) {
-    storyPlayerInstance().setStory(index);
+    auto& page = storyPlayerInstance();
+    page.setStory(index);
+    // BLE "ctrl story" can arrive while the story page is already open. Pushing
+    // the singleton again would put the same object on the stack twice, so
+    // restart the open page in place instead.
+    if (s_story_page_active) {
+        page.enter();
+        return;
+    }
     pushPage(createStoryPlayerPage());
 }
 

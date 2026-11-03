@@ -28,9 +28,17 @@ bool refreshCatalog();
 bool playCurrent(bool auto_start);
 bool stopPlayback();
 void pausePlayback(bool paused);
+// What the phone should show in evt:state. Set by the page that started the
+// media ("music"/"story") and cleared when playback stops.
+void setNowPlaying(const char* mode, const char* title);
 
 // Opens the story player for a catalog index (pushes the page).
 void openStory(std::size_t index);
+// Catalog index of the story currently on the player page, or -1.
+void setCurrentStory(int index);
+int currentStory();
+void setCurrentVideo(int index);
+int currentVideo();
 
 // Parental control. A device without a valid PCTL record is provisioned with
 // permissive defaults on first boot; every play entry goes through

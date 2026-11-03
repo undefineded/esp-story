@@ -76,6 +76,10 @@ char s_notice[96] = {};
 uint32_t s_notice_until = 0;
 bool s_video_active = false;
 bool s_was_screen_off = false;
+const char* s_now_mode = "idle";
+char s_now_title[128] = {};
+int s_now_story = -1;
+int s_now_video = -1;
 
 #if CONFIG_STORYBOX_FRAM_CONFIRMED
 Persistence::SettingsStore<Board::FramDevice>* s_settings_store = nullptr;
@@ -683,10 +687,12 @@ void publishBleState() {
     snapshot.paused = state.state == Audio::PlaybackState::Paused;
     snapshot.volume = s_context.volume;
     const auto* track = g_playlist.current();
-    snapshot.mode = (snapshot.playing || snapshot.paused) ? "music" : "idle";
-    snapshot.title = track ? track->name.c_str() : "";
+    const bool active = snapshot.playing || snapshot.paused;
+    snapshot.mode = active ? s_now_mode : "idle";
+    if (active && s_now_title[0]) snapshot.title = s_now_title;
+    else snapshot.title = track ? track->name.c_str() : "";
     snapshot.current = state.sample_rate ? static_cast<uint32_t>(state.submitted_frames / state.sample_rate) : 0;
-    snapshot.duration = 0;
+    snapshot.duration = state.duration;
     Ble::setSnapshot(snapshot);
 }
 
@@ -780,6 +786,11 @@ void run() {
             } else {
                 ESP_LOGW(kTag, "volume/favorites record unreadable; using defaults");
             }
+            ESP_LOGI(kTag, "FRAM ready: brightness=%u rotation=%u eq=%u volume=%d favorites=%s",
+                     static_cast<unsigned>(s_context.settings.brightness),
+                     static_cast<unsigned>(s_context.settings.rotation),
+                     static_cast<unsigned>(s_context.settings.eq), s_context.volume,
+                     s_records_store ? "yes" : "no");
             // A device without a valid PCTL record is provisioned with the
             // legacy permissive defaults; nothing is written when reading fails.
             if (parental_store.load() == Persistence::LoadResult::Invalid) {
@@ -813,6 +824,10 @@ void run() {
 #else
     ESP_LOGW(kTag, "FRAM not confirmed in this build; settings are RAM-only");
 #endif
+
+    // The Bluetooth broadcast flag is persisted like any other setting; apply it
+    // once the record is loaded (Ble::begin() starts advertising unconditionally).
+    Ble::setAdvertisingEnabled(s_context.settings.ble != 0);
 
 #if CONFIG_STORYBOX_NFC
     static NativeNfc::Service nfc;
@@ -875,6 +890,21 @@ void run() {
     for (;;) {
         const uint32_t now = nowMs();
 
+        // Child lock is a parental flag, not an input state: apply it before
+        // sampling so a remote change takes effect on the next loop. When it is
+        // active the only accepted gesture is the local OK+NEXT unlock combo.
+        const bool child_lock = s_parental_ready && s_policy.childLocked();
+        if (child_lock != s_context.child_locked) {
+            s_context.child_locked = child_lock;
+            Input::setLocked(child_lock);
+            s_stack[s_depth - 1]->invalidate();
+        }
+        if (child_lock && Input::childUnlockHeld()) {
+            Persistence::ParentalRecord record = s_policy.record();
+            Persistence::parentalSetFlag(record, Persistence::kParentalChildLock, false);
+            if (parentalApply(record)) notify("童锁已解除");
+        }
+
         Event event;
         sampleInput(event);
         if (!event.empty()) {
@@ -901,6 +931,7 @@ void run() {
         if (s_parental_ready && !playbackAllowed() &&
             (playing || playback_state == Audio::PlaybackState::Paused)) {
             g_playback.stopAndWait(3000);
+            setNowPlaying("idle", "");
             page->invalidate();
         }
         parentalSaveIfDirty(now);
@@ -1017,6 +1048,7 @@ bool refreshCatalog() {
     if (!s_context.sd_mounted) return false;
     // Playback holds a file lease for the whole track; maintenance needs every
     // lease released, so stop first and re-allow playback afterwards.
+    setNowPlaying("idle", "");
     g_playback.stopAndWait(3000);
     const auto result = g_library.scan(Storage::SdVolume::root);
     g_playback.allowPlayback();
@@ -1050,10 +1082,24 @@ bool playCurrent(bool auto_start) {
     uint64_t request = 0;
     const auto result = g_playback.play(track->path.c_str(), auto_start, request);
     if (result != ESP_OK) ESP_LOGW(kTag, "play %s: %s", track->path.c_str(), esp_err_to_name(result));
+    else setNowPlaying("music", track->name.c_str());
     return result == ESP_OK;
 }
 
-bool stopPlayback() { return g_playback.stopAndWait(3000) == ESP_OK; }
+void setNowPlaying(const char* mode, const char* title) {
+    std::snprintf(s_now_title, sizeof(s_now_title), "%s", title ? title : "");
+    s_now_mode = mode ? mode : "idle";
+}
+
+void setCurrentStory(int index) { s_now_story = index; }
+int currentStory() { return s_now_story; }
+void setCurrentVideo(int index) { s_now_video = index; }
+int currentVideo() { return s_now_video; }
+
+bool stopPlayback() {
+    setNowPlaying("idle", "");
+    return g_playback.stopAndWait(3000) == ESP_OK;
+}
 
 void pausePlayback(bool paused) {
     uint64_t request = 0;

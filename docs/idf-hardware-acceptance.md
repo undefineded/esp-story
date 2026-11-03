@@ -12,20 +12,18 @@
 当成构建目标（必须用 `--define-cache-entry`），脚本带 Zone.Identifier 所以必须
 `-ExecutionPolicy Bypass`。以下命令都在仓库根目录执行。
 
-### 0.1 镜像（commit `3a02810` 之后，真机首晚修复版）
-
-五套都含首晚修掉的 5 个问题（BLE 未注册、NVS 未初始化、FATFS 乱码、刷新列表占位、NFC 刷屏）：
+### 0.1 镜像（2026-11-04 第二轮，含 FRAM / UI / BLE 修复）
 
 | 配置 | 构建目录 | `storybox.bin` | SHA256 前 16 位 | 用于 |
 |---|---|---|---|---|
-| 默认产品（BLE + NFC，单槽） | `build-ui` | `0x1F6430` | `B4BC9C45B8165151` | 第 0/1/2/3/4/5/7/8 组 |
-| 产品 + USB 协议 | `build-usb-product` | `0x1FF5D0` | `DC66200524D1D504` | 第 6 组（NFC 状态也走这里） |
-| 产品 + USB + OTA 双槽 | `build-ota-usb` | `0x1FFB00` | `A3CA8A57A965E354` | 第 10 组，**改分区表，整片擦除** |
-| 深睡 | `build-power` | `0x1F8F10` | `6F4412EA06FA68EE` | 第 9 组 |
-| 确认 FRAM（编译覆盖用） | `build-fram` | `0x1F8BD0` | `60666607B90DCB65` | — |
+| 默认产品（BLE + NFC，单槽，**FRAM 已开**） | `build-ui` | `0x1FA310` | `A4E636111788868E` | 第 0/1/2/3/4/5/7/8 组，**已在板子上** |
+| 产品 + USB 协议 | `build-usb-product` | `0x203540` | `96D65A0BA0D0BB67` | 第 6 组；也用于 FRAM 写读复测 |
+| 产品 + USB + OTA 双槽 | `build-ota-usb` | 待重建 | — | 第 10 组，**改分区表，整片擦除** |
+| 深睡 | `build-power` | 待重建 | — | 第 9 组 |
+| 确认 FRAM（编译覆盖） | `build-fram` | 历史产物 | — | 默认已开 FRAM，这套只剩历史意义 |
 
-`build-fram` **不要烧**：只是「确认 FRAM 分支能编译」的产物，板型和 FRAM 地址都没核对过，
-烧上去会真的往 FRAM 写记录。
+默认镜像现在会真的写 FRAM（设置/音量/收藏/家长记录）。`FramDevice` 启动时会先做
+8 bank 写读探测，探测不通过会退回 RAM-only 并打 `FRAM` 警告，不会写坏记录。
 
 ### 0.2 烧录与监视
 
@@ -64,7 +62,7 @@ powershell -ExecutionPolicy Bypass -File tools\idf\idf.ps1 -B build-ui --define-
 2. 选分类 → 歌曲列表 → OK 播放：有声音、进度秒数递增、音量旋钮 0..21 生效。
 3. 切歌：NEXT/PREV 正常，播完自动下一首。
 4. 长按 OK：停止并回列表；SET 长按：回主页但音乐继续。
-5. 收藏：长按 OK 收藏，重启后仍显示 ♥（需要确认 FRAM 的构建）。
+5. 收藏：长按 OK 收藏，重启后仍显示 ♥（现在默认镜像已开 FRAM）。
 
 **失败信号**：无声 → 核对 I2S 引脚与功放使能（新板 `amplifier_enable=38` 尚未驱动）；
 卡顿 → 检查 `Playback` 的 4608 字节 PCM 缓冲与 SD 读速率。
@@ -102,7 +100,7 @@ JPEG 解码失败 → `Display::drawStoryImage` 返回 false，控制台会打 �
    - `reset` / `unbind`：回包 `bound:false` 且带新的 `code`，并且连接被降级（后续命令回 `AUTH`）。
    - `get stories|music|cats|report`：`total` 与设备上的实际条目数一致；带 `limit:10` 时应被夹到 4。
    - `ctrl fav`：回 `f:true` 且 `n` 递增；重启后 `get music` 里该曲目 `f` 仍为 true
-     （需要确认 FRAM 的镜像，单槽默认镜像没有 FRAM）。
+     （默认镜像已开 FRAM）。
    - 远程锁打开时：`ctrl play` 回 `LOCKED`，而 `ctrl fav` 仍应成功。
 
 **失败信号**：连上但无 hello → 先怀疑广告字段超 31 字节（flags 3 + 128 位 UUID 18 + 名称 10 = 31，

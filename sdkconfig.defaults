@@ -18,6 +18,12 @@ CONFIG_FATFS_API_ENCODING_UTF_8=y
 # used to transcode those fallback names.
 CONFIG_FATFS_CODEPAGE_936=y
 
+# FRAM persistence. The first board answers on 0x50..0x57, which is the MB85RC16
+# bank aliasing (a lone AT24C512 would only ACK on 0x50). FramDevice still probes
+# every bank with a write/read scratch test, so a wrong profile falls back to
+# RAM-only instead of writing records to the wrong device.
+CONFIG_STORYBOX_FRAM_CONFIRMED=y
+
 # BLE control channel (NimBLE peripheral, same GATT layout as the Arduino app).
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y

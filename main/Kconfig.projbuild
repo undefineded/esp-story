@@ -48,10 +48,13 @@ menu "StoryBox migration"
             File sessions require all playback/image handles to be released.
     config STORYBOX_FRAM_CONFIRMED
         bool "Physical FRAM model and selected board profile have been confirmed"
-        default n
+        default y
         help
-            Enables real FRAM access. Do not enable based only on an I2C ACK.
-            Legacy uses MB85RC16 bank addresses; new board uses FM24CL64B at 0x51.
+            Enables real FRAM access. The legacy board carries an MB85RC16 whose
+            11-bit address aliases across 0x50..0x57; the 2026-10-28 board uses
+            an FM24CL64B at 0x51. FramDevice additionally probes every bank with
+            a write/read scratch test at boot, so a mismatched or absent chip
+            degrades to RAM-only settings instead of persisting corrupt records.
     config STORYBOX_NETWORK_DIAGNOSTICS
         bool "Enable Wi-Fi mode controls in diagnostics (starts with radio off)"
         depends on STORYBOX_PERIPHERAL_DIAGNOSTICS

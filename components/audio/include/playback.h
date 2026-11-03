@@ -12,7 +12,7 @@ enum class PlaybackState { Stopped, Paused, Playing, Draining, Ended, Failed };
 struct PlaybackSnapshot {
     PlaybackState state = PlaybackState::Stopped;
     uint64_t request = 0, generation = 0, submitted_frames = 0;
-    uint32_t sample_rate = 0, bitrate = 0;
+    uint32_t sample_rate = 0, bitrate = 0, duration = 0;
     esp_err_t error = ESP_OK;
     char path[512]{};
 };

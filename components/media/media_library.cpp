@@ -178,6 +178,7 @@ bool Playlist::select(std::shared_ptr<const Catalog> catalog,int category,bool n
         indices.push_back(i);
     }
     catalog_=std::move(catalog); indices_=std::move(indices); position_=0;
+    category_=category;
     return !indices_.empty();
 }
 const Track* Playlist::current() const {
