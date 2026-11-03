@@ -4,6 +4,7 @@
 #include "sdkconfig.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_psram.h"
 #include "esp_system.h"
 #include "esp_flash.h"
@@ -36,6 +37,21 @@ extern "C" void app_main()
              static_cast<unsigned>(esp_psram_get_size()),
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    // A freshly flashed OTA image boots in PENDING_VERIFY. Confirm it once the
+    // entry checks above passed; an earlier panic (flash/PSRAM/USB) leaves the
+    // image unconfirmed so the bootloader rolls back on the next reset.
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t image_state = ESP_OTA_IMG_UNDEFINED;
+    if (running && esp_ota_get_state_partition(running, &image_state) == ESP_OK &&
+        image_state == ESP_OTA_IMG_PENDING_VERIFY) {
+        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+            ESP_LOGI(tag, "OTA image confirmed; rollback cancelled");
+        } else {
+            ESP_LOGE(tag, "OTA image confirmation failed; next reset rolls back");
+        }
+    }
+#endif
 #if CONFIG_STORYBOX_PERIPHERAL_DIAGNOSTICS
     ESP_LOGW(tag, "Peripheral diagnostics build; product UI is not started");
     if (xTaskCreate([](void*) { runDiagnostics(); vTaskDelete(nullptr); },

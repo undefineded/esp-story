@@ -3,3 +3,6 @@
 # the TF card are untouched.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.ota.csv"
+# A freshly flashed OTA image must be confirmed by the firmware (see app_main);
+# otherwise the bootloader rolls back to the previous slot.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

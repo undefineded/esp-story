@@ -377,6 +377,18 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
   `storybox.bin` = `0x1d0f40`，槽位 3 MiB 余量 39%，`Ota::status` 等符号确认被链接。
 - 未做：回滚（未开 `APP_ROLLBACK_ENABLE`）、桌面端 OTA 上传界面、真机升级与断电失败演练。
 
+### P6（第五批）：OTA 回滚确认
+
+- `sdkconfig.ota` 打开 `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`；`app_main`
+  在入口自检（Flash/PSRAM/USB）通过后，若运行分区处于 `PENDING_VERIFY`
+  就调用 `esp_ota_mark_app_valid_cancel_rollback()` 确认镜像。
+- 语义：新镜像启动若在确认前 panic，下次复位由引导器回滚到旧槽；
+  确认后不再回滚。日志会打 `OTA image confirmed` 或确认失败告警。
+- 验证：`defaults + usb-product + ota` 组合构建通过 —— 引导器 `0x5780`（含回滚逻辑）、
+  `storybox.bin` = `0x1d1470`（3 MiB 槽余量 39%），配置中
+  `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` 已生效；默认单槽配置仍为 `0x1c73d0`。
+- 仍需真机演练：升级成功、故意断电、启动 panic 三种路径的回滚行为。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
