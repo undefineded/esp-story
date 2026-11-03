@@ -348,11 +348,13 @@ public:
         const int state = static_cast<int>(snapshot.state);
         if (seconds != drawn_second_ || state != last_state_) invalidate();
 
-        // Auto-advance once per generation when the decoder reports EOF.
-        if (snapshot.state == Audio::PlaybackState::Ended && snapshot.generation != last_generation_ &&
-            snapshot.generation > 0) {
+        // A new generation means the decoder was restarted: repaint for the new
+        // track, and advance the playlist once when the old one reported EOF.
+        if (snapshot.generation != last_generation_) {
+            const bool ended = snapshot.state == Audio::PlaybackState::Ended;
             last_generation_ = snapshot.generation;
-            if (playlist().move(1)) playCurrent(true);
+            invalidate();
+            if (ended && playlist().move(1)) playCurrent(true);
         }
     }
 

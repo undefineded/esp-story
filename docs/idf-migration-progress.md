@@ -150,7 +150,12 @@ USB 文件写与 NFC 路由、视频解码、OTA 均未接入。
 - 仍缺：总时长/VBR 元数据（进度条只显示已播时间与活动点）、童谣分类入口、
   故事页、视频页、BLE 点播。
 
-构建验证：默认配置通过，`storybox.bin` = `0x166400` 字节（分区剩余 82%）。
+构建验证：默认配置通过，`storybox.bin` = `0x166400` 字节（分区剩余 82%）；
+USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频/网络诊断）
+同样构建通过，`storybox.bin` = `0x192630` 字节，说明诊断入口的优先级分支未被产品入口破坏。
+
+注意：本机 `idf.py -D` 短选项会被当成构建目标，需用
+`--define-cache-entry SDKCONFIG=... --define-cache-entry "SDKCONFIG_DEFAULTS=..."`。
 
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
