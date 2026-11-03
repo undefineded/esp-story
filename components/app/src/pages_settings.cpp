@@ -222,7 +222,20 @@ private:
 
     void activate() {
         switch (selected_) {
-            case 5: notify("刷新列表：P2 接入"); break;
+            case 5: {
+                // Rebuild the catalog from the card. The stored index can be stale
+                // (external edits, or an older firmware that could not read long
+                // names); a rescan stops playback first because it needs every
+                // file lease back.
+                notify("正在刷新列表…", 4000);
+                if (refreshCatalog()) {
+                    notify("列表已刷新");
+                } else {
+                    notify("刷新失败：没有存储卡或扫描出错");
+                }
+                invalidate();
+                break;
+            }
             case 6:
                 ctx().settings.ble = ctx().settings.ble ? 0 : 1;
                 Ble::setAdvertisingEnabled(ctx().settings.ble != 0);

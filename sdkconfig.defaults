@@ -7,6 +7,17 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
+# FAT: IDF defaults to no long filenames and the US code page, which turns every
+# Chinese name on the card into an 8.3 short name transcoded through CP437 - the
+# on-screen lists came out as mojibake on the first real board. Long filenames
+# plus a UTF-8 API keep the names the card actually stores.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+# Short names on cards written by Chinese Windows are CP936 bytes; this is only
+# used to transcode those fallback names.
+CONFIG_FATFS_CODEPAGE_936=y
+
 # BLE control channel (NimBLE peripheral, same GATT layout as the Arduino app).
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
