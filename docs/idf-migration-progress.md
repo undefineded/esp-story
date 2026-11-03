@@ -235,6 +235,8 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
   以及每次修改后 `validParentalRecord()` 仍然通过；本机 MinGW 通过。
   默认配置 `0x16e8a0` 与确认 FRAM 配置 `0x174640` 均构建通过（后者编译了 FRAM 分支；
   首次构建曾遇到 `esp_lcd_panel_rgb.c` 的编译器段错误，重跑即通过，疑为并行内存压力）。
+  这两个尺寸是**加入 BLE 之前**的；当前树（含 NimBLE）为默认 `0x1be250`、
+  FRAM `0x1c4510`、USB 联合诊断 `0x1942a0`。
 
 ### P4（第一批）：BLE 控制通道（NimBLE）
 
