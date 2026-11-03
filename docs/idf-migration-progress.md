@@ -396,6 +396,20 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
   两处都走与设置页相同的 `saveSettings()` 路径。
 - 构建：产品 + USB + NFC `storybox.bin` = `0x1d0fb0`。
 
+### 跨配置回归构建（2026-11-04）
+
+本机（IDF 5.5.1，`build-all.ps1` 本地脚本，未入库）一次性构建了当前全部配置：
+
+| 配置 | 片段 | `storybox.bin` |
+|---|---|---|
+| 默认产品（BLE+NFC） | `sdkconfig.defaults` | `0x1C73D0` (1.86 MB) |
+| 产品 + USB 协议 | `+sdkconfig.usb-product` | `0x1D0FB0` (1.90 MB) |
+| 产品 + USB + OTA 双槽 | `+sdkconfig.ota` | `0x1D14D0` (1.91 MB) |
+| 深睡 | `+sdkconfig.power` | `0x1C9E60` (1.88 MB) |
+| 确认 FRAM | `+test/sdkconfig.fram-compile-only` | `0x1C95E0` (1.87 MB) |
+
+全部链接通过；OTA 配置的最小 app 分区 3 MiB，余量约 39%。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
