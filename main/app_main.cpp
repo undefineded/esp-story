@@ -8,6 +8,7 @@
 #include "esp_psram.h"
 #include "esp_system.h"
 #include "esp_flash.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -16,6 +17,19 @@
 extern "C" void app_main()
 {
     constexpr const char *tag = "storybox";
+    // NimBLE keeps its bonding/CCCD state and the RF calibration cache in NVS.
+    // Nothing initialised NVS in the product path before, which showed up on the
+    // first real board as "NVS has not been initialized" from phy_init followed
+    // by a full RF calibration on every boot.
+    esp_err_t nvs = nvs_flash_init();
+    if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(tag, "NVS unusable (%s); erasing", esp_err_to_name(nvs));
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs = nvs_flash_init();
+    }
+    if (nvs != ESP_OK) {
+        ESP_LOGE(tag, "NVS init failed: %s; Bluetooth will not work", esp_err_to_name(nvs));
+    }
 #if CONFIG_STORYBOX_USB_PROTOCOL
     ESP_ERROR_CHECK(Host::startUsb());
 #endif

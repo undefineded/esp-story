@@ -679,6 +679,16 @@ int accessCallback(uint16_t, uint16_t attr_handle, ble_gatt_access_ctxt* ctxt, v
     return 0;
 }
 
+// NimBLE's ble_gatts_chr_is_sane() rejects any characteristic without an
+// access callback, even a notify-only one (`BLE_HS_EINVAL` from
+// ble_gatts_count_cfg, which is what the first real board reported as
+// "GATT registration failed: 3/0"). TX is notify-only, so this callback must
+// never be reached; refuse politely instead of dereferencing anything.
+int txAccessCallback(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*) {
+    ESP_LOGW(kTag, "unexpected TX attribute access op=%d", static_cast<int>(ctxt->op));
+    return BLE_ATT_ERR_READ_NOT_PERMITTED;
+}
+
 const ble_gatt_chr_def kCharacteristics[] = {
     {
         &kRxUuid.u,          // uuid
@@ -692,7 +702,7 @@ const ble_gatt_chr_def kCharacteristics[] = {
     },
     {
         &kTxUuid.u,
-        nullptr,
+        txAccessCallback,
         nullptr,
         nullptr,
         BLE_GATT_CHR_F_NOTIFY,
