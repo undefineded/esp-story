@@ -3,13 +3,13 @@
 #include <cassert>
 #include <fstream>
 #include <unistd.h>
-// Independent legacy v2 fixture builder: fields match src/catalog.cpp,
-// src/storage.cpp and src/story.cpp, not the new reader implementation.
-static std::vector<uint8_t> fixture() {
+// Independent fixture builder for legacy v2 / current v3 indexes: fields match
+// src/catalog.cpp, src/storage.cpp and src/story.cpp, not the reader.
+static std::vector<uint8_t> fixture(uint32_t version=3) {
     std::vector<uint8_t> bytes;
     auto integer=[&](uint32_t n){for(unsigned i=0;i<4;++i) bytes.push_back(n>>(8*i));};
     auto text=[&](const std::string& value){integer(value.size());bytes.insert(bytes.end(),value.begin(),value.end());};
-    integer(0x45535049);integer(2);integer(1);integer(1);
+    integer(0x45535049);integer(version);integer(1);integer(1);
     text("儿歌");text("/music/儿歌/a.mp3");integer(1);integer(1234);
     integer(1);text("/story/小熊");text("/story/小熊/a.mp3");text("/story/小熊/a.lrc");
     uint32_t hash=2166136261u; for(auto byte:bytes) hash=(hash^byte)*16777619u;
@@ -24,7 +24,7 @@ int main() {
     Storage::AccessGate gate;Media::Library library(gate);
     using Result=Storage::UploadResult;
     assert(library.saveCache(dir)==Result::Invalid);
-    auto bytes=fixture();write(primary,bytes);
+    auto bytes=fixture(2);write(primary,bytes);   // legacy v2 index must stay readable
     assert(library.loadCache(dir));
     auto saved=library.snapshot();
     assert(saved->tracks.size()==1 && saved->tracks[0].id==1234 && saved->categories[0]=="儿歌");
@@ -33,7 +33,7 @@ int main() {
     assert(library.saveCache(dir)==Result::Ok);
     { std::ifstream file(primary,std::ios::binary);
       const std::vector<uint8_t> actual((std::istreambuf_iterator<char>(file)),{});
-      assert(actual==fixture()); }
+      assert(actual==fixture(3)); }
     const auto recovery=primary+".storybox-backup";
     assert(std::rename(primary.c_str(),recovery.c_str())==0);
     assert(library.loadCache(dir));
@@ -50,7 +50,7 @@ int main() {
     assert(library.loadCache(dir)); // fallback to previous valid backup
     auto valid=library.snapshot();write(backup,bytes);
     assert(!library.loadCache(dir) && library.snapshot()==valid);
-    bytes=fixture();bytes.push_back(0);write(primary,bytes);
+    bytes=fixture(3);bytes.push_back(0);write(primary,bytes);
     assert(!library.loadCache(dir)); // checksum valid but trailing garbage
     assert(mkdir((std::string(dir)+"/music").c_str(),0700)==0);
     assert(library.scan(dir)==Media::ScanResult::Ok);

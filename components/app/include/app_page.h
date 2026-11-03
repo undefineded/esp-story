@@ -32,6 +32,8 @@ Page* createSettingsPage();
 Page* createMusicListPage();
 Page* createTrackListPage();
 Page* createPlayerPage();
+Page* createStoryListPage();
+Page* createStoryPlayerPage();
 
 // Navigation stack helpers.
 void pushPage(Page* page);

@@ -16,9 +16,9 @@ struct CacheWriter {
 };
 bool writeCatalog(CacheWriter& stream,const Catalog& catalog) {
     IndexIO::Archive<CacheWriter> archive(stream,false);
-    uint32_t magic=0x45535049,version=2,categories=catalog.categories.size(),tracks=catalog.tracks.size();
+    uint32_t magic=0x45535049,version=3,categories=catalog.categories.size(),tracks=catalog.tracks.size();
     uint32_t stories=catalog.stories.size();
-    if (categories>32 || tracks>300 || stories>32 || !archive.number(magic) || !archive.number(version) ||
+    if (categories>32 || tracks>kMaxTracks || stories>kMaxStories || !archive.number(magic) || !archive.number(version) ||
         !archive.number(categories) || !archive.number(tracks)) return false;
     for (auto name:catalog.categories) if (!archive.text(name)) return false;
     for (const auto& track:catalog.tracks) {
@@ -45,8 +45,11 @@ bool inside(const std::string& path,const std::string& directory,const char* suf
 bool readCatalog(Storage::FileStream& file,Catalog& catalog) {
     IndexIO::Archive<Storage::FileStream> archive(file,true);
     uint32_t magic=0,version=0,categories=0,tracks=0,stories=0;
-    if (!archive.number(magic) || magic!=0x45535049 || !archive.number(version) || version!=2 ||
-        !archive.number(categories) || categories>32 || !archive.number(tracks) || tracks>300) return false;
+    if (!archive.number(magic) || magic!=0x45535049 || !archive.number(version) ||
+        (version!=2 && version!=3) ||
+        !archive.number(categories) || categories>32 || !archive.number(tracks) || tracks>kMaxTracks) return false;
+    // v2 wrote a 32-entry story limit; v3 allows the full catalog limit.
+    const std::size_t story_limit=version==2?32:kMaxStories;
     for (unsigned i=0;i<categories;++i) {
         std::string name;
         if (!archive.text(name) || name.empty() || name.find('/')!=std::string::npos) return false;
@@ -61,14 +64,14 @@ bool readCatalog(Storage::FileStream& file,Catalog& catalog) {
         track.id=id?id:Library::nameId(track.name);
         catalog.tracks.push_back(std::move(track));
     }
-    if (!archive.number(stories) || stories>32) return false;
+    if (!archive.number(stories) || stories>story_limit) return false;
     for (unsigned i=0;i<stories;++i) {
         Story story;
         if (!archive.text(story.directory) || !inside(story.directory,"/story") ||
             !archive.text(story.audio) || !archive.text(story.timeline) ||
             (!story.audio.empty() && !inside(story.audio,story.directory,".mp3")) ||
             (!story.timeline.empty() && !inside(story.timeline,story.directory,".lrc"))) return false;
-        story.title=story.directory.substr(story.directory.find_last_of('/')+1);
+        normalizeStory(story);
         catalog.stories.push_back(std::move(story));
     }
     return archive.finish();

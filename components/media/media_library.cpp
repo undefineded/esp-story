@@ -46,7 +46,9 @@ struct Scanner {
             const int status=lstat((root+child).c_str(),&st);
 #endif
             if (status!=0) { result=ScanResult::IoError; break; }
+#ifdef S_ISLNK
             if (S_ISLNK(st.st_mode)) { result=ScanResult::IoError; break; }
+#endif
             visitor(child,name,S_ISDIR(st.st_mode),S_ISREG(st.st_mode));
             if (result!=ScanResult::Ok) break;
         }
@@ -69,32 +71,67 @@ struct Scanner {
             });
         }
     }
-    void stories(const std::string& path,const std::string& title,unsigned depth) {
+    void stories(const std::string& path,unsigned depth) {
         std::string audio,timeline;
         std::vector<std::pair<std::string,std::string>> children;
+        std::vector<std::string> songs;
         visit(path,[&](const auto& child,const auto& name,bool dir,bool regular) {
-            if (dir && depth<3) {
+            if (dir && depth<6) {
                 if (children.size()>=300) { result=ScanResult::LimitExceeded; return; }
                 children.emplace_back(child,name);
             }
             if (regular && audio.empty() && extension(name,".mp3")) audio=child;
             if (regular && timeline.empty() && extension(name,".lrc")) timeline=child;
+            if (regular && extension(name,".mp3")) songs.push_back(child);
         },depth==0);
         if (result!=ScanResult::Ok) return;
-        if (depth && !audio.empty()) {
-            if (catalog.stories.size()>=32) { result=ScanResult::LimitExceeded; return; }
-            catalog.stories.push_back({path,title,audio,timeline});
-            return;
+        // A folder with both a track and an LRC is one illustrated story; other
+        // folders contribute one audio story per MP3 (matches the Arduino app).
+        if (!timeline.empty() && !audio.empty()) {
+            if (!addStory(path,audio,timeline)) return;
+        } else {
+            for (const auto& song:songs) if (!addStory(song,song,"")) return;
         }
         for (const auto& child:children) {
-            stories(child.first,child.second,depth+1);
+            stories(child.first,depth+1);
             if (result!=ScanResult::Ok) return;
         }
     }
+    bool addStory(const std::string& directory,const std::string& audio,const std::string& timeline) {
+        if (catalog.stories.size()>=kMaxStories) { result=ScanResult::LimitExceeded; return false; }
+        Story story;
+        story.directory=directory;
+        story.audio=audio;
+        story.timeline=timeline;
+        normalizeStory(story);
+        catalog.stories.push_back(std::move(story));
+        return true;
+    }
 };
 }
-uint32_t Library::nameId(const std::string& name) {
-    uint32_t hash=2166136261u;
+std::string baseName(const std::string& path) {
+    const auto slash=path.find_last_of('/');
+    return slash==std::string::npos?path:path.substr(slash+1);
+}
+std::string withoutExtension(const std::string& name) {
+    const auto dot=name.find_last_of('.');
+    return dot==std::string::npos||dot==0?name:name.substr(0,dot);
+}
+void normalizeStory(Story& story) {
+    story.kind=story.timeline.empty()?StoryKind::Audio:StoryKind::Illustrated;
+    story.title=story.kind==StoryKind::Audio?withoutExtension(baseName(story.audio))
+                                           :baseName(story.directory);
+    const std::string prefix="/story/";
+    if (story.directory.compare(0,prefix.size(),prefix)==0) {
+        const auto start=prefix.size();
+        const auto slash=story.directory.find('/',start);
+        story.category=story.directory.substr(start,
+            slash==std::string::npos?std::string::npos:slash-start);
+    } else {
+        story.category.clear();
+    }
+}
+uint32_t Library::nameId(const std::string& name) {    uint32_t hash=2166136261u;
     for (unsigned char c:name) hash=(hash^c)*16777619u;
     return hash?hash:1;
 }
@@ -119,7 +156,7 @@ ScanResult Library::scan(const std::string& root) {
             if (next->tracks.size()>before) next->categories.push_back(name);
         } else if (regular && extension(name,".mp3")) scanner.addTrack(path,name,0);
     },true);
-    if (scanner.result==ScanResult::Ok) scanner.stories("/story","",0);
+    if (scanner.result==ScanResult::Ok) scanner.stories("/story",0);
     if (scanner.result!=ScanResult::Ok) return scanner.result;
     std::sort(next->tracks.begin(),next->tracks.end(),[](const auto& a,const auto& b){return a.path<b.path;});
     std::sort(next->stories.begin(),next->stories.end(),[](const auto& a,const auto& b){return a.directory<b.directory;});

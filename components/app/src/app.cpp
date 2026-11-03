@@ -257,6 +257,7 @@ void applyEq(uint8_t preset) {
 CatalogPtr catalog() { return s_catalog; }
 Media::Playlist& playlist() { return g_playlist; }
 Audio::Playback& playback() { return g_playback; }
+Storage::AccessGate& storageGate() { return g_gate; }
 
 Media::Catalog emptyCatalog() { return Media::Catalog{}; }
 

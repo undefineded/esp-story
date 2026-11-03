@@ -14,6 +14,8 @@ using CatalogPtr = std::shared_ptr<const Media::Catalog>;
 CatalogPtr catalog();
 Media::Playlist& playlist();
 Audio::Playback& playback();
+// Storage lease gate for synchronous reads (story LRC, JPEG panels).
+Storage::AccessGate& storageGate();
 
 // Loads the v2 index cache; falls back to a full scan (blocking, SD I/O) and
 // writes the index back. Returns false when the card is missing or the scan
@@ -24,6 +26,9 @@ bool refreshCatalog();
 bool playCurrent(bool auto_start);
 bool stopPlayback();
 void pausePlayback(bool paused);
+
+// Opens the story player for a catalog index (pushes the page).
+void openStory(std::size_t index);
 
 Media::Catalog emptyCatalog();
 

@@ -157,6 +157,28 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
 注意：本机 `idf.py -D` 短选项会被当成构建目标，需用
 `--define-cache-entry SDKCONFIG=... --define-cache-entry "SDKCONFIG_DEFAULTS=..."`。
 
+### P2（第二批）：故事目录与故事播放页
+
+- 故事扫描改为递归 6 层（对齐 `MAX_STORY_DEPTH`）：目录里同时有 `.mp3` 和 `.lrc`
+  才算一个图文故事；否则该目录下每个 MP3 都是一个独立音频故事（对齐
+  主线 `b89a62f` 的“音频故事按 MP3 展开”）。故事上限从 32 提到 128。
+- 索引格式升到 **v3**（故事上限 128），读取端同时接受 v2（上限 32）与 v3；
+  标题、`kind`、`category` 由 `normalizeStory()` 从路径推导，缓存不新增字段，
+  因此旧 v2 索引不需要迁移即可继续加载。
+- 新增故事列表页（标题 + 图文/音频标签）与故事播放页：
+  - 图文故事按 LRC 时间轴切图，`Display::drawStoryImage()` 全程持有存储许可；
+  - 音频故事显示标题/已播时间，走同一播放服务；
+  - OK 暂停/继续，NEXT/PREV 切上一个/下一个故事，长按 OK 停止返回列表，
+    长按 SET 停止并回主页；音量由旋钮调整。
+- 主机测试：新增 `test/host_compat.h`（Windows/MinGW 的 `fsync`/`lstat`/`symlink`
+  shim，POSIX 下为空）并由 `tools/test_host.sh` 统一 `-include`；两处 symlink
+  断言在 Windows 下跳过（本机没有创建符号链接的权限）。`media_library` /
+  `media_cache` 测试更新到新语义：两个故事（图文+音频）、v2 索引可读、写出 v3。
+- 本机验证：媒体冒烟测试（临时脚本，未入库）通过——递归扫描、6 层深度限制、
+  分类与标题推导、v3 索引读取、v2 索引兼容。完整 `tools/test_host.sh` 在
+  Windows 上仍受 POSIX `rename` 覆盖语义与 UTF-8 路径限制，未跑通；以 Linux/CI 为准。
+- 构建：默认配置通过，`storybox.bin` = `0x169a00` 字节。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。

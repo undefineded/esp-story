@@ -1,12 +1,25 @@
 #pragma once
 #include "storage_access.h"
 #include "upload_transaction.h"
+#include <cstddef>
 #include <memory>
 #include <vector>
 
 namespace Media {
+enum class StoryKind { Audio, Illustrated };
+inline constexpr std::size_t kMaxStories = 128;
+inline constexpr std::size_t kMaxTracks = 300;
 struct Track { std::string path, name; uint32_t id; int category; };
-struct Story { std::string directory, title, audio, timeline; };
+struct Story {
+    std::string directory, title, audio, timeline;
+    StoryKind kind = StoryKind::Audio;
+    std::string category;  // first directory under /story, used for grouping
+};
+// Path helpers shared by the scanner, the index cache and the UI.
+std::string baseName(const std::string& path);
+std::string withoutExtension(const std::string& name);
+// Fills title/kind/category from directory, audio and timeline. Idempotent.
+void normalizeStory(Story& story);
 struct Catalog {
     uint64_t generation = 0;
     uint64_t storage_revision = 0;

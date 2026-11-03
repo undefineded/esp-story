@@ -48,10 +48,12 @@ int main() {
     assert(!gate.acquire()); reader.expire(60006); assert(gate.acquire()); gate.release();
     assert(!reader.beginSession(60007));
     // Neither file nor intermediate directory symlinks may escape the root.
+#ifndef _WIN32  // creating symlinks needs admin/developer mode on Windows
     const auto link=root+"/link";
     assert(symlink("/tmp",link.c_str())==0);
     error(reader.begin("link/outside",60008),"BAD_PATH");
     error(reader.begin("link",60008),"BAD_PATH");
+#endif
     assert(!reader.begin("测试.mp3",60009)); assert(reader.xid()!=xid);
     // Truncation after stat/open is reported as IO, never a successful short chunk.
     assert(truncate(path.c_str(),0)==0);
@@ -115,5 +117,8 @@ int main() {
     assert(unlink((path+".storybox-backup").c_str())==0);
     assert(unlink((path+".storybox-interrupted").c_str())==0);
     assert(unlink((root+"/.esp-story-index.dirty").c_str())==0);
-    assert(unlink(link.c_str())==0); assert(unlink(path.c_str())==0); assert(rmdir(directory)==0);
+#ifndef _WIN32
+    assert(unlink(link.c_str())==0);
+#endif
+    assert(unlink(path.c_str())==0); assert(rmdir(directory)==0);
 }
