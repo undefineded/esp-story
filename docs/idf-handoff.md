@@ -4,8 +4,9 @@
 
 ## 1. 一句话状态
 
-`feature/esp-idf-migration` 分支上 P1–P6 主体已实现，**30 个提交领先 origin、未 push**，工作区干净，
-五套配置的编译层回归全部通过；**没有任何真机验收结论**，另有 6 类功能尾巴未收。
+`feature/esp-idf-migration` 分支上 P1–P6 主体 + BLE 家长命令尾巴都已完成，**已 push 到 origin**
+（工作区干净时先推了 31 个提交，本轮 BLE 改动另提交），五套配置的编译层回归全部通过；
+**仍然没有任何真机验收结论**，另有 5 类功能尾巴未收。
 
 ## 2. 环境（本机）
 
@@ -21,11 +22,11 @@
 ### 构建入口（必须用这两个脚本，`idf.py -D` 在本机不可用）
 
 ```powershell
-# 单次构建
-powershell -File tools\idf\idf.ps1 -B build-ui --define-cache-entry SDKCONFIG=build-ui/sdkconfig build
+# 单次构建（本机脚本带 Zone.Identifier，必须显式跳过执行策略）
+powershell -ExecutionPolicy Bypass -File tools\idf\idf.ps1 -B build-ui --define-cache-entry SDKCONFIG=build-ui/sdkconfig build
 
 # 全配置回归（默认 / usb-product / ota+usb / power / fram）
-powershell -File tools\idf\build-all.ps1
+powershell -ExecutionPolicy Bypass -File tools\idf\build-all.ps1
 
 # 主机测试（IDF_PATH 指向 esp-idf，PATH 需要 w64devkit 的 bin）
 $env:IDF_PATH='C:\esp\v5.5.1\esp-idf'
@@ -49,7 +50,8 @@ components/
   nfc/         PN532 轮询服务（复用 src/pn532.cpp、src/nfc.cpp）
   ota/         esp_ota 封装（begin/write/finish/abort/status）
   power/       空闲策略（纯函数 + 主机测试）与熄屏/深睡服务
-  settings/    MPL3/4、音量、MPS2、FAV、PCTL 记录 + 绑定核心（父目录下 parental_binding.h）
+  settings/    MPL3/4、音量、MPS2、FAV、PCTL 记录、绑定核心（parental_binding.h）
+               与 BLE 家长命令的补丁/状态视图（parental_config.h）
   storage/     SD 挂载、AccessGate、FileReader、上传事务
   video/       AVI 索引、视频目录扫描
 src/           Arduino 双构建源码（display/input/fonts/hall/nfc/pn532 被 IDF 组件复用）
@@ -72,10 +74,16 @@ sdkconfig.*    默认 / usb-product / usb-diagnostics / diagnostics / audio / po
   PIN 输入页（旋钮输数字）、家长设置页（时长/音量上限/就寝/远程锁/改 PIN/解绑/恢复默认）。
 - **P6** `sys stats`（对齐桌面端 `DeviceSystemStats`）、`sys set`（音量/亮度/EQ/旋转）、
   熄屏 + 可选深睡（EXT1 唤醒，默认关闭）、双槽 OTA 分区 + 上传通道 + 回滚确认。
+- **P4 第五批（最新）** BLE 家长配置尾巴：`set` / `pin set` / `reset` / `unbind`、
+  `get stories/music/cats/report`、`ctrl fav`、`ctrl` 门禁（`LOCKED`/`NOT_ALLOWED`/`RANGE`）、
+  `get state`/`get config`/`evt:state` 补全旧固件字段。新增
+  `components/settings/include/parental_config.h`（补丁 + 状态视图 + 锁编号），
+  `ParentalPolicy::rebind()` 让鉴权后的编辑不再丢可信时钟。
 
-最近 8 个提交：
+最近 8 个提交（本轮的 BLE 提交不列在这里，用 `git log` 查）：
 
 ```
+0035e71 docs: add a handoff document for continuing the migration in a new session
 ed83d0a sys reboot 免拔电应用 OTA
 e4fbe5e docs: sys rescan 记录
 641f7af sys rescan
@@ -83,17 +91,16 @@ e4fbe5e docs: sys rescan 记录
 8533ecb 跨配置回归矩阵
 c8b5a71 sys set 支持 EQ/旋转
 d7eafd7 OTA 回滚确认
-66ded45 OTA 上传通道
 ```
 
 ## 5. 下一步（按建议顺序）
 
-1. **push 分支**：`git push origin feature/esp-idf-migration`（30 个提交，含分区表新增，未推送）。
-2. **真机验收**：照 `docs/idf-hardware-acceptance.md` 十组跑，结论回填 `idf-migration-progress.md`。
-   这一步会暴露最可能的真问题：BLE 广告字段是否超 31 字节、I2S 与功放使能、JPEG/QOI 解码、
-   视频帧率、深睡唤醒、OTA 三种路径。
-3. 功能尾巴（按价值排序）：
-   - BLE `set`（家长配置）/ `pin set` / `reset` / `unbind` 命令（需要给 `Ble::Command` 加字符串载荷）；
+1. **真机验收**（现在就可以开始）：照 `docs/idf-hardware-acceptance.md` 十组跑，结论回填
+   `idf-migration-progress.md`。这一步会暴露最可能的真问题：BLE 广告字段是否超 31 字节、
+   I2S 与功放使能、JPEG/QOI 解码、视频帧率、深睡唤醒、OTA 三种路径。
+2. 功能尾巴（按价值排序）：
+   - BLE / 小程序联调：固件侧命令已齐（`set`/`pin set`/`reset`/`unbind`/列表/收藏/门禁），
+     **没有任何真机或协议实测**；联调时重点看 `evt:state` 的 1 Hz 报文长度与 MTU 协商；
    - NFC 卡读写 API + 事件通道（`Nfc::Service` 现在只出快照，事件被丢弃）；
    - USB `mkdir`/`remove`/`rename` 与容量字段（`FileReader` 已有写事务基础）；
    - 桌面端 OTA 上传界面（固件侧通道已就绪：`sys ota_begin/ota_chunk/ota_end/reboot`）；
@@ -117,13 +124,33 @@ d7eafd7 OTA 回滚确认
 7. **`Pn532::errorName` 只在 .cpp 内定义**，头文件没有声明；NFC 路由里不要用它。
 8. **中文源码**：用 `write`/`edit` 工具改文件；不要用 PowerShell `Get-Content -Raw` + `Set-Content`
    重写（会按 ANSI 解码而损坏 UTF-8）。
+9. **`tools/idf/*.ps1` 带 Zone.Identifier**，`powershell -File` 会被执行策略拦下
+   （报 “is not digitally signed”）。必须写成
+   `powershell -ExecutionPolicy Bypass -File tools\idf\idf.ps1 ...`。
+10. **`build-all.ps1` 把编译输出丢进 Out-Null**，失败时只有一行 `FAILED`。要看编译错误就单独跑
+   某一套配置，或改成把输出落到日志再读尾巴。
+11. **主机测试在本机只能跑子集**：`tools/test_host.sh` 会在 `file_reader` 处断言失败（POSIX 语义），
+   而 `transfer_frame` 会以访问冲突（0xC0000005）退出。逐个编译/运行能过的那些：
+   `board_profile storage_access settings_record media_records parental_record parental_binding
+   parental_config story_timeline pn532_frame render_math transfer_crc`。
+
+## 6.1 BLE 协议要点（本轮新增）
+
+- 线协议照旧固件 `src/ble.cpp` 对照迁移，小程序源码不在本仓库。
+- `set` 是**部分补丁**：只带想改的字段；无识别字段回 `NO_FIELDS`。
+- `lock` 是数字：None=0 / DailyLimit=1 / Bedtime=2 / Remote=3，原生新增
+  ClockRequired=4、Unavailable=5；中文原因在 `reason` 字符串里。
+- `reset` 保留 PIN 与用量历史（旧固件会清 PIN 和收藏），并强制重新配对；
+  `unbind` 只清 token。
+- 应用侧同步落盘（FRAM 写 + 回读校验），所以 BLE 没有单独的配置命令队列。
 
 ## 7. 事实边界
 
-- 所有尺寸数据来自编译产物（默认 `0x1C73D0`、usb-product `0x1D1090`、OTA+usb `0x1D14D0`、
-  深睡 `0x1C9E60`、确认 FRAM `0x1C95E0`；最后几轮有微调，**以重新构建为准**）。
-- **没有任何真机数据**：电流、帧率、配对、NFC、USB 传输、OTA 升级/回滚均未实测。
+- 所有尺寸数据来自编译产物（BLE 家长命令之后：默认 `0x1C8390`、usb-product `0x1D1FB0`、
+  OTA+usb `0x1D24E0`、深睡 `0x1CAE10`、确认 FRAM `0x1CAB40`；**以重新构建为准**）。
+- **没有任何真机数据**：电流、帧率、配对、BLE 报文、NFC、USB 传输、OTA 升级/回滚均未实测。
 - 桌面端（`desktop/`）只改过一处：`FileManagerPage` 接受 `fs/fs_transfer/fs_readonly` 三种能力。
+- 小程序（控制器）源码不在本仓库；BLE 的线协议兼容性只做了源码级对照，没有联调。
 
 ## 附录：`tools/idf/` 脚本（未入库，换机需重建）
 

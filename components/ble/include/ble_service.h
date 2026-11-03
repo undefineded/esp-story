@@ -2,6 +2,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "cJSON.h"
+#include "parental_config.h"
+
 namespace Ble {
 
 enum class Action : uint8_t {
@@ -15,6 +18,7 @@ enum class Action : uint8_t {
     Volume,
     PlayStory,
     PlayMusic,
+    Favourite,
 };
 
 struct Command {
@@ -22,32 +26,47 @@ struct Command {
     int32_t value = 0;
 };
 
-// Snapshot the app publishes once per second; the service turns it into the
-// "state" notification the mini-program expects.
+// Playback snapshot the app publishes once per second; the service merges it
+// with the parental status it reads through Hooks::status.
 struct Snapshot {
     bool playing = false;
     bool paused = false;
     int volume = 0;
-    int volume_min = 0;
-    int volume_max = 21;
     const char* mode = "idle";  // "music" | "story" | "idle"
     const char* title = "";
     uint32_t current = 0;       // seconds
     uint32_t duration = 0;      // seconds, 0 when unknown
-    uint32_t used = 0;          // parental usage today, seconds
-    const char* lock = "";      // "", "daily", "bedtime", "remote"
 };
 
-// Binding/auth hooks: the app owns the PCTL record, the BLE layer only asks.
+// Hooks into the application. The BLE layer owns the wire protocol; the app owns
+// the PCTL record, playback and persistence.
+//
+// The parental callbacks return nullptr on success or a protocol error code
+// ("SAVE", "UNAVAILABLE") that the phone receives as {"ok":false,"err":...}.
 struct Hooks {
     void* context = nullptr;
     bool (*bind)(void* context, const char* code, char* token, std::size_t capacity) = nullptr;
     bool (*verify_token)(void* context, const char* token) = nullptr;
     bool (*verify_pin)(void* context, const char* pin) = nullptr;
     void (*sync_time)(void* context, uint32_t epoch, int16_t timezone) = nullptr;
-    bool (*has_pin)(void* context) = nullptr;
-    bool (*bound)(void* context) = nullptr;
     const char* (*bind_code)(void* context) = nullptr;
+    // Reads the parental status; false means "no usable record", which is
+    // reported as unavailable rather than permissive.
+    bool (*status)(void* context, Persistence::ParentalStatus* out) = nullptr;
+    const char* (*apply_config)(void* context, const Persistence::ParentalPatch& patch) = nullptr;
+    const char* (*set_pin)(void* context, const char* pin) = nullptr;
+    const char* (*factory_reset)(void* context) = nullptr;
+    const char* (*unbind)(void* context) = nullptr;
+    // Playback admission control. Returns nullptr when the action may run, or a
+    // protocol error code ("LOCKED", "NOT_ALLOWED", "RANGE") to reject it.
+    const char* (*gate)(void* context, Action action, int32_t value) = nullptr;
+    // "get stories|music|cats|report": fills `data` with one page. Returns false
+    // when the list kind is unknown so the service can answer BAD_WHAT. The app
+    // owns the catalog and the paging limits.
+    bool (*list)(void* context, const char* what, const cJSON* request, cJSON* data) = nullptr;
+    // "ctrl fav": toggles the favourite flag of one track and reports the new
+    // state plus the total. Returns false when favourites are unavailable.
+    bool (*toggle_favorite)(void* context, int32_t index, bool* now, int32_t* total) = nullptr;
 };
 
 // GATT service (RX writes JSON lines, TX notifies JSON lines) plus the protocol

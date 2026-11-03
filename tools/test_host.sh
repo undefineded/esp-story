@@ -28,6 +28,9 @@ g++ -std=c++17 -Wall -Wextra -Werror -pedantic "${compat[@]}" \
     -Icomponents/settings/include test/parental_binding_test.cpp -o "$test_dir/parental_binding"
 "$test_dir/parental_binding"
 g++ -std=c++17 -Wall -Wextra -Werror -pedantic "${compat[@]}" \
+    -Icomponents/settings/include test/parental_config_test.cpp -o "$test_dir/parental_config"
+"$test_dir/parental_config"
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic "${compat[@]}" \
     -Icomponents/power/include test/power_policy_test.cpp -o "$test_dir/power_policy"
 "$test_dir/power_policy"
 g++ -std=c++17 -Wall -Wextra -Werror -pedantic -DARDUINO "${compat[@]}" \

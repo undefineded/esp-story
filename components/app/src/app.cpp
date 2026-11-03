@@ -24,6 +24,7 @@
 #include "nfc_service.h"
 #include "ota_service.h"
 #include "parental_binding.h"
+#include "parental_config.h"
 #include "parental_policy.h"
 #include "playback.h"
 #include "power_service.h"
@@ -107,7 +108,7 @@ bool bleBind(void*, const char* code, char* token, std::size_t capacity) {
     Persistence::ParentalRecord record = s_parental_store->value();
     if (!Persistence::parentalBind(record, randomU32, code, token, capacity)) return false;
     if (!s_parental_store->save(record)) return false;
-    s_policy.begin(s_parental_store->value(), nowMs());
+    s_policy.rebind(s_parental_store->value(), nowMs());
     return true;
 #else
     (void)code; (void)token; (void)capacity;
@@ -139,18 +140,224 @@ void bleSyncTime(void*, uint32_t epoch, int16_t timezone) {
     if (s_parental_ready) s_policy.syncTime(epoch, timezone, nowMs());
 }
 
-bool bleHasPin(void*) {
+// Parental status for the phone. A build or boot without a usable PCTL record
+// reports "unavailable" rather than the permissive defaults.
+bool bleStatus(void*, Persistence::ParentalStatus* out) {
+    if (!out) return false;
+    if (!s_parental_ready) {
+        *out = Persistence::parentalStatusUnavailable();
+        return false;
+    }
+    *out = Persistence::parentalStatusOf(s_policy.record(), s_policy.lock(nowMs()),
+                                        s_policy.timeSynced());
+    return true;
+}
+
+const char* bleApplyConfig(void*, const Persistence::ParentalPatch& patch) {
 #if CONFIG_STORYBOX_FRAM_CONFIRMED
-    return s_parental_store && Persistence::parentalHasPin(s_parental_store->value());
+    if (!s_parental_store || !s_parental_ready) return "UNAVAILABLE";
+    Persistence::ParentalRecord record = s_policy.record();
+    if (!Persistence::applyParentalPatch(record, patch)) return "NO_FIELDS";
+    if (!parentalApply(record)) return "SAVE";
+    // A volume range change must clamp the level that is playing right now.
+    setVolume(s_context.volume);
+    return nullptr;
 #else
-    return false;
+    (void)patch;
+    return "UNAVAILABLE";
 #endif
 }
 
-bool bleBound(void*) {
+const char* bleSetPin(void*, const char* pin) {
 #if CONFIG_STORYBOX_FRAM_CONFIRMED
-    return s_parental_store && Persistence::parentalBound(s_parental_store->value());
+    if (!s_parental_store || !s_parental_ready) return "UNAVAILABLE";
+    if (!Persistence::parentalPinFormatOk(pin)) return "PIN_FORMAT";
+    return parentalSetPin(pin) ? nullptr : "SAVE";
 #else
+    (void)pin;
+    return "UNAVAILABLE";
+#endif
+}
+
+const char* bleFactoryReset(void*) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_parental_store || !s_parental_ready) return "UNAVAILABLE";
+    Persistence::ParentalRecord record = s_policy.record();
+    Persistence::parentalFactoryDefaults(record, randomU32);
+    if (!parentalApply(record)) return "SAVE";
+    lockParentalSession();
+    return nullptr;
+#else
+    return "UNAVAILABLE";
+#endif
+}
+
+const char* bleUnbind(void*) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_parental_store || !s_parental_ready) return "UNAVAILABLE";
+    Persistence::ParentalRecord record = s_policy.record();
+    Persistence::parentalUnbind(record);
+    if (!parentalApply(record)) return "SAVE";
+    lockParentalSession();
+    return nullptr;
+#else
+    return "UNAVAILABLE";
+#endif
+}
+
+// Admission control for "ctrl": the app, not the BLE layer, decides whether a
+// lock, the category allowlist or an out-of-range index rejects the request.
+const char* bleGate(void*, Ble::Action action, int32_t value) {
+    const auto snapshot = s_catalog;
+    const int track_count = snapshot ? static_cast<int>(snapshot->tracks.size()) : 0;
+    // Favourites are metadata, so they stay available on a locked device, but
+    // the index must exist.
+    if (action == Ble::Action::Favourite) {
+        return value >= 0 && value < track_count ? "" : "RANGE";
+    }
+    switch (action) {
+        case Ble::Action::Play:
+        case Ble::Action::Toggle:
+        case Ble::Action::Next:
+        case Ble::Action::Prev:
+        case Ble::Action::PlayStory:
+        case Ble::Action::PlayMusic:
+            break;
+        default:
+            return "";
+    }
+    if (!playbackAllowed()) return "LOCKED";
+    if (action == Ble::Action::PlayStory) {
+        return storyAllowed(static_cast<std::size_t>(value < 0 ? 0 : value)) ? "" : "NOT_ALLOWED";
+    }
+    if (action == Ble::Action::PlayMusic) {
+        if (value < 0 || value >= track_count) return "RANGE";
+        const auto& track = snapshot->tracks[static_cast<std::size_t>(value)];
+        return categoryAllowed(track.category) ? "" : "NOT_ALLOWED";
+    }
+    return "";
+}
+
+// Category name in the catalog's 1-based numbering; 0 is "all songs".
+const char* categoryName(int category) {
+    static const char* const kAll = "全部歌曲";
+    if (category <= 0) return kAll;
+    const auto snapshot = s_catalog;
+    if (!snapshot) return "";
+    const std::size_t index = static_cast<std::size_t>(category - 1);
+    return index < snapshot->categories.size() ? snapshot->categories[index].c_str() : "";
+}
+
+int categoryTrackCount(int category) {
+    const auto snapshot = s_catalog;
+    if (!snapshot || category <= 0) return 0;
+    int count = 0;
+    for (const auto& track : snapshot->tracks) {
+        if (track.category == category) ++count;
+    }
+    return count;
+}
+
+// "get stories|music|cats|report": one page of a catalog listing. Paging keeps
+// the legacy limits (at most four items) so the JSON notification stays small.
+bool bleListPage(void*, const char* what, const cJSON* request, cJSON* data) {
+    const cJSON* offset_item = cJSON_GetObjectItemCaseSensitive(request, "offset");
+    const cJSON* limit_item = cJSON_GetObjectItemCaseSensitive(request, "limit");
+    int offset = cJSON_IsNumber(offset_item) ? static_cast<int>(offset_item->valuedouble) : 0;
+    int limit = cJSON_IsNumber(limit_item) ? static_cast<int>(limit_item->valuedouble) : 4;
+    if (limit < 1) limit = 1;
+    if (limit > 4) limit = 4;
+    if (offset < 0) offset = 0;
+    const auto snapshot = s_catalog;
+
+    if (std::strcmp(what, "stories") == 0) {
+        const int total = snapshot ? static_cast<int>(snapshot->stories.size()) : 0;
+        if (offset > total) offset = total;
+        cJSON_AddNumberToObject(data, "total", total);
+        cJSON_AddNumberToObject(data, "offset", offset);
+        cJSON* items = cJSON_AddArrayToObject(data, "items");
+        for (int i = offset; i < total && i < offset + limit; ++i) {
+            const auto& story = snapshot->stories[static_cast<std::size_t>(i)];
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "i", i);
+            cJSON_AddStringToObject(item, "n", story.title.c_str());
+            cJSON_AddBoolToObject(item, "a", storyAllowed(static_cast<std::size_t>(i)));
+            cJSON_AddItemToArray(items, item);
+        }
+        return true;
+    }
+    if (std::strcmp(what, "music") == 0) {
+        const int total = snapshot ? static_cast<int>(snapshot->tracks.size()) : 0;
+        if (offset > total) offset = total;
+        cJSON_AddNumberToObject(data, "total", total);
+        cJSON_AddNumberToObject(data, "offset", offset);
+        cJSON* items = cJSON_AddArrayToObject(data, "items");
+        for (int i = offset; i < total && i < offset + limit; ++i) {
+            const auto& track = snapshot->tracks[static_cast<std::size_t>(i)];
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "i", i);
+            cJSON_AddStringToObject(item, "n", track.name.c_str());
+            cJSON_AddStringToObject(item, "c", categoryName(track.category));
+            cJSON_AddNumberToObject(item, "ci", track.category);
+            cJSON_AddBoolToObject(item, "a", categoryAllowed(track.category));
+            cJSON_AddBoolToObject(item, "f", favorite(static_cast<std::size_t>(i)));
+            cJSON_AddItemToArray(items, item);
+        }
+        return true;
+    }
+    if (std::strcmp(what, "cats") == 0) {
+        // Category 0 is "all songs" and is not a configurable entry.
+        const int total = snapshot ? static_cast<int>(snapshot->categories.size()) : 0;
+        if (offset > total) offset = total;
+        cJSON_AddNumberToObject(data, "total", total);
+        cJSON_AddNumberToObject(data, "offset", offset);
+        cJSON* items = cJSON_AddArrayToObject(data, "items");
+        for (int i = offset; i < total && i < offset + limit; ++i) {
+            const int actual = i + 1;
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "i", actual);
+            cJSON_AddStringToObject(item, "n", snapshot->categories[static_cast<std::size_t>(i)].c_str());
+            cJSON_AddNumberToObject(item, "c", categoryTrackCount(actual));
+            cJSON_AddBoolToObject(item, "a", categoryAllowed(actual));
+            cJSON_AddItemToArray(items, item);
+        }
+        return true;
+    }
+    if (std::strcmp(what, "report") == 0) {
+        const auto record = parentalRecord();
+        cJSON_AddNumberToObject(data, "today", static_cast<double>(record.used));
+        cJSON_AddNumberToObject(data, "day", static_cast<double>(record.day));
+        cJSON_AddNumberToObject(data, "limit", static_cast<double>(record.daily_limit) * 60.0);
+        cJSON* history = cJSON_AddArrayToObject(data, "history");
+        const unsigned count = record.history_count > 7 ? 7 : record.history_count;
+        for (unsigned i = 0; i < count; ++i) {
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "day", static_cast<double>(record.history[i].day));
+            cJSON_AddNumberToObject(item, "used", static_cast<double>(record.history[i].used));
+            cJSON_AddItemToArray(history, item);
+        }
+        return true;
+    }
+    return false;
+}
+
+bool bleToggleFavorite(void*, int32_t index, bool* now, int32_t* total) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_records_store || index < 0 || index >= 300) return false;
+    const auto slot = static_cast<unsigned>(index);
+    const bool wanted = !s_records_store->favorite(slot);
+    if (!s_records_store->setFavorite(slot, wanted)) return false;
+    int count = 0;
+    for (unsigned i = 0; i < 300; ++i) {
+        if (s_records_store->favorite(i)) ++count;
+    }
+    if (now) *now = wanted;
+    if (total) *total = count;
+    return true;
+#else
+    (void)index;
+    (void)now;
+    (void)total;
     return false;
 #endif
 }
@@ -169,9 +376,15 @@ Ble::Hooks makeBleHooks() {
     hooks.verify_token = bleVerifyToken;
     hooks.verify_pin = bleVerifyPin;
     hooks.sync_time = bleSyncTime;
-    hooks.has_pin = bleHasPin;
-    hooks.bound = bleBound;
     hooks.bind_code = bleBindCode;
+    hooks.status = bleStatus;
+    hooks.apply_config = bleApplyConfig;
+    hooks.set_pin = bleSetPin;
+    hooks.factory_reset = bleFactoryReset;
+    hooks.unbind = bleUnbind;
+    hooks.gate = bleGate;
+    hooks.list = bleListPage;
+    hooks.toggle_favorite = bleToggleFavorite;
     return hooks;
 }
 
@@ -469,15 +682,11 @@ void publishBleState() {
     snapshot.playing = state.state == Audio::PlaybackState::Playing;
     snapshot.paused = state.state == Audio::PlaybackState::Paused;
     snapshot.volume = s_context.volume;
-    snapshot.volume_min = 0;
-    snapshot.volume_max = 21;
     const auto* track = g_playlist.current();
     snapshot.mode = (snapshot.playing || snapshot.paused) ? "music" : "idle";
     snapshot.title = track ? track->name.c_str() : "";
     snapshot.current = state.sample_rate ? static_cast<uint32_t>(state.submitted_frames / state.sample_rate) : 0;
     snapshot.duration = 0;
-    snapshot.used = parentalUsedSeconds();
-    snapshot.lock = parentalLockCode();
     Ble::setSnapshot(snapshot);
 }
 
@@ -921,28 +1130,12 @@ void parentalSaveIfDirty(uint32_t now) {
 }
 
 const char* lockReasonText(Persistence::PolicyLock lock) {
-    switch (lock) {
-        case Persistence::PolicyLock::Unavailable: return "家长记录不可用";
-        case Persistence::PolicyLock::DailyLimit: return "今日使用时间已用完";
-        case Persistence::PolicyLock::Bedtime: return "已到就寝时间";
-        case Persistence::PolicyLock::Remote: return "家长已远程锁定";
-        case Persistence::PolicyLock::ClockRequired: return "需要先同步时间";
-        default: return "";
-    }
+    return Persistence::parentalLockText(lock);
 }
 
 uint32_t parentalUsedSeconds() {
     if (!s_parental_ready) return 0;
     return s_policy.record().used;
-}
-
-const char* parentalLockCode() {
-    switch (parentalLock()) {
-        case Persistence::PolicyLock::DailyLimit: return "daily";
-        case Persistence::PolicyLock::Bedtime: return "bedtime";
-        case Persistence::PolicyLock::Remote: return "remote";
-        default: return "";
-    }
 }
 
 Persistence::ParentalRecord parentalRecord() {
@@ -958,7 +1151,9 @@ bool parentalApply(const Persistence::ParentalRecord& record) {
     candidate.checksum = Persistence::parentalChecksum(candidate);
     if (!Persistence::validParentalRecord(candidate)) return false;
     if (!s_parental_store->save(candidate)) return false;
-    s_parental_ready = s_policy.begin(s_parental_store->value(), nowMs());
+    // Keep the trusted clock and the usage accumulator: editing one setting must
+    // not turn a bedtime rule into "clock required" and block playback.
+    s_parental_ready = s_policy.rebind(s_parental_store->value(), nowMs());
     return s_parental_ready;
 #else
     (void)record;

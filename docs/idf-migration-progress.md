@@ -253,7 +253,7 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
 - 应用层：`Ble::begin()` 在显示/输入之后启动；主循环里 `Ble::loop()` 拆包、
   应用消费命令队列（音量/播放/切曲/点播故事或音乐），并每秒发布一次状态快照
   （播放态、音量、当前曲名、已用时长、锁定原因）。设置页「蓝牙广播」开关已接通。
-- 尚未迁移：`get stories/music` 列表（返回空列表占位，列表浏览仍走 USB）、
+- 尚未迁移（**已由 P4 第五批补齐**）：`get stories/music` 列表（返回空列表占位，列表浏览仍走 USB）、
   `set` 家长配置项、`pin set`、`reset`/`unbind` 命令。
 - 验证：打开 BT 后重新生成 sdkconfig 并构建通过，`storybox.bin` = `0x1be250`
   （比无 BT 版本多约 320 KiB 的协议栈）；USB 联合诊断配置在开启 BT 后同样构建通过
@@ -308,8 +308,8 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
     保存失败会提示且不改变内存状态（`parentalApply()` 先校验再落盘）。
 - 语义说明：PIN 是本地门禁（盐 + FNV），不是安全边界；真正的配对秘密仍是 BLE token。
 - 构建：产品配置 `storybox.bin` = `0x1c7030`。
-- 尚未迁移：BLE 的 `set`/`pin set`/`reset`/`unbind` 命令、白名单逐项勾选 UI、
-  就寝时段到点后的锁页（目前锁定只阻止播放并提示）。
+- 尚未迁移：白名单逐项勾选 UI、就寝时段到点后的锁页（目前锁定只阻止播放并提示）。
+  BLE 的 `set`/`pin set`/`reset`/`unbind` 见 P4 第五批。
 
 ### P6（第一批）：系统监控 `sys stats` / `sys set`
 
@@ -431,6 +431,63 @@ BLE → USB → NFC → 家长 → 电源 → OTA」十组给出可执行步骤�
 - `sys` 新增 `reboot`：先用 500 ms 一次性定时器把响应送出，再 `esp_restart()`；
   配合 `ota_end` 切槽后免拔电即可应用新固件。
 - 构建：产品 + USB + NFC `storybox.bin` = `0x1d1090`。
+
+### P4（第五批）：BLE 家长配置、列表与门禁
+
+把控制器小程序剩下的命令补齐，让 BLE 协议面与旧固件（`src/ble.cpp`）对齐。
+小程序源码不在本仓库，线协议是照旧固件逐字段对照迁移的。
+
+- 新增 `components/settings/include/parental_config.h`（纯头文件，可主机测试）：
+  - `ParentalPatch`：`set` 的部分补丁语义，`has_*` 区分“没带这个字段”和“显式设为 0/false”；
+    `applyParentalPatch()` 用旧固件的夹取规则（时长 0 或 5..240 分钟、音量 0..21 且自动排序、
+    就寝分钟越界归零、白名单掩码、远程锁/童锁标志）。
+  - `ParentalStatus`：手机读到的扁平状态；`parentalLockCode()` 保留旧固件的数字编号
+    （None=0 / DailyLimit=1 / Bedtime=2 / Remote=3），原生新增的两个状态取后位
+    （ClockRequired=4、Unavailable=5），老客户端只认 0..3 并显示 `reason` 文本。
+  - `parentalLockText()`：把中文锁定原因从 app 层搬进来，界面和 BLE 共用一份。
+- `parental_policy.h` 新增 `rebind()` 与 `timeSynced()`：鉴权后的编辑在落盘后**保留可信时钟
+  和用量累加器**。此前 `parentalApply()` 走 `begin()`，改一次设置就清掉 `synced_`，
+  于是「开了就寝时段 + 已校时」的机器改完设置立刻变成 `ClockRequired` 并阻止播放
+  （设备上原本没有第二个校时入口）。本轮顺手修掉这个真实缺陷；`begin()` 语义未变。
+- BLE 新命令（都在 `auth` 之后，与旧固件一致）：
+  - `set`：每日时长、音量下限/上限、就寝开关与起止、白名单开关、故事/分类白名单数组、
+    远程锁、童锁。无识别字段回 `NO_FIELDS`，落盘失败回 `SAVE`，记录不可用回 `UNAVAILABLE`，
+    成功时返回**落盘后重新读出**的 `data` 配置，而不是手机发来的值。
+  - `pin set`：4..6 位数字，格式错误回 `PIN_FORMAT`。
+  - `reset`：恢复默认（配额/音量范围/就寝窗口/掩码/远程锁/童锁，重新生成绑定码），
+    并强制重新配对。**与旧固件的差异**：保留 PIN 与用量历史（旧固件 `factoryReset` 会清掉
+    PIN 和收藏），因为本机没有「重置后如何重新设 PIN」的入口；收藏也不清。
+  - `unbind`：只解除绑定，保留配额/掩码/PIN。
+  - `get state` / `get config` / 每秒 `evt:state` 补全旧固件字段：`used/limit/rem/
+    lock(数字)/reason/bedtime/remote/childLock/bound/hasPin/timeSynced/dayKey`，
+    config 另含 `dailyLimitMin/bedStartMin/bedEndMin/allowlistEnabled/vol`。
+  - `ctrl` 增加门禁：`play/toggle/next/prev/story/music` 受锁定与白名单约束，分别回
+    `LOCKED`/`NOT_ALLOWED`/`RANGE`；`ctrl fav` 返回 `f`（新状态）与 `n`（总数），
+    锁定时仍允许（收藏属于元数据）。
+  - `get stories|music|cats|report` 由应用侧填页（`limit` 上限 4，与旧固件一致），
+    不再返回空列表占位。
+- 分层：BLE 只做协议，`Ble::Hooks` 新增 `status/apply_config/set_pin/factory_reset/unbind/
+  gate/list/toggle_favorite`，动作类回调返回错误码字符串（`SAVE`/`UNAVAILABLE`/`PIN_FORMAT`），
+  不再需要「给 `Ble::Command` 加字符串载荷」——家长配置在应用任务里同步落盘（FRAM 写 +
+  回读校验约几毫秒），和设置页走同一条 `parentalApply()` 路径。
+- 验证：新增 `test/parental_config_test.cpp` 并并入 `tools/test_host.sh`，覆盖夹取、掩码、
+  锁编号、剩余时长、`rebind()` 保留时钟与用量、非法记录不被采纳；本机 MinGW 通过。
+  五套配置重新构建通过（下表）。`transfer_frame` 主机测试在本机 MinGW 下仍以访问冲突退出
+  （与本轮改动无关，测试源码未动），需在 Linux/CI 上执行。
+- **仍未做**：真机与小程序联调、广播字段长度实测、白名单逐项勾选 UI、就寝到点的独立锁页。
+
+### 回归构建（BLE 家长命令之后，2026-11-04）
+
+| 配置 | 片段 | `storybox.bin` |
+|---|---|---|
+| 默认产品（BLE+NFC） | `sdkconfig.defaults` | `0x1C8390` (1.86 MB) |
+| 产品 + USB 协议 | `+sdkconfig.usb-product` | `0x1D1FB0` (1.90 MB) |
+| 产品 + USB + OTA 双槽 | `+sdkconfig.ota` | `0x1D24E0` (1.91 MB) |
+| 深睡 | `+sdkconfig.power` | `0x1CAE10` (1.88 MB) |
+| 确认 FRAM | `+test/sdkconfig.fram-compile-only` | `0x1CAB40` (1.87 MB) |
+
+全部链接通过；OTA 配置最小 app 分区 3 MiB，余量约 39%。本轮比上一轮每套配置约 +4 KiB
+（确认 FRAM 那套 +5.5 KiB，因为家长命令的真实分支只有它编译）。
 
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 

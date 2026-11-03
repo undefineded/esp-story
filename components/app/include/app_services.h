@@ -47,7 +47,6 @@ void parentalTick(bool playing);
 void parentalSaveIfDirty(uint32_t now_ms);
 const char* lockReasonText(Persistence::PolicyLock lock);
 uint32_t parentalUsedSeconds();
-const char* parentalLockCode();
 
 // Parental settings editing. The page is gated by the PIN: unlockParental()
 // marks the session (5 minutes) so re-entering the page does not ask again.

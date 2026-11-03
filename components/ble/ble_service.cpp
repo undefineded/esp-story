@@ -109,12 +109,44 @@ void sendDoc(cJSON* root) {
     sendText(buffer);
 }
 
-void sendOk(int32_t id) {
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "v", 1);
-    if (id) cJSON_AddNumberToObject(root, "id", id);
-    cJSON_AddBoolToObject(root, "ok", true);
-    sendDoc(root);
+// Parental status straight from the app; a device without a usable PCTL record
+// reports "unavailable" so the phone never reads it as permissive.
+Persistence::ParentalStatus readStatus() {
+    Persistence::ParentalStatus status{};
+    if (!s_hooks.status || !s_hooks.status(s_hooks.context, &status)) {
+        return Persistence::parentalStatusUnavailable();
+    }
+    return status;
+}
+
+// Fields the legacy "evt:state" notification carried.
+void addStatusFields(cJSON* data, const Persistence::ParentalStatus& status) {
+    cJSON_AddNumberToObject(data, "volMin", status.volume_min);
+    cJSON_AddNumberToObject(data, "volMax", status.volume_max);
+    cJSON_AddNumberToObject(data, "used", status.used);
+    cJSON_AddNumberToObject(data, "limit", status.limit);
+    cJSON_AddNumberToObject(data, "rem", Persistence::parentalRemaining(status));
+    cJSON_AddNumberToObject(data, "lock", status.lock);
+    cJSON_AddStringToObject(data, "reason", status.reason);
+    cJSON_AddBoolToObject(data, "bedtime", status.bedtime_enabled);
+    cJSON_AddBoolToObject(data, "remote", status.remote_locked);
+    cJSON_AddBoolToObject(data, "childLock", status.child_lock);
+    cJSON_AddBoolToObject(data, "bound", status.bound);
+    cJSON_AddBoolToObject(data, "hasPin", status.has_pin);
+    cJSON_AddBoolToObject(data, "timeSynced", status.time_synced);
+    cJSON_AddNumberToObject(data, "dayKey", status.day);
+}
+
+// "get config" / "set" payload: the settings the parent can edit.
+void addConfigFields(cJSON* data, const Persistence::ParentalStatus& status) {
+    addStatusFields(data, status);
+    cJSON_AddNumberToObject(data, "dailyLimitMin", status.daily_limit);
+    cJSON_AddNumberToObject(data, "bedStartMin", status.bedtime_start);
+    cJSON_AddNumberToObject(data, "bedEndMin", status.bedtime_end);
+    cJSON_AddBoolToObject(data, "bedtimeEnabled", status.bedtime_enabled);
+    cJSON_AddBoolToObject(data, "allowlistEnabled", status.allowlist_enabled);
+    cJSON_AddBoolToObject(data, "remoteLocked", status.remote_locked);
+    cJSON_AddNumberToObject(data, "vol", s_snapshot.volume);
 }
 
 void sendError(int32_t id, const char* code) {
@@ -126,34 +158,52 @@ void sendError(int32_t id, const char* code) {
     sendDoc(root);
 }
 
+void sendOk(int32_t id) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    if (id) cJSON_AddNumberToObject(root, "id", id);
+    cJSON_AddBoolToObject(root, "ok", true);
+    sendDoc(root);
+}
+
+// "ok" plus the freshly read configuration; used by "set" so the phone shows
+// exactly what was stored, not what it asked for.
+void sendConfig(int32_t id) {
+    const auto status = readStatus();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    if (id) cJSON_AddNumberToObject(root, "id", id);
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON* data = cJSON_AddObjectToObject(root, "data");
+    addConfigFields(data, status);
+    sendDoc(root);
+}
+
 void addState(cJSON* data) {
+    const auto status = readStatus();
     cJSON_AddBoolToObject(data, "play", s_snapshot.playing);
     cJSON_AddBoolToObject(data, "paused", s_snapshot.paused);
     cJSON_AddNumberToObject(data, "vol", s_snapshot.volume);
-    cJSON_AddNumberToObject(data, "volMin", s_snapshot.volume_min);
-    cJSON_AddNumberToObject(data, "volMax", s_snapshot.volume_max);
     cJSON_AddStringToObject(data, "mode", s_snapshot.mode);
     cJSON_AddStringToObject(data, "title", s_snapshot.title);
     cJSON_AddNumberToObject(data, "cur", s_snapshot.current);
     cJSON_AddNumberToObject(data, "dur", s_snapshot.duration);
-    cJSON_AddNumberToObject(data, "used", s_snapshot.used);
-    if (s_snapshot.lock && s_snapshot.lock[0]) cJSON_AddStringToObject(data, "lock", s_snapshot.lock);
+    addStatusFields(data, status);
 }
 
 void sendHello(int32_t id) {
+    const auto status = readStatus();
     cJSON* root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "v", 1);
     if (id) cJSON_AddNumberToObject(root, "id", id);
     cJSON_AddStringToObject(root, "evt", "hello");
     cJSON_AddStringToObject(root, "fw", "storybox-idf");
     cJSON_AddStringToObject(root, "name", s_name);
-    const bool bound = s_hooks.bound && s_hooks.bound(s_hooks.context);
-    const bool has_pin = s_hooks.has_pin && s_hooks.has_pin(s_hooks.context);
-    cJSON_AddBoolToObject(root, "bound", bound);
-    cJSON_AddBoolToObject(root, "hasPin", has_pin);
-    cJSON_AddNumberToObject(root, "volMin", s_snapshot.volume_min);
-    cJSON_AddNumberToObject(root, "volMax", s_snapshot.volume_max);
-    if (!bound && s_hooks.bind_code) {
+    cJSON_AddBoolToObject(root, "bound", status.bound);
+    cJSON_AddBoolToObject(root, "hasPin", status.has_pin);
+    cJSON_AddNumberToObject(root, "volMin", status.volume_min);
+    cJSON_AddNumberToObject(root, "volMax", status.volume_max);
+    if (!status.bound && s_hooks.bind_code) {
         cJSON_AddStringToObject(root, "code", s_hooks.bind_code(s_hooks.context));
     }
     sendDoc(root);
@@ -167,41 +217,112 @@ void sendStateEvent() {
     sendDoc(root);
 }
 
+// ---- request field helpers ------------------------------------------------
+
+bool numberField(const cJSON* request, const char* name, int& out) {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(request, name);
+    if (!cJSON_IsNumber(item)) return false;
+    const double value = item->valuedouble;
+    if (value > 1000000.0) out = 1000000;
+    else if (value < -1000000.0) out = -1000000;
+    else out = static_cast<int>(value);
+    return true;
+}
+
+bool boolField(const cJSON* request, const char* name, bool& out) {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(request, name);
+    if (!cJSON_IsBool(item)) return false;
+    out = cJSON_IsTrue(item) != 0;
+    return true;
+}
+
+// Story/category allowlists travel as index arrays; out-of-range indices are
+// dropped instead of failing the whole command (the legacy firmware did the
+// same). An empty array is a real value and blocks everything.
+uint64_t indexMask(const cJSON* request, const char* name, int minimum, bool& present) {
+    const cJSON* array = cJSON_GetObjectItemCaseSensitive(request, name);
+    present = cJSON_IsArray(array) != 0;
+    uint64_t mask = 0;
+    if (!present) return 0;
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, array) {
+        if (!cJSON_IsNumber(item)) continue;
+        const int index = static_cast<int>(item->valuedouble);
+        if (index >= minimum && index < 64) mask |= uint64_t{1} << index;
+    }
+    return mask;
+}
+
+uint16_t clampMinutes(int value, int maximum) {
+    if (value <= 0) return 0;
+    if (value > maximum) return static_cast<uint16_t>(maximum);
+    return static_cast<uint16_t>(value);
+}
+
+// Bedtime is a minute of the day; anything outside it rolls back to midnight,
+// matching the legacy setters.
+uint16_t bedtimeMinute(int value) {
+    if (value <= 0 || value >= 1440) return 0;
+    return static_cast<uint16_t>(value);
+}
+
+uint8_t clampVolume(int value) {
+    if (value <= 0) return 0;
+    if (value > 21) return 21;
+    return static_cast<uint8_t>(value);
+}
+
 void handleCtrl(cJSON* request, int32_t id) {
     const char* action = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "action"));
     if (!action) action = "";
     const cJSON* value_item = cJSON_GetObjectItemCaseSensitive(request, "value");
     const int value = cJSON_IsNumber(value_item) ? static_cast<int>(value_item->valuedouble) : 0;
 
-    if (std::strcmp(action, "volume") == 0) {
-        pushAction(Action::Volume, value);
-        sendOk(id);
-        return;
-    }
-    if (std::strcmp(action, "story") == 0) {
-        pushAction(Action::PlayStory, value);
-        sendOk(id);
-        return;
-    }
-    if (std::strcmp(action, "music") == 0) {
-        pushAction(Action::PlayMusic, value);
-        sendOk(id);
-        return;
-    }
-    if (std::strcmp(action, "stop") == 0) {
-        pushAction(Action::Stop);
-        sendOk(id);
-        return;
-    }
-    if (std::strcmp(action, "play") == 0) pushAction(Action::Play);
-    else if (std::strcmp(action, "pause") == 0) pushAction(Action::Pause);
-    else if (std::strcmp(action, "toggle") == 0) pushAction(Action::Toggle);
-    else if (std::strcmp(action, "next") == 0) pushAction(Action::Next);
-    else if (std::strcmp(action, "prev") == 0) pushAction(Action::Prev);
+    Action parsed = Action::None;
+    if (std::strcmp(action, "volume") == 0) parsed = Action::Volume;
+    else if (std::strcmp(action, "story") == 0) parsed = Action::PlayStory;
+    else if (std::strcmp(action, "music") == 0) parsed = Action::PlayMusic;
+    else if (std::strcmp(action, "stop") == 0) parsed = Action::Stop;
+    else if (std::strcmp(action, "play") == 0) parsed = Action::Play;
+    else if (std::strcmp(action, "pause") == 0) parsed = Action::Pause;
+    else if (std::strcmp(action, "toggle") == 0) parsed = Action::Toggle;
+    else if (std::strcmp(action, "next") == 0) parsed = Action::Next;
+    else if (std::strcmp(action, "prev") == 0) parsed = Action::Prev;
+    else if (std::strcmp(action, "fav") == 0) parsed = Action::Favourite;
     else {
         sendError(id, "BAD_ACTION");
         return;
     }
+    // The app owns the admission rules (lock, allowlist, index bounds) and
+    // answers with the legacy error codes instead of a silent no-op.
+    if (s_hooks.gate) {
+        const char* rejected = s_hooks.gate(s_hooks.context, parsed, value);
+        if (rejected && rejected[0]) {
+            sendError(id, rejected);
+            return;
+        }
+    }
+    if (parsed == Action::Favourite) {
+        bool now = false;
+        int32_t total = 0;
+        if (!s_hooks.toggle_favorite) {
+            sendError(id, "UNAVAILABLE");
+            return;
+        }
+        if (!s_hooks.toggle_favorite(s_hooks.context, value, &now, &total)) {
+            sendError(id, "UNAVAILABLE");
+            return;
+        }
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddNumberToObject(root, "v", 1);
+        if (id) cJSON_AddNumberToObject(root, "id", id);
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddBoolToObject(root, "f", now);
+        cJSON_AddNumberToObject(root, "n", total);
+        sendDoc(root);
+        return;
+    }
+    pushAction(parsed, value);
     sendOk(id);
 }
 
@@ -220,24 +341,107 @@ void handleGet(cJSON* request, int32_t id) {
     }
     if (std::strcmp(what, "config") == 0) {
         cJSON* data = cJSON_AddObjectToObject(root, "data");
-        cJSON_AddNumberToObject(data, "volMin", s_snapshot.volume_min);
-        cJSON_AddNumberToObject(data, "volMax", s_snapshot.volume_max);
-        cJSON_AddNumberToObject(data, "used", s_snapshot.used);
+        addConfigFields(data, readStatus());
         sendDoc(root);
         return;
     }
-    // Catalog listings are not routed over BLE yet (the desktop app uses USB).
-    cJSON* data = cJSON_AddObjectToObject(root, "data");
-    cJSON_AddNumberToObject(data, "total", 0);
-    cJSON_AddNumberToObject(data, "offset", 0);
-    cJSON_AddArrayToObject(data, "items");
-    sendDoc(root);
+    // Catalog pages are built by the app (it owns the catalog and the limits).
+    if (s_hooks.list) {
+        cJSON* data = cJSON_AddObjectToObject(root, "data");
+        if (s_hooks.list(s_hooks.context, what, request, data)) {
+            sendDoc(root);
+            return;
+        }
+    }
+    cJSON_Delete(root);
+    sendError(id, "BAD_WHAT");
+}
+
+// "set": patch the parental configuration. Only recognised fields are applied;
+// a command that carried none is rejected rather than reported as success.
+void handleSet(cJSON* request, int32_t id) {
+    Persistence::ParentalPatch patch;
+    int number = 0;
+    bool flag = false;
+    if (numberField(request, "dailyLimitMin", number)) {
+        patch.has_daily_limit = true;
+        patch.daily_limit = clampMinutes(number, 240);
+    }
+    if (numberField(request, "volMin", number)) {
+        patch.has_volume_min = true;
+        patch.volume_min = clampVolume(number);
+    }
+    if (numberField(request, "volMax", number)) {
+        patch.has_volume_max = true;
+        patch.volume_max = clampVolume(number);
+    }
+    if (boolField(request, "bedtimeEnabled", flag)) {
+        patch.has_bedtime_enabled = true;
+        patch.bedtime_enabled = flag;
+    }
+    if (numberField(request, "bedStartMin", number)) {
+        patch.has_bedtime_start = true;
+        patch.bedtime_start = bedtimeMinute(number);
+    }
+    if (numberField(request, "bedEndMin", number)) {
+        patch.has_bedtime_end = true;
+        patch.bedtime_end = bedtimeMinute(number);
+    }
+    if (boolField(request, "allowlistEnabled", flag)) {
+        patch.has_allowlist = true;
+        patch.allowlist_enabled = flag;
+    }
+    if (boolField(request, "remoteLocked", flag)) {
+        patch.has_remote = true;
+        patch.remote_locked = flag;
+    }
+    if (boolField(request, "childLock", flag)) {
+        patch.has_child_lock = true;
+        patch.child_lock = flag;
+    }
+    patch.story_mask = indexMask(request, "allowStories", 0, patch.has_story_mask);
+    // Category 0 is "all songs" and is not a configurable entry, matching the
+    // legacy list command.
+    patch.category_mask = indexMask(request, "allowCats", 1, patch.has_category_mask);
+
+    if (Persistence::parentalPatchEmpty(patch)) {
+        sendError(id, "NO_FIELDS");
+        return;
+    }
+    if (!s_hooks.apply_config) {
+        sendError(id, "UNAVAILABLE");
+        return;
+    }
+    const char* rejected = s_hooks.apply_config(s_hooks.context, patch);
+    if (rejected && rejected[0]) {
+        sendError(id, rejected);
+        return;
+    }
+    // Answer with what was stored, not with what the phone asked for.
+    sendConfig(id);
 }
 
 void handlePin(cJSON* request, int32_t id) {
     const char* action = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "action"));
     const char* pin = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "pin"));
     if (!action) action = "";
+    if (std::strcmp(action, "set") == 0) {
+        if (!Persistence::parentalPinFormatOk(pin)) {
+            sendError(id, "PIN_FORMAT");
+            return;
+        }
+        if (!s_hooks.set_pin) {
+            sendError(id, "UNAVAILABLE");
+            return;
+        }
+        const char* rejected = s_hooks.set_pin(s_hooks.context, pin);
+        if (rejected && rejected[0]) {
+            sendError(id, rejected);
+            return;
+        }
+        sendOk(id);
+        return;
+    }
     if (std::strcmp(action, "verify") == 0) {
         const bool valid = s_hooks.verify_pin && s_hooks.verify_pin(s_hooks.context, pin ? pin : "");
         cJSON* root = cJSON_CreateObject();
@@ -248,8 +452,58 @@ void handlePin(cJSON* request, int32_t id) {
         sendDoc(root);
         return;
     }
-    // Setting a PIN requires the authenticated settings page; not exposed yet.
-    sendError(id, "NOT_SUPPORTED");
+    sendError(id, "BAD_ACTION");
+}
+
+// "reset" restores permissive defaults (quota, volume range, bedtime window,
+// masks, remote/child lock) and shows a fresh bind code. The PIN and the usage
+// history survive, so a remote reset cannot silently unlock the settings page.
+void handleReset(int32_t id) {
+    if (!s_hooks.factory_reset) {
+        sendError(id, "UNAVAILABLE");
+        return;
+    }
+    const char* rejected = s_hooks.factory_reset(s_hooks.context);
+    if (rejected && rejected[0]) {
+        sendError(id, rejected);
+        return;
+    }
+    // The token is gone; force a fresh pairing instead of continuing the session.
+    s_authed = false;
+    const auto status = readStatus();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    if (id) cJSON_AddNumberToObject(root, "id", id);
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddBoolToObject(root, "bound", status.bound);
+    if (!status.bound && s_hooks.bind_code) {
+        cJSON_AddStringToObject(root, "code", s_hooks.bind_code(s_hooks.context));
+    }
+    sendDoc(root);
+}
+
+// "unbind" drops the pairing token but keeps quotas, masks and the PIN.
+void handleUnbind(int32_t id) {
+    if (!s_hooks.unbind) {
+        sendError(id, "UNAVAILABLE");
+        return;
+    }
+    const char* rejected = s_hooks.unbind(s_hooks.context);
+    if (rejected && rejected[0]) {
+        sendError(id, rejected);
+        return;
+    }
+    s_authed = false;
+    const auto status = readStatus();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    if (id) cJSON_AddNumberToObject(root, "id", id);
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddBoolToObject(root, "bound", status.bound);
+    if (!status.bound && s_hooks.bind_code) {
+        cJSON_AddStringToObject(root, "code", s_hooks.bind_code(s_hooks.context));
+    }
+    sendDoc(root);
 }
 
 void processLine(const char* line) {
@@ -291,10 +545,9 @@ void processLine(const char* line) {
         const char* pin = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "pin"));
         bool ok = token && s_hooks.verify_token && s_hooks.verify_token(s_hooks.context, token);
         if (!ok && pin && s_hooks.verify_pin) ok = s_hooks.verify_pin(s_hooks.context, pin);
-        const bool bound = s_hooks.bound && s_hooks.bound(s_hooks.context);
-        const bool has_pin = s_hooks.has_pin && s_hooks.has_pin(s_hooks.context);
+        const auto status = readStatus();
         // Legacy rule: a bound device without a PIN has no verifiable secret.
-        if (!ok && bound && !has_pin) ok = true;
+        if (!ok && status.bound && !status.has_pin) ok = true;
         if (!ok) {
             sendError(id, "AUTH");
             cJSON_Delete(request);
@@ -332,6 +585,21 @@ void processLine(const char* line) {
     }
     if (std::strcmp(cmd, "pin") == 0) {
         handlePin(request, id);
+        cJSON_Delete(request);
+        return;
+    }
+    if (std::strcmp(cmd, "set") == 0) {
+        handleSet(request, id);
+        cJSON_Delete(request);
+        return;
+    }
+    if (std::strcmp(cmd, "reset") == 0) {
+        handleReset(id);
+        cJSON_Delete(request);
+        return;
+    }
+    if (std::strcmp(cmd, "unbind") == 0) {
+        handleUnbind(id);
         cJSON_Delete(request);
         return;
     }

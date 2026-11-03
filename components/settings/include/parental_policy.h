@@ -21,6 +21,23 @@ public:
         record_.last_epoch=epoch; record_.timezone=timezone;
         rollDay(localDay(epoch)); dirty_=true; return true;
     }
+    // Replaces the record after an authenticated edit that has already been
+    // validated and persisted. Unlike begin() it keeps the trusted clock and the
+    // elapsed-usage accumulator: editing one setting must not turn a bedtime
+    // rule into "clock required" and block the device until the phone resyncs.
+    bool rebind(const ParentalRecord& record, uint64_t now_ms) {
+        if (!validParentalRecord(record)) {
+            ready_ = false;
+            return false;
+        }
+        record_ = record;
+        last_tick_ = now_ms;
+        fraction_ = 0;
+        dirty_ = false;
+        ready_ = true;
+        return true;
+    }
+    bool timeSynced() const { return ready_ && synced_; }
     uint32_t epoch(uint64_t now_ms) const {
         if (!synced_ || now_ms<clock_base_) return 0;
         const uint64_t value=epoch_base_+(now_ms-clock_base_)/1000;
