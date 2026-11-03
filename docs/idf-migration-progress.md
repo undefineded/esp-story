@@ -417,6 +417,13 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
 BLE → USB → NFC → 家长 → 电源 → OTA」十组给出可执行步骤、预期结果、
 失败信号和回填模板。后续每完成一组，把结论回填到本文件对应批次。
 
+### P4（第四批）：`sys rescan`
+
+- `sys` 路由新增 `rescan`：SD 已挂载时重扫媒体、回写索引并刷新快照；
+  未挂载返回 `NO_SD`，扫描失败返回 `RESCAN_FAILED`。用于「卡被 PC 改过」或
+  上位机外部写入后的强制刷新（正常上传路径已有基于存储序号的自动重扫）。
+- 构建：产品 + USB + NFC `storybox.bin` = `0x1d1020`。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
