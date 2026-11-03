@@ -358,6 +358,20 @@ bool hostRoute(void*, cJSON* request, const char* command, const char* action, c
                     saveSettings();
                 }
             }
+        } else if (std::strcmp(action, "reboot") == 0) {
+            // Let the response leave the USB queue before restarting.
+            static esp_timer_handle_t restart_timer = nullptr;
+            if (!restart_timer) {
+                const esp_timer_create_args_t args = {
+                    .callback = [](void*) { esp_restart(); },
+                    .arg = nullptr,
+                    .dispatch_method = ESP_TIMER_TASK,
+                    .name = "ota-reboot",
+                    .skip_unhandled_events = false,
+                };
+                esp_timer_create(&args, &restart_timer);
+            }
+            if (restart_timer) esp_timer_start_once(restart_timer, 500000);
         } else if (std::strcmp(action, "rescan") == 0) {
             // Rebuild the media index on demand (hosts that changed the card
             // outside the protocol need this).

@@ -424,6 +424,12 @@ BLE → USB → NFC → 家长 → 电源 → OTA」十组给出可执行步骤�
   上位机外部写入后的强制刷新（正常上传路径已有基于存储序号的自动重扫）。
 - 构建：产品 + USB + NFC `storybox.bin` = `0x1d1020`。
 
+### P6（第七批）：`sys reboot`
+
+- `sys` 新增 `reboot`：先用 500 ms 一次性定时器把响应送出，再 `esp_restart()`；
+  配合 `ota_end` 切槽后免拔电即可应用新固件。
+- 构建：产品 + USB + NFC `storybox.bin` = `0x1d1090`。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
