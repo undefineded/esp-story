@@ -12,17 +12,17 @@
 当成构建目标（必须用 `--define-cache-entry`），脚本带 Zone.Identifier 所以必须
 `-ExecutionPolicy Bypass`。以下命令都在仓库根目录执行。
 
-### 0.1 镜像（commit `456d80d` 之后，真机首晚修复版）
+### 0.1 镜像（commit `3a02810` 之后，真机首晚修复版）
 
-五套都含首晚修掉的两个 bug（BLE 未注册、NVS 未初始化）：
+五套都含首晚修掉的 5 个问题（BLE 未注册、NVS 未初始化、FATFS 乱码、刷新列表占位、NFC 刷屏）：
 
 | 配置 | 构建目录 | `storybox.bin` | SHA256 前 16 位 | 用于 |
 |---|---|---|---|---|
-| 默认产品（BLE + NFC，单槽） | `build-ui` | `0x1CAA30` | `E23778F76E12F550` | 第 0/1/2/3/4/5/7/8 组 |
-| 产品 + USB 协议 | `build-usb-product` | `0x1D3BC0` | `1BDA5C12B9949940` | 第 6 组（NFC 状态也走这里） |
-| 产品 + USB + OTA 双槽 | `build-ota-usb` | `0x1D40F0` | `09A5CC882B6D9CD5` | 第 10 组，**改分区表，整片擦除** |
-| 深睡 | `build-power` | `0x1CD510` | `727E0D97BE430EF9` | 第 9 组 |
-| 确认 FRAM（编译覆盖用） | `build-fram` | `0x1CD1F0` | `78CD5E619B6C97F6` | — |
+| 默认产品（BLE + NFC，单槽） | `build-ui` | `0x1F6430` | `B4BC9C45B8165151` | 第 0/1/2/3/4/5/7/8 组 |
+| 产品 + USB 协议 | `build-usb-product` | `0x1FF5D0` | `DC66200524D1D504` | 第 6 组（NFC 状态也走这里） |
+| 产品 + USB + OTA 双槽 | `build-ota-usb` | `0x1FFB00` | `A3CA8A57A965E354` | 第 10 组，**改分区表，整片擦除** |
+| 深睡 | `build-power` | `0x1F8F10` | `6F4412EA06FA68EE` | 第 9 组 |
+| 确认 FRAM（编译覆盖用） | `build-fram` | `0x1F8BD0` | `60666607B90DCB65` | — |
 
 `build-fram` **不要烧**：只是「确认 FRAM 分支能编译」的产物，板型和 FRAM 地址都没核对过，
 烧上去会真的往 FRAM 写记录。
