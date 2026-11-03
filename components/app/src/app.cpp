@@ -332,6 +332,8 @@ bool hostRoute(void*, cJSON* request, const char* command, const char* action, c
         } else if (std::strcmp(action, "set") == 0) {
             const cJSON* volume = cJSON_GetObjectItemCaseSensitive(request, "volume");
             const cJSON* brightness = cJSON_GetObjectItemCaseSensitive(request, "brightness");
+            const cJSON* eq = cJSON_GetObjectItemCaseSensitive(request, "eq");
+            const cJSON* rotation = cJSON_GetObjectItemCaseSensitive(request, "rotation");
             if (cJSON_IsNumber(volume)) setVolume(static_cast<int>(volume->valuedouble));
             if (cJSON_IsNumber(brightness)) {
                 int value = static_cast<int>(brightness->valuedouble);
@@ -340,6 +342,21 @@ bool hostRoute(void*, cJSON* request, const char* command, const char* action, c
                 s_context.settings.brightness = static_cast<uint8_t>(value);
                 Display::setBrightness(s_context.settings.brightness);
                 saveSettings();
+            }
+            if (cJSON_IsNumber(eq)) {
+                const int value = static_cast<int>(eq->valuedouble);
+                if (value >= 0 && value <= 3) {
+                    applyEq(static_cast<uint8_t>(value));
+                    saveSettings();
+                }
+            }
+            if (cJSON_IsNumber(rotation)) {
+                const int value = static_cast<int>(rotation->valuedouble);
+                if (value == 1 || value == 3) {
+                    s_context.settings.rotation = static_cast<uint8_t>(value);
+                    Display::setRotation(s_context.settings.rotation);
+                    saveSettings();
+                }
             }
         } else if (std::strcmp(action, "stats") != 0) {
             *error = "BAD_ACT";

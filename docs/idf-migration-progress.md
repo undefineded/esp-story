@@ -389,6 +389,13 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
   `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` 已生效；默认单槽配置仍为 `0x1c73d0`。
 - 仍需真机演练：升级成功、故意断电、启动 panic 三种路径的回滚行为。
 
+### P6（第六批）：`sys set` 补字段
+
+- `sys set` 在原有 `volume`/`brightness` 之外支持 `eq`（0..3，越界忽略）与
+  `rotation`（1 或 3，其它值忽略），后者立即 `Display::setRotation()` 并落盘；
+  两处都走与设置页相同的 `saveSettings()` 路径。
+- 构建：产品 + USB + NFC `storybox.bin` = `0x1d0fb0`。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
