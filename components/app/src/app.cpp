@@ -10,6 +10,7 @@
 #include "config.h"
 #include "display.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "fonts.h"
 #include "freertos/FreeRTOS.h"
@@ -18,6 +19,8 @@
 #include "input.h"
 #include "i2c_bus.h"
 #include "media_library.h"
+#include "parental_binding.h"
+#include "parental_policy.h"
 #include "playback.h"
 #include "sd_volume.h"
 #include "sdkconfig.h"
@@ -56,7 +59,14 @@ uint32_t s_notice_until = 0;
 #if CONFIG_STORYBOX_FRAM_CONFIRMED
 Persistence::SettingsStore<Board::FramDevice>* s_settings_store = nullptr;
 Persistence::MediaRecords<Board::FramDevice>* s_records_store = nullptr;
+Persistence::ParentalStore<Board::FramDevice>* s_parental_store = nullptr;
 #endif
+
+Persistence::ParentalPolicy s_policy;
+bool s_parental_ready = false;
+uint32_t s_parental_save_at = 0;
+
+uint32_t randomU32() { return esp_random(); }
 
 uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
@@ -128,6 +138,7 @@ void run() {
     );
     static Persistence::SettingsStore<Board::FramDevice> settings(fram);
     static Persistence::MediaRecords<Board::FramDevice> records(fram);
+    static Persistence::ParentalStore<Board::FramDevice> parental_store(fram);
     if (bus.begin() == ESP_OK && fram.begin(bus.handle(), true) == ESP_OK) {
         const auto settings_result = settings.load();
         s_context.fram_ready = settings_result != Persistence::LoadResult::IoError;
@@ -141,6 +152,30 @@ void run() {
                 s_context.volume = records.session().volume;
             } else {
                 ESP_LOGW(kTag, "volume/favorites record unreadable; using defaults");
+            }
+            // A device without a valid PCTL record is provisioned with the
+            // legacy permissive defaults; nothing is written when reading fails.
+            if (parental_store.load() == Persistence::LoadResult::Invalid) {
+                Persistence::ParentalRecord fresh{};
+                std::memcpy(fresh.magic, "PCTL", 4);
+                fresh.version = 1;
+                Persistence::parentalFactoryDefaults(fresh, randomU32);
+                fresh.pin_salt = 0;
+                fresh.pin_hash = 0;
+                fresh.flags = 0;
+                if (!parental_store.save(fresh)) {
+                    ESP_LOGW(kTag, "parental provisioning failed; playback stays open");
+                } else {
+                    ESP_LOGI(kTag, "parental record provisioned");
+                }
+            }
+            if (parental_store.ready()) {
+                s_parental_ready = s_policy.begin(parental_store.value(), nowMs());
+                s_parental_store = &parental_store;
+                ESP_LOGI(kTag, "parental ready; bind code set=%d",
+                         Persistence::parentalBindCode(parental_store.value())[0] != '\0');
+            } else {
+                ESP_LOGW(kTag, "parental record unavailable; policy not enforced");
             }
         } else {
             ESP_LOGW(kTag, "settings read failed; persistence disabled this boot");
@@ -196,6 +231,18 @@ void run() {
         Page* page = s_stack[s_depth - 1];
         page->tick(now);
 
+        // Parental enforcement: charge playback time and stop when a quota,
+        // bedtime window or remote lock becomes active while audio is running.
+        const auto playback_state = g_playback.snapshot().state;
+        const bool playing = playback_state == Audio::PlaybackState::Playing;
+        parentalTick(playing);
+        if (s_parental_ready && !playbackAllowed() &&
+            (playing || playback_state == Audio::PlaybackState::Paused)) {
+            g_playback.stopAndWait(3000);
+            page->invalidate();
+        }
+        parentalSaveIfDirty(now);
+
         if (s_notice_until && now >= s_notice_until) {
             s_notice_until = 0;
             page->invalidate();
@@ -240,6 +287,7 @@ int volume() { return s_context.volume; }
 void setVolume(int value) {
     if (value < 0) value = 0;
     if (value > 21) value = 21;
+    value = clampVolume(value);
     s_context.volume = value;
     if (s_playback) s_playback->setVolume(static_cast<unsigned>(value));
 }
@@ -287,6 +335,14 @@ bool refreshCatalog() {
 bool playCurrent(bool auto_start) {
     const auto* track = g_playlist.current();
     if (!track) return false;
+    if (!playbackAllowed()) {
+        notify(lockReasonText(parentalLock()));
+        return false;
+    }
+    if (!categoryAllowed(track->category)) {
+        notify("该分类已被家长限制");
+        return false;
+    }
     uint64_t request = 0;
     const auto result = g_playback.play(track->path.c_str(), auto_start, request);
     if (result != ESP_OK) ESP_LOGW(kTag, "play %s: %s", track->path.c_str(), esp_err_to_name(result));
@@ -312,6 +368,72 @@ bool setFavorite(std::size_t index, bool enabled) {
     if (s_records_store) return s_records_store->setFavorite(static_cast<unsigned>(index), enabled);
 #endif
     return false;
+}
+
+bool parentalReady() { return s_parental_ready; }
+
+Persistence::PolicyLock parentalLock() {
+    if (!s_parental_ready) return Persistence::PolicyLock::None;
+    return s_policy.lock(nowMs());
+}
+
+bool parentalBound() {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (s_parental_store) return Persistence::parentalBound(s_parental_store->value());
+#endif
+    return false;
+}
+
+const char* parentalBindCode() {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (s_parental_store && s_parental_store->ready())
+        return Persistence::parentalBindCode(s_parental_store->value());
+#endif
+    return "";
+}
+
+bool playbackAllowed() { return parentalLock() == Persistence::PolicyLock::None; }
+
+int clampVolume(int value) { return s_parental_ready ? s_policy.clampVolume(value) : value; }
+
+bool storyAllowed(std::size_t index) {
+    if (!s_parental_ready) return true;
+    return s_policy.storyAllowed(static_cast<int>(index));
+}
+
+bool categoryAllowed(int category) {
+    if (!s_parental_ready) return true;
+    return s_policy.categoryAllowed(category);
+}
+
+void parentalTick(bool playing) {
+    if (s_parental_ready) s_policy.tick(playing, nowMs());
+}
+
+void parentalSaveIfDirty(uint32_t now) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_parental_ready || !s_parental_store || !s_policy.dirty()) return;
+    if (now - s_parental_save_at < 60000) return;
+    s_parental_save_at = now;
+    if (s_parental_store->save(s_policy.record())) {
+        s_policy.saved();
+    } else {
+        ESP_LOGW(kTag, "parental usage save failed");
+    }
+#else
+    (void)now;
+#endif
+}
+
+const char* lockReasonText(Persistence::PolicyLock lock) {
+    switch (lock) {
+        case Persistence::PolicyLock::Unavailable: return "家长记录不可用";
+        case Persistence::PolicyLock::DailyLimit: return "今日使用时间已用完";
+        case Persistence::PolicyLock::Bedtime: return "已到就寝时间";
+        case Persistence::PolicyLock::Remote: return "家长已远程锁定";
+        case Persistence::PolicyLock::ClockRequired: return "需要先同步时间";
+        default: return "";
+    }
 }
 
 bool saveSettings() {

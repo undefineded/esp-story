@@ -1,5 +1,6 @@
 #include "app_context.h"
 #include "app_page.h"
+#include "app_services.h"
 #include "app_theme.h"
 #include "display.h"
 #include "fonts.h"
@@ -223,7 +224,7 @@ private:
                 notify(ctx().settings.ble ? "蓝牙广播将在 P4 接入" : "蓝牙广播将在 P4 接入");
                 saveSettings();
                 break;
-            default: notify("绑定码：P5 接入"); break;
+            default: openBindCode(); break;
         }
     }
 
@@ -236,7 +237,80 @@ private:
         }
     }
 
+    void openBindCode() { pushPage(createBindCodePage()); }
+
     int selected_ = 0;
+};
+
+// Six-digit pairing code shown to the parent. Binding itself happens over BLE;
+// this page only displays the code and the current pairing state.
+class BindCodePage final : public Page {
+public:
+    const char* id() const override { return "bind-code"; }
+
+    void enter() override { invalidate(); }
+
+    void handle(const Event& event) override {
+        switch (event.key) {
+            case Key::OkLong:
+            case Key::OkDouble:
+                popPage();
+                break;
+            case Key::SetLong:
+                goHome();
+                break;
+            default:
+                break;
+        }
+    }
+
+    void draw() override {
+        auto& g = Display::canvas();
+        const auto& c = Theme::colors();
+        Theme::setTopBarColor(c.coral);
+        g.fillScreen(c.paper);
+        g.fillRect(0, 0, 320, 30, c.coral);
+        g.fillRect(0, 30, 320, 2, c.coral_dark);
+        Theme::drawSmileFace(g, 19, 15, 10);
+        g.setFont(Fonts::body());
+        g.setTextColor(TFT_WHITE, c.coral);
+        g.drawString("小小故事盒", 36, 7);
+        g.drawRightString("绑定码", 310, 7);
+
+        if (!parentalReady()) {
+            g.setFont(Fonts::title());
+            g.setTextColor(c.text, c.paper);
+            g.drawCenterString("家长记录不可用", 160, 110);
+            g.setFont(Fonts::small());
+            g.drawCenterString("确认 FRAM 后可重新生成", 160, 150);
+            return;
+        }
+
+        const char* code = parentalBindCode();
+        g.setFont(Fonts::title());
+        g.setTextColor(c.text, c.paper);
+        g.drawCenterString("在小程序中输入", 160, 62);
+
+        // Digit boxes keep the code readable on the small panel.
+        const int box_width = 38, gap = 6;
+        const int total = 6 * box_width + 5 * gap;
+        int x = (320 - total) / 2;
+        for (int i = 0; i < 6; ++i) {
+            g.fillRoundRect(x, 92, box_width, 54, 8, c.yellow_light);
+            g.drawRoundRect(x, 92, box_width, 54, 8, c.ink);
+            char digit[2] = {code[i] ? code[i] : '-', 0};
+            g.setFont(Fonts::title());
+            g.setTextColor(c.ink, c.yellow_light);
+            g.drawCenterString(digit, x + box_width / 2, 110);
+            x += box_width + gap;
+        }
+
+        g.setFont(Fonts::body());
+        g.setTextColor(c.text, c.paper);
+        g.drawCenterString(parentalBound() ? "已绑定家长账号" : "尚未绑定", 160, 168);
+        g.setFont(Fonts::small());
+        g.drawCenterString("长按 OK 返回", 160, 214);
+    }
 };
 
 SettingsPage& settingsInstance() {
@@ -244,8 +318,14 @@ SettingsPage& settingsInstance() {
     return instance;
 }
 
+BindCodePage& bindCodeInstance() {
+    static BindCodePage instance;
+    return instance;
+}
+
 }  // namespace
 
 Page* createSettingsPage() { return &settingsInstance(); }
+Page* createBindCodePage() { return &bindCodeInstance(); }
 
 }  // namespace App

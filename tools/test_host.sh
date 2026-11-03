@@ -24,6 +24,9 @@ g++ -std=c++17 -pthread -Wall -Wextra -Werror -pedantic "${compat[@]}" \
     -Icomponents/video/include -Icomponents/storage/include \
     test/avi_index_test.cpp components/video/avi_index.cpp -o "$test_dir/avi"
 "$test_dir/avi"
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic "${compat[@]}" \
+    -Icomponents/settings/include test/parental_binding_test.cpp -o "$test_dir/parental_binding"
+"$test_dir/parental_binding"
 g++ -std=c++17 -Wall -Wextra -Werror -pedantic -DARDUINO "${compat[@]}" \
     -Itest/pn532_host -Isrc test/pn532_host/test_pn532.cpp src/pn532.cpp -o "$test_dir/pn532"
 "$test_dir/pn532"

@@ -36,6 +36,7 @@ Page* createStoryListPage();
 Page* createStoryPlayerPage();
 Page* createVideoListPage();
 Page* createVideoPlayerPage();
+Page* createBindCodePage();
 
 // Navigation stack helpers.
 void pushPage(Page* page);

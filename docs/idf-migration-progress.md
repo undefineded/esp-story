@@ -211,6 +211,31 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
 - 已知限制：音视频仅“同时起播”，没有漂移校正；解码超时靠跳帧而不是丢帧统计；
   未做真机帧率/发热验收（PSRAM 带宽与 SPI 推屏是主要风险点）。
 
+### P5（第一批）：家长绑定与播放门禁
+
+原计划把打 BLE 放在 P5 之前，但 BLE 的 `bind`/`auth` 依赖绑定核心，所以先把
+绑定与策略门禁做掉，BLE 复用同一套记录与校验。
+
+- 新增 `components/settings/include/parental_binding.h`（纯头文件、可主机测试）：
+  - 绑定码 6 位数字；`bind` 校验设备显示的码，生成 32 位十六进制 token，
+    记录 `token_hash`（FNV-1a，与旧固件同格式，不宣称为安全鉴权）。
+  - `verify_token`、`set_pin`/`verify_pin`（4~6 位数字、盐 + FNV）、`unbind`、
+    `factory_defaults`（保留 PIN/绑定标志位以外的配额与掩码复位，并重新生成绑定码）、
+    标志位读写（BOUND/HAS_PIN/BEDTIME/ALLOWLIST/REMOTE/CHILD_LOCK）。
+  - 随机源以函数指针注入：设备用 `esp_random()`，主机测试用确定性序列。
+- 应用层接入：
+  - 启动时读 PCTL：**无效记录**按旧固件语义生成宽松默认值并写回一次（含绑定码）；
+    **读取 I/O 失败**不写、不伪装，策略标记为不可用。
+  - 每次进入播放（音乐/故事音频/视频旁白）都过 `playbackAllowed()` 与
+    `categoryAllowed()`；锁定期间正在播放的会被停止。
+  - 音量经 `clampVolume()`；使用时长按秒累计、`parentalSaveIfDirty()` 每 60 s 落盘一次。
+  - 设置页“显示绑定码”打开新页面，显示 6 位码 + 是否已绑定；家长记录不可用时显示提示。
+- 验证：新增 `test/parental_binding_test.cpp`（并入 `tools/test_host.sh`）覆盖
+  绑定/错误码/重复绑定、token 校验、PIN 规则与校验、解绑、恢复默认、标志位、
+  以及每次修改后 `validParentalRecord()` 仍然通过；本机 MinGW 通过。
+  默认配置 `0x16e8a0` 与确认 FRAM 配置 `0x174640` 均构建通过（后者编译了 FRAM 分支；
+  首次构建曾遇到 `esp_lcd_panel_rgb.c` 的编译器段错误，重跑即通过，疑为并行内存压力）。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
