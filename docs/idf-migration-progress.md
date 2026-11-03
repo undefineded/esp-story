@@ -273,6 +273,23 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
 - 仍缺：`mkdir/remove/rename/rescan` 命令、容量/已用字节、上传进度事件；
   真机 FAT 断电一致性与桌面端联调未做。
 
+### P4（第三批）：NFC 命令路由
+
+- hostlink 新增可插拔路由点 `Host::attachRoutes(route, context, feature)`
+  （`components/hostlink/include/route.h`，不依赖 `esp_err`，主机测试可包含）：
+  `hello`/`fs`/`sys` 之外的命令交给路由；路由认领则填响应，否则仍回
+  `UNSUPPORTED_FEATURE`；`hello` 的 `features` 追加注册时的能力名。
+- 应用层把共享 I2C 总线提前到 FRAM 之前创建（FRAM 与 PN532 共用），
+  新增 `CONFIG_STORYBOX_NFC`（默认 y）：PN532 初始化成功才设置轮询，
+  失败只记一条日志并让 `nfc` 命令回 `NFC_UNAVAILABLE`，不影响启动。
+- `cmd:"nfc", act:"status"` 返回：模块在线、轮询开关、固件版本、卡片是否存在、
+  卡片 `kind/kindName/writable/formatted/capacity/uid`；`read/write` 仍回
+  `NOT_SUPPORTED`（原生服务还没有读写 API，不假装支持）。
+- 构建：产品配置（含 BLE/NFC）`0x1c5e00`，产品 + USB + NFC `0x1cbad0`。
+- 主机测试脚本：`tools/test_native_protocol.sh` 也加上了 Windows 的 POSIX shim；
+  该测试在 MinGW 下能编译并跑到写会话步骤，写会话之后依赖 POSIX 语义，
+  仍需 Linux/CI 执行。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。

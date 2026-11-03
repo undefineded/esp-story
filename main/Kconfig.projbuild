@@ -8,6 +8,14 @@ menu "StoryBox migration"
             enabled, because those fragments are hardware acceptance builds.
             Pages beyond home/settings are still being migrated; see
             docs/idf-migration-progress.md.
+    config STORYBOX_NFC
+        bool "Enable PN532 NFC on the shared I2C bus"
+        default y
+        help
+            Starts the native NFC polling task and advertises the "nfc" feature
+            on the USB protocol. Status only: raw card reads and writes are not
+            exposed yet. A missing or unresponsive PN532 degrades to
+            NFC_UNAVAILABLE instead of failing startup.
     config STORYBOX_USB_FILE_WRITES
         bool "Enable diagnostic USB file uploads (not full desktop FS support)"
         depends on STORYBOX_USB_PROTOCOL && STORYBOX_AUDIO_DIAGNOSTICS

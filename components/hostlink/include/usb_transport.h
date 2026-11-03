@@ -1,5 +1,6 @@
 #pragma once
 #include "esp_err.h"
+#include "route.h"
 namespace Storage { class FileReader; }
 namespace Host {
 // Application lifetime, hardware USB Serial/JTAG. Call once, from app startup.

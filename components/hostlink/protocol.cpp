@@ -1,11 +1,15 @@
 #include "native_protocol.h"
 #include "file_reader.h"
+#include "route.h"
 #include "cJSON.h"
 #include <cstring>
 #include <cmath>
 #include <limits>
 namespace Host {
 namespace {
+Host::Route route_handler = nullptr;
+void* route_context = nullptr;
+const char* route_feature = nullptr;
 bool bounded(const uint8_t* input,std::size_t size) {
     if (!size || size>1024) return false;
     bool quoted=false,escape=false; int depth=0;
@@ -143,6 +147,15 @@ const char* fileRequest(cJSON* request,cJSON* response,Storage::FileReader& file
     return "UNSUPPORTED_FEATURE"; // No writes advertised or accepted yet.
 }
 }
+
+bool attachRoutes(Route route, void* context, const char* feature) {
+    if (!route || route_handler) return false;
+    route_handler = route;
+    route_context = context;
+    route_feature = feature;
+    return true;
+}
+
 std::size_t respond(const uint8_t* input,std::size_t size,uint32_t uptime,uint32_t heap,
                     char* output,std::size_t capacity,Storage::FileReader* files,uint8_t* raw,
                     std::size_t raw_capacity,std::size_t* raw_size,std::size_t input_raw_size,
@@ -184,7 +197,17 @@ std::size_t respond(const uint8_t* input,std::size_t size,uint32_t uptime,uint32
         const auto* action=string(request,"act",hello?"hello":"");
         if (std::strcmp(cmd,"fs")==0 && files)
             error=fileRequest(request,response,*files,raw,raw_size?raw_capacity:0,length,monotonic_ms,input_raw,input_raw_size);
-        else if (!hello && std::strcmp(cmd,"sys")!=0) error="UNSUPPORTED_FEATURE";
+        else if (!hello && std::strcmp(cmd,"sys")!=0) {
+            // Extra routers (NFC, ...) own their commands; anything they do not
+            // recognize stays an unsupported feature.
+            bool handled = false;
+            if (route_handler) {
+                const char* route_error = nullptr;
+                handled = route_handler(route_context, cmd, string(request,"act"), response, &route_error);
+                if (handled && route_error) error = route_error;
+            }
+            if (!handled) error="UNSUPPORTED_FEATURE";
+        }
         else if (std::strcmp(action,"hello")==0) {
             cJSON_AddStringToObject(response,"evt","hello");
             cJSON_AddStringToObject(response,"fw","storybox-idf-migration");
@@ -194,6 +217,7 @@ std::size_t respond(const uint8_t* input,std::size_t size,uint32_t uptime,uint32
             cJSON_AddStringToObject(response,"role","storybox");
             auto* features=cJSON_AddArrayToObject(response,"features");
             if (files) cJSON_AddItemToArray(features,cJSON_CreateString(files->writable()?"fs_transfer":"fs_readonly"));
+            if (route_feature) cJSON_AddItemToArray(features,cJSON_CreateString(route_feature));
         } else if (std::strcmp(action,"ping")==0) {
             cJSON_AddStringToObject(response,"evt","pong");
             cJSON_AddNumberToObject(response,"uptime",uptime);

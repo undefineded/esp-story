@@ -8,6 +8,7 @@
 #include "app_services.h"
 #include "app_theme.h"
 #include "ble_service.h"
+#include "cJSON.h"
 #include "config.h"
 #include "display.h"
 #include "esp_log.h"
@@ -20,6 +21,7 @@
 #include "input.h"
 #include "i2c_bus.h"
 #include "media_library.h"
+#include "nfc_service.h"
 #include "parental_binding.h"
 #include "parental_policy.h"
 #include "playback.h"
@@ -77,6 +79,8 @@ uint32_t s_ble_publish_at = 0;
 Storage::FileReader* s_usb_files = nullptr;
 uint32_t s_catalog_refresh_at = 0;
 #endif
+
+NativeNfc::Service* s_nfc = nullptr;
 
 uint32_t randomU32() { return esp_random(); }
 
@@ -157,6 +161,43 @@ Ble::Hooks makeBleHooks() {
     hooks.bind_code = bleBindCode;
     return hooks;
 }
+
+// USB route for "cmd":"nfc". Only status is exposed: the native service still
+// has no raw read/write API, so those actions answer NOT_SUPPORTED.
+#if CONFIG_STORYBOX_USB_PROTOCOL
+bool nfcRoute(void*, const char* command, const char* action, cJSON* response, const char** error) {
+    if (!command || std::strcmp(command, "nfc") != 0) return false;
+    cJSON_AddStringToObject(response, "cmd", "nfc");
+    cJSON_AddStringToObject(response, "act", action ? action : "");
+    if (!s_nfc) {
+        *error = "NFC_UNAVAILABLE";
+        return true;
+    }
+    if (!action || std::strcmp(action, "status") != 0) {
+        *error = "NOT_SUPPORTED";
+        return true;
+    }
+    const auto state = s_nfc->snapshot();
+    cJSON* data = cJSON_AddObjectToObject(response, "data");
+    cJSON_AddBoolToObject(data, "module", state.module);
+    cJSON_AddBoolToObject(data, "polling", state.polling);
+    cJSON_AddStringToObject(data, "firmware", state.firmware);
+    cJSON_AddBoolToObject(data, "card", state.card.valid);
+    if (state.card.valid) {
+        cJSON_AddStringToObject(data, "kind", Nfc::kindId(state.card.kind));
+        cJSON_AddStringToObject(data, "kindName", Nfc::kindName(state.card.kind));
+        cJSON_AddBoolToObject(data, "writable", state.card.writable);
+        cJSON_AddBoolToObject(data, "formatted", state.card.formatted);
+        cJSON_AddNumberToObject(data, "capacity", state.card.capacity);
+        char uid[32] = {};
+        for (unsigned i = 0; i < state.card.uidLen && i < 10 && (i * 2 + 2) < sizeof(uid); ++i) {
+            std::snprintf(uid + i * 2, sizeof(uid) - i * 2, "%02x", state.card.uid[i]);
+        }
+        cJSON_AddStringToObject(data, "uid", uid);
+    }
+    return true;
+}
+#endif  // CONFIG_STORYBOX_USB_PROTOCOL
 
 void handleBleCommands() {
     Ble::Command command;
@@ -281,8 +322,13 @@ void run() {
         false;
 #endif
 
-#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    // The I2C bus is shared: FRAM and the PN532 sit on it. Create it once here
+    // so NFC stays available even when FRAM is not confirmed.
     static Board::I2cBus bus;
+    const bool bus_ready = bus.begin() == ESP_OK;
+    if (!bus_ready) ESP_LOGW(kTag, "shared I2C bus unavailable");
+
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
     static Board::FramDevice fram(
 #if CONFIG_STORYBOX_BOARD_REV_20261028
         Board::rev20261028
@@ -293,7 +339,7 @@ void run() {
     static Persistence::SettingsStore<Board::FramDevice> settings(fram);
     static Persistence::MediaRecords<Board::FramDevice> records(fram);
     static Persistence::ParentalStore<Board::FramDevice> parental_store(fram);
-    if (bus.begin() == ESP_OK && fram.begin(bus.handle(), true) == ESP_OK) {
+    if (bus_ready && fram.begin(bus.handle(), true) == ESP_OK) {
         const auto settings_result = settings.load();
         s_context.fram_ready = settings_result != Persistence::LoadResult::IoError;
         if (s_context.fram_ready) {
@@ -341,6 +387,17 @@ void run() {
     ESP_LOGW(kTag, "FRAM not confirmed in this build; settings are RAM-only");
 #endif
 
+#if CONFIG_STORYBOX_NFC
+    static NativeNfc::Service nfc;
+    if (bus_ready && nfc.begin(bus.handle()) == ESP_OK) {
+        nfc.setPolling(true);
+        s_nfc = &nfc;
+        ESP_LOGI(kTag, "NFC polling enabled");
+    } else {
+        ESP_LOGW(kTag, "PN532 unavailable; NFC commands report NFC_UNAVAILABLE");
+    }
+#endif
+
     s_context.sd_mounted = g_volume.mount() == ESP_OK;
     ESP_LOGI(kTag, "SD mount: %s", s_context.sd_mounted ? "ok" : "unavailable");
 
@@ -358,6 +415,13 @@ void run() {
             ESP_LOGW(kTag, "USB file reader attach failed: %s", esp_err_to_name(attached));
         }
     }
+#if CONFIG_STORYBOX_NFC
+    {
+        if (!Host::attachRoutes(nfcRoute, nullptr, "nfc")) {
+            ESP_LOGW(kTag, "USB NFC route already registered");
+        }
+    }
+#endif
 #endif
 
     s_playback = &g_playback;
