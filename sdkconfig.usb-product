@@ -1,0 +1,5 @@
+# Product UI with the USB v4 host protocol enabled (desktop file manager while
+# the device keeps its pages). Diagnostics stay off, so the app task owns the
+# display and the writable FileReader is attached at boot.
+CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_STORYBOX_USB_PROTOCOL=y

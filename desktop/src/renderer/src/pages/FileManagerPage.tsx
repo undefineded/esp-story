@@ -252,7 +252,14 @@ export function FileManagerPage() {
   const showToast = useAppStore((s) => s.showToast)
 
   const connected = connection.state === 'connected'
-  const supported = demo || Boolean(device?.features?.includes('fs'))
+  // "fs" is a full implementation; "fs_transfer" is read plus upload into
+  // existing folders; "fs_readonly" only allows browsing.
+  const features = device?.features ?? []
+  const supported =
+    demo ||
+    features.includes('fs') ||
+    features.includes('fs_transfer') ||
+    features.includes('fs_readonly')
   const fsReady = Boolean(supported && connected)
 
   const [path, setPath] = useState('/')

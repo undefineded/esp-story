@@ -257,6 +257,22 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
   （比无 BT 版本多约 320 KiB 的协议栈）；USB 联合诊断配置在开启 BT 后同样构建通过
   （`0x1942a0`）。目前只能在编译层验证，**没有真机射频/配对验收**。
 
+### P4（第二批）：USB 文件写入路由
+
+- 产品应用在 SD 挂载后创建**可写** `Storage::FileReader` 并 `Host::attachFiles()`，
+  于是 `hello` 声明 `fs_transfer`（读 + 上传到已存在目录），桌面端文件管理器可用；
+  删除/重命名/新建目录仍未实现，因此不声明完整的 `fs`。
+- 主机写入会调用 `AccessGate::changed()` 递增存储序号；应用主循环检测到
+  “索引序号 ≠ 当前序号”时，在**播放空闲**（Stopped/Ended/Failed）且距上次尝试 ≥2 s
+  的条件下重扫并回写索引，成功后提示“媒体已更新”。播放中不打断，等空闲再做。
+- 桌面端 `FileManagerPage` 的入口判断同时接受 `fs` / `fs_transfer` / `fs_readonly`
+  （固件保持诚实的能力声明，客户端按能力展示）。
+- 新增 `sdkconfig.usb-product`：产品 UI + USB 协议（不开诊断），用于验证
+  “界面照常运行 + 桌面端传文件”的组合；该配置构建通过（`storybox.bin` = `0x1c3950`），
+  联合诊断配置 `0x1942b0`、默认产品配置 `0x1be250` 亦通过。
+- 仍缺：`mkdir/remove/rename/rescan` 命令、容量/已用字节、上传进度事件；
+  真机 FAT 断电一致性与桌面端联调未做。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。

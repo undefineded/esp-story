@@ -33,6 +33,11 @@
 #include "settings_record.h"
 #endif
 
+#if CONFIG_STORYBOX_USB_PROTOCOL
+#include "file_reader.h"
+#include "usb_transport.h"
+#endif
+
 namespace App {
 namespace {
 
@@ -67,6 +72,11 @@ Persistence::ParentalPolicy s_policy;
 bool s_parental_ready = false;
 uint32_t s_parental_save_at = 0;
 uint32_t s_ble_publish_at = 0;
+
+#if CONFIG_STORYBOX_USB_PROTOCOL
+Storage::FileReader* s_usb_files = nullptr;
+uint32_t s_catalog_refresh_at = 0;
+#endif
 
 uint32_t randomU32() { return esp_random(); }
 
@@ -334,6 +344,22 @@ void run() {
     s_context.sd_mounted = g_volume.mount() == ESP_OK;
     ESP_LOGI(kTag, "SD mount: %s", s_context.sd_mounted ? "ok" : "unavailable");
 
+#if CONFIG_STORYBOX_USB_PROTOCOL
+    if (s_context.sd_mounted) {
+        // Writable reader: the desktop file manager can list and upload into
+        // existing folders. Delete/rename stay unsupported, so hello advertises
+        // fs_transfer rather than fs.
+        static Storage::FileReader usb_files(g_gate, Storage::SdVolume::root, true);
+        const auto attached = Host::attachFiles(usb_files);
+        if (attached == ESP_OK) {
+            s_usb_files = &usb_files;
+            ESP_LOGI(kTag, "USB file reader attached (writable)");
+        } else {
+            ESP_LOGW(kTag, "USB file reader attach failed: %s", esp_err_to_name(attached));
+        }
+    }
+#endif
+
     s_playback = &g_playback;
     ESP_ERROR_CHECK(g_playback.begin());
     g_playback.setVolume(static_cast<unsigned>(s_context.volume));
@@ -395,6 +421,25 @@ void run() {
             s_ble_publish_at = now;
             publishBleState();
         }
+
+#if CONFIG_STORYBOX_USB_PROTOCOL
+        // A host upload bumps the storage revision. Rescan once playback is
+        // idle: the maintenance window needs every file lease released.
+        if (s_context.sd_mounted && s_catalog &&
+            s_catalog->storage_revision != g_gate.revision() && now - s_catalog_refresh_at >= 2000) {
+            const auto state_now = g_playback.snapshot().state;
+            const bool idle = state_now == Audio::PlaybackState::Stopped ||
+                              state_now == Audio::PlaybackState::Ended ||
+                              state_now == Audio::PlaybackState::Failed;
+            if (idle) {
+                s_catalog_refresh_at = now;
+                if (refreshCatalog()) {
+                    s_context.catalog_ready = true;
+                    notify("媒体已更新", 2000);
+                }
+            }
+        }
+#endif
 
         if (s_notice_until && now >= s_notice_until) {
             s_notice_until = 0;
