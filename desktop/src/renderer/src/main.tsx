@@ -4,6 +4,7 @@ import App from './App'
 import './styles/tokens.css'
 import './styles/app.css'
 import './styles/theme-air.css'
+import './styles/device-center.css'
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>

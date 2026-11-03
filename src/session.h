@@ -19,7 +19,7 @@ namespace Session {
   uint8_t volume();             // 已记住的音量 (0..VOL_MAX)
   bool    setVolume(uint8_t v); // 更新并落盘; 值未变则不写, 返回是否真的写入
 
-  const char* category();       // 上次分类名 ("" = 全部歌曲, "童谣" = 童谣汇总列表)
+  const char* category();       // 上次分类名 ("" = 全部歌曲)
   uint32_t    trackId();        // 上次曲目的 uuid (0 = 无记忆)
   bool        setPosition(const char* category, uint32_t trackId);
                                 // 更新并落盘; 内容未变则不写, 返回是否真的写入

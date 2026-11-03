@@ -21,6 +21,25 @@ namespace Story {
   const char* title(int i);        // 故事名 (文件夹名, UTF-8; 越界返回 "")
   Kind kind(int i);                // 图文 / 音频 (按是否有时间轴判断)
 
+  /* /story 一级分组 (音频故事/图文故事) */
+  int  categoryCount();
+  const char* categoryName(int c);
+  int  categoryStoryCount(int c);          // 当前家长白名单下的故事数
+  int  categoryStoryActual(int c, int view);  // 分组内第 view 个故事的实际下标
+  const char* categoryStoryTitle(int c, int view);
+  int  categoryOfActual(int actual);
+  String categoryPath(int c);              // 分类对应的目录 (/story/音频故事 或 /story)
+
+  /* 递归目录浏览: 当前目录的直接子文件夹, 含"故事叶子/继续下钻的文件夹" */
+  bool browse(const String& path);
+  int  browseCount();
+  const char* browseName(int i);
+  bool browseIsStory(int i);
+  int  browseActual(int i);
+  int  browseDescendantCount(int i);
+  String parentOfActual(int actual);
+  int  actualAtPath(const String& path);
+
   /* 家长内容白名单视图 */
   void setStoryFilter(uint64_t mask, bool enabled);
   int  viewCount();

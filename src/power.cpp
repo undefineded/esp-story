@@ -6,6 +6,7 @@
 #include "display.h"
 #include "player.h"
 #include "story.h"
+#include "video.h"
 #include "ble.h"
 #include "hostlink.h"
 #include <esp_sleep.h>
@@ -45,8 +46,9 @@ void screenOffNow() {
   s_sleeping = true;
   Serial.printf("[PWR] deep sleep (no audio, idle %lus)\n", (unsigned long)(idleMs / 1000));
 
-  /* 收尾: 停播放/停故事, 关背光, 刷串口 */
+  /* 收尾: 停播放/停故事/停视频, 关背光, 刷串口 */
   Story::stop();
+  Video::stop();
   Player::stop();
   Display::setBrightness(0);
   delay(50);
@@ -88,7 +90,7 @@ void begin() {
   }
 }
 
-bool loop(bool audioActive) {
+bool loop(bool audioActive, bool videoActive) {
   if (s_sleeping) return false;
   if (FileXfer::busy()) {
     s_lastAct = millis();
@@ -107,6 +109,9 @@ bool loop(bool audioActive) {
     s_lastAct   = now;
     if (s_screenOff) { screenOn(); woke = true; }   // 熄屏状态下有操作就立刻亮屏
   }
+
+  /* 视频播放: 画面本身就是内容, 不按"播放中只熄屏"处理 */
+  if (videoActive) return woke;
 
   uint32_t offMs   = Settings::screenOffMs();
   uint32_t sleepMs = Settings::sleepMs();

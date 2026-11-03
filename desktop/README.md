@@ -14,6 +14,7 @@
 - **高级写入**：Type 2 原始 Page、MIFARE Classic 原始 Block（Key A）。
 - **卡片库**：本机保存最近 50 张卡片快照，支持搜索、筛选、JSON 导出。
 - **文件管理**：Windows 资源管理器风格界面，浏览 TF 卡、拖放/粘贴上传文件或文件夹、下载、新建文件夹、重命名和删除；支持复选框多选、批量移动，以及拖拽移动文件/文件夹。上传/下载在传输面板显示进度，移动/删除在资源管理器底部显示任务进度。
+- **设备中心**：一屏查看 CPU 占用、核心数与频率、RAM/PSRAM、Flash/ROM、TF 卡容量、音量、亮度、EQ、熄屏/休眠、无线开关、童锁与绑定状态；音量和亮度可以直接调整。
 - **设备页**：串口列表、连接/断开、PN532 排查清单、实时串口日志、协议速览。
 - **扩展中心**：模块化架构说明与后续能力插槽。
 - **演示模式**：无硬件时自动连接模拟设备，完整走通读卡/写卡/历史流程。
@@ -95,6 +96,7 @@ $env:NFC_USER_DATA_DIR = "D:\StoryBoxData"
 
 | 页面 | 预览 |
 | --- | --- |
+| 设备中心 | ![设备中心](../docs/device-center-preview.png) |
 | 文件 | ![文件](<../docs/nfc-studio-files.png>) |
 | 读卡器 | ![读卡器](../docs/nfc-studio-reader.png) |
 | 写卡 | ![写卡](../docs/nfc-studio-writer.png) |
@@ -116,7 +118,7 @@ src/renderer/src/
   store/          Zustand 全局状态（连接/卡片/历史/日志/写入）
   lib/            NDEF 编解码、卡片格式化、演示设备（含内存 TF 卡）、主题、存储
   components/     Sidebar/TopBar/NFC 扫描器/卡片/NDEF/Hex/Toast
-  pages/          概览/读卡器/写卡/卡片库/文件/设备/扩展/设置
+  pages/          概览/读卡器/写卡/卡片库/文件/设备中心/设备/扩展/设置
 ```
 
 ### 传输层
@@ -137,7 +139,11 @@ USB 使用 SBX4 二进制帧，JSON 元数据版本为 v4，文件数据不使�
 ```json
 {"v":4,"id":3,"cmd":"nfc","act":"status"}
 {"v":4,"evt":"nfc","type":"card","card":{...}}
+{"v":4,"id":4,"cmd":"sys","act":"stats"}
+{"v":4,"id":5,"cmd":"sys","act":"set","volume":14,"brightness":80}
 ```
+
+`sys · stats` 返回 CPU、RAM/PSRAM、Flash/APP、TF 卡、设备设置和当前播放器状态；`sys · set` 支持音量与亮度，返回更新后的同一份状态。旧固件没有这两个动作时，设备中心会提示升级固件。
 
 ### 为什么要做扩展层
 

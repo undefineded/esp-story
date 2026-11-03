@@ -4,8 +4,10 @@ import { encodeFrame, FrameDecoder } from './frame'
 import { transferWindow } from '@shared/transfer'
 import type {
   ConnectionStatus,
+  DeviceConfigPatch,
   DeviceEvent,
   DeviceInfo,
+  DeviceSystemStats,
   FsListing,
   FsReadChunk,
   FsReadStart,
@@ -70,6 +72,104 @@ function normalizeDevice(doc: Record<string, unknown>): DeviceInfo {
     role: typeof doc.role === 'string' ? doc.role : 'storybox',
     features: Array.isArray(doc.features) ? (doc.features as string[]) : [],
     nfc: normalizeNfc(doc.nfc)
+  }
+}
+
+function record(input: unknown): Record<string, unknown> {
+  return input && typeof input === 'object' ? (input as Record<string, unknown>) : {}
+}
+
+function num(input: unknown, fallback = 0): number {
+  const value = Number(input)
+  return Number.isFinite(value) ? value : fallback
+}
+
+function text(input: unknown, fallback = ''): string {
+  return typeof input === 'string' ? input : fallback
+}
+
+function flag(input: unknown): boolean {
+  return Boolean(input)
+}
+
+function normalizeStats(input: unknown): DeviceSystemStats {
+  const raw = record(input)
+  const cpu = record(raw.cpu)
+  const ram = record(raw.ram)
+  const rom = record(raw.rom)
+  const storage = record(raw.storage)
+  const settings = record(raw.settings)
+  const network = record(raw.network)
+  const player = record(raw.player)
+  return {
+    uptime: num(raw.uptime),
+    cpu: {
+      load: Math.max(0, Math.min(100, num(cpu.load))),
+      cores: Math.max(1, Math.min(8, num(cpu.cores, 2))),
+      freq: Math.max(1, num(cpu.freq, 240)),
+      model: text(cpu.model, 'ESP32-S3'),
+      revision: num(cpu.revision),
+      sdk: text(cpu.sdk, '—')
+    },
+    ram: {
+      heapTotal: num(ram.heapTotal),
+      heapFree: num(ram.heapFree),
+      heapMin: num(ram.heapMin),
+      psramTotal: num(ram.psramTotal),
+      psramFree: num(ram.psramFree)
+    },
+    rom: {
+      flashSize: num(rom.flashSize),
+      appSize: num(rom.appSize),
+      appTotal: num(rom.appTotal, num(rom.appSize) + num(rom.appFree)),
+      appFree: num(rom.appFree),
+      partition: text(rom.partition, 'factory')
+    },
+    storage: {
+      ready: flag(storage.ready),
+      total: num(storage.total),
+      used: num(storage.used),
+      free: num(storage.free),
+      tracks: num(storage.tracks),
+      stories: num(storage.stories)
+    },
+    settings: {
+      volume: num(settings.volume),
+      volumeMax: num(settings.volumeMax, 21),
+      brightness: num(settings.brightness, 100),
+      brightnessMin: num(settings.brightnessMin, 10),
+      rotation: num(settings.rotation, 3),
+      eq: text(settings.eq, 'VOCAL'),
+      screenOffMin: num(settings.screenOffMin),
+      sleepMin: num(settings.sleepMin),
+      ble: flag(settings.ble),
+      wifi: flag(settings.wifi),
+      ap: flag(settings.ap),
+      childLock: flag(settings.childLock),
+      bound: flag(settings.bound),
+      name: text(settings.name, 'StoryBox'),
+      fw: text(settings.fw, '—'),
+      proto: num(settings.proto, 4),
+      role: text(settings.role, 'storybox')
+    },
+    network: {
+      wifi: flag(network.wifi),
+      ap: flag(network.ap),
+      apSsid: text(network.apSsid)
+    },
+    player: {
+      playing: flag(player.playing),
+      paused: flag(player.paused),
+      hasTrack: flag(player.hasTrack),
+      story: flag(player.story),
+      title: text(player.title),
+      codec: text(player.codec),
+      curSec: num(player.curSec),
+      durSec: num(player.durSec),
+      bitrate: num(player.bitrate),
+      sampleRate: num(player.sampleRate),
+      volume: num(player.volume)
+    }
   }
 }
 
@@ -565,6 +665,16 @@ export class NfcSession extends EventEmitter<SessionEvents> {
   async ping(): Promise<{ uptime: number; heap: number }> {
     const doc = await this.request('sys', { act: 'ping' }, 2000, true)
     return { uptime: Number(doc.uptime) || 0, heap: Number(doc.heap) || 0 }
+  }
+
+  async systemStats(): Promise<DeviceSystemStats> {
+    const doc = await this.request('sys', { act: 'stats' }, 4000, true)
+    return normalizeStats(doc.data)
+  }
+
+  async setSystemConfig(patch: DeviceConfigPatch): Promise<DeviceSystemStats> {
+    const doc = await this.request('sys', { act: 'set', ...patch }, 4000)
+    return normalizeStats(doc.data)
   }
 
   /* ---------- TF card file transfer ---------- */

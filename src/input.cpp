@@ -82,6 +82,17 @@ namespace {
     s_encPrev = cur;
     portEXIT_CRITICAL_ISR(&s_encoderMux);
   }
+
+  int32_t s_encCarry = 0;   // 未满一格(4 个 1/4 步)的余量
+
+  /* 原子地取走中断累积的 1/4 步 (与 ISR 共用同一把 portMUX, 两种构建都可用) */
+  int32_t takeEncAcc() {
+    portENTER_CRITICAL(&s_encoderMux);
+    int32_t acc = s_encAcc;
+    s_encAcc = 0;
+    portEXIT_CRITICAL(&s_encoderMux);
+    return acc;
+  }
 }
 
 namespace Input {
@@ -205,21 +216,34 @@ int8_t okEvent() {
 /* 取走中断累积的 1/4 步, 每 4 个 1/4 步(即一格)算 1 步
    装机后屏幕为 180° 方向, 旋钮的左右旋转相对用户视角颠倒, 故返回值取反 */
 int encoderSteps() {
-  portENTER_CRITICAL(&s_encoderMux);
-  int32_t acc = s_encAcc;
-  s_encAcc = 0;
-  portEXIT_CRITICAL(&s_encoderMux);
+  int32_t acc = takeEncAcc();
 
-  static int32_t carry = 0;
   if (inputsSuppressed()) {
-    carry = 0;                                // 童锁期间丢弃旋钮步数
+    s_encCarry = 0;                           // 童锁/唤醒屏蔽期间丢弃旋钮步数
     return 0;
   }
-  carry += acc;
-  int steps = (int)(carry / 4);
-  carry -= (int32_t)steps * 4;
+  s_encCarry += acc;
+  int steps = (int)(s_encCarry / 4);
+  s_encCarry -= (int32_t)steps * 4;
   if (steps) s_activityMs = millis();         // 转动旋钮也算操作
   return -steps;
+}
+
+/* 熄屏时主循环不再进入任何界面分支, 也就没人读按键了。这里把四个输入源
+   都扫描一遍, 只为刷新 s_activityMs (电源管理靠它判断"有人操作"并点亮屏幕),
+   产生的事件直接丢弃; 丢弃掉落格旋转步数, 避免唤醒瞬间音量跳变。 */
+void poll() {
+  navEventRaw(s_next);
+  navEventRaw(s_prev);
+  encEventRaw();
+  okEventRaw();
+  /* 旋钮: 累计到"一格"才算有人操作, 滤掉 EC11 抖动; 步数直接丢弃,
+     免得唤醒后音量突然跳变。 */
+  s_encCarry += takeEncAcc();
+  if (s_encCarry >= 4 || s_encCarry <= -4) {
+    s_encCarry   = 0;
+    s_activityMs = millis();
+  }
 }
 
 uint32_t lastActivityMs() { return s_activityMs; }

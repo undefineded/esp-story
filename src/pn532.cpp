@@ -5,6 +5,7 @@
 #include <Wire.h>
 #else
 #include "esp_timer.h"
+#include "esp_log.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,6 +17,13 @@ void delay(uint32_t ms) { vTaskDelay(std::max(TickType_t{1},pdMS_TO_TICKS(ms)));
 i2c_master_bus_handle_t s_bus=nullptr;
 i2c_master_dev_handle_t s_device=nullptr;
 }
+#endif
+#ifdef ARDUINO
+#define SB_PN532_LOG(...) Serial.printf(__VA_ARGS__)
+#define SB_PN532_LOGLINE(s) Serial.println(s)
+#else
+#define SB_PN532_LOG(fmt, ...) ESP_LOGI("pn532", fmt, ##__VA_ARGS__)
+#define SB_PN532_LOGLINE(s) ESP_LOGI("pn532", "%s", (s))
 #endif
 #include <cstring>
 
@@ -65,6 +73,7 @@ void busRecover() {
   delay(2);
   Wire.begin(I2C_SDA, I2C_SCL, (uint32_t)PN532_I2C_HZ);
   Wire.setClock((uint32_t)PN532_I2C_HZ);
+  Wire.setTimeOut(300);            // PN532 会拉伸时钟, 默认 50ms 太短
   delay(2);
 #else
   // Native devices must never destroy the shared bus. The application may
@@ -79,6 +88,42 @@ bool i2cPing() {
 #else
   return s_bus && i2c_master_probe(s_bus,i2cAddr(),100)==ESP_OK;
 #endif
+}
+
+const char* errorName(Pn532::Error e) {
+  switch (e) {
+    case Pn532::NoDevice:      return "NoDevice";      // 0x24 无应答
+    case Pn532::Timeout:       return "Timeout";       // 有应答但命令没回
+    case Pn532::BadFrame:      return "BadFrame";      // 帧校验失败
+    case Pn532::Nack:          return "Nack";          // 没收到 ACK 帧
+    case Pn532::CommandFailed: return "CommandFailed"; // 卡/命令错误
+    case Pn532::BadArg:        return "BadArg";
+    default:                   return "Ok";
+  }
+}
+
+/* 探测失败时打一条 I2C 总线清单: 只出现 0x50(FRAM) 说明模块根本没应答
+   (没供电 / 没共地 / 拨码不是 I2C / SDA-SCL 没接上), 出现 0x24 则是模块在
+   但命令握手失败。扫描会向不存在的地址发事务, 结束后必须恢复总线给 FRAM。 */
+void logBusScan() {
+  char line[96];
+  int n = snprintf(line, sizeof(line), "[NFC] I2C scan:");
+  for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+#ifdef ARDUINO
+    Wire.beginTransmission(addr);
+    const bool found = Wire.endTransmission(true) == 0;
+#else
+    const bool found = s_bus && i2c_master_probe(s_bus, addr, 50) == ESP_OK;
+#endif
+    if (found && n < (int)sizeof(line) - 8) {
+      n += snprintf(line + n, sizeof(line) - n, " 0x%02X", addr);
+    }
+  }
+  if (n == (int)strlen("[NFC] I2C scan:")) {
+    snprintf(line + n, sizeof(line) - n, " none");
+  }
+  SB_PN532_LOGLINE(line);
+  busRecover();
 }
 
 /* PN532 I2C 读: 第一个字节是 RDY (0x01 就绪), 其余为帧数据 */
@@ -158,12 +203,16 @@ bool readAck() {
   return true;
 }
 
-/* 读取完整响应帧; 返回 D5 CMD 之后的数据 (不含状态外的任何头) */
+/* 读取完整响应帧; 返回 D5 CMD 之后的数据 (不含状态外的任何头)
+ *
+ * 必须"一次 I2C 读"取回整个帧: PN532 的 I2C 从机不支持先读 7 字节帧头、
+ * 再读剩余部分 —— 第二次 requestFrom 会被直接 NACK (Wire 报 i2cRead -1),
+ * 日志表现是帧头正常、后面读不到。这里按最大可能帧长一次读完,
+ * 帧尾之后多读到的字节忽略 (用 LEN 校验, 不影响解析)。 */
 bool readResponse(uint8_t expectedResponse, uint8_t* out, uint8_t& outLen, uint8_t maxLen) {
-  // One transaction reads the entire normal response (plus padding). Do not
-  // assume that a second I2C read resumes after a partial header transaction.
   uint8_t frame[80];
   if (!readRaw(frame, sizeof(frame))) { s_error = Pn532::Timeout; return false; }
+  if (maxLen > 64) maxLen = 64;
   if (!Pn532Frame::decode(frame, sizeof(frame), expectedResponse, out, outLen, maxLen)) {
     s_error = Pn532::BadFrame;
     return false;
@@ -180,6 +229,10 @@ bool command(const uint8_t* cmd, uint8_t cmdLen, uint8_t expectedResp,
   if (!writeCommand(cmd, cmdLen)) return false;
   if (!waitReady(kAckTimeoutMs)) { s_error = Pn532::Timeout; return false; }
   if (!readAck()) return false;
+  /* PN532 处理命令(尤其射频命令)要几十毫秒, 处理期间它会拉低 SCL(时钟拉伸),
+     ESP32 的 I2C 硬件十几毫秒就判超时并打一行 "i2cRead returned Error"。
+     先给它一点时间再读状态字节, 避免这种无意义的失败读刷日志。 */
+  delay(20);
   if (!waitReady(timeoutMs)) { s_error = Pn532::Timeout; return false; }
   return readResponse(expectedResp, out, outLen, maxLen);
 }
@@ -260,12 +313,19 @@ esp_err_t detachBus() {
 #endif
 
 bool begin() {
+  /* 注意: 这里不能用 pinMode(I2C_SDA, INPUT_PULLUP)!
+     pinMode() 会把引脚配置成"纯 GPIO 输入", 关掉 I2C 外设的开漏输出,
+     SDA/SCL 就再也拉不低, 总线上所有器件(包括 FRAM)都会失联。
+     上拉只需要改 pull 配置, 不能动方向; I2C 驱动初始化时已经使能内部上拉。 */
+  gpio_set_pull_mode((gpio_num_t)I2C_SDA, GPIO_PULLUP_ONLY);
+  gpio_set_pull_mode((gpio_num_t)I2C_SCL, GPIO_PULLUP_ONLY);
 #ifdef ARDUINO
-  pinMode(I2C_SDA, INPUT_PULLUP);
-  pinMode(I2C_SCL, INPUT_PULLUP);
   /* 总线已由 Fram::begin() 用同一组引脚初始化, 这里只调速率:
      重复 Wire.begin() 会把可用驱动顶掉, 之后 FRAM 访问会持续失败。 */
   Wire.setClock((uint32_t)PN532_I2C_HZ);
+  /* PN532 处理命令时会拉低 SCL 做时钟拉伸, 可能持续几十毫秒;
+     Wire 默认 50ms 超时不够, 太短会被判成读失败 (日志里的 i2cRead -1)。 */
+  Wire.setTimeOut(300);
 #else
   if (!s_device) { s_error=NoDevice; return false; }
 #endif
@@ -275,7 +335,12 @@ bool begin() {
   s_error = NoDevice;
   if (!hardwareReset()) { s_error=BadArg; return false; }
   bool ok = probe();
-  if (!ok) busRecover();          // 模块不在: 把总线恢复给 FRAM
+  if (!ok) {
+    SB_PN532_LOG("[NFC] PN532 probe failed: %s (ping=%d)\n",
+                 errorName(s_error), i2cPing() ? 1 : 0);
+    busRecover();                 // 把总线恢复给 FRAM, 再扫描
+    logBusScan();
+  }
   return ok;
 }
 

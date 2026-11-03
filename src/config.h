@@ -10,12 +10,29 @@
 #endif
 
 /* --- ST7789 TFT (SPI, 240x320) --- */
+#ifndef TFT_SPI_HZ
+#define TFT_SPI_HZ 40000000  // 写屏频率; 模块/走线好的可以试 80000000, 花屏就退回
+#endif
 #define TFT_SCK    5    // SCL_SCREEN -> IO5
 #define TFT_MOSI   4    // SDA_SCREEN -> IO4
 #define TFT_DC     6    // D/C        -> IO6
 #define TFT_RST    7    // RESET      -> IO7
 #define TFT_CS     8    // CS         -> IO8
 #define TFT_BL     9    // BL 经 Q1(SS8050) 驱动, 高电平点亮 -> IO9 (PWM 调光)
+
+/* --- 背光调光 ---
+ * 频率必须避开人耳可听范围: 原来的 5kHz 会让 IP5306 升压电感/陶瓷电容在某些
+ * 亮度下啸叫 (PWM 负载纹波直接调制 5V 升压)。默认 25kHz。
+ * 若仍有轻微噪声, 依次试 20000 / 30000 / 35000:
+ *   platformio.ini 的 build_flags 加一行 -DTFT_BL_FREQ=20000
+ * 注意 80MHz 时钟下 25kHz 最多支持 11bit 分辨率, 这里保持 8bit 留余量。
+ */
+#ifndef TFT_BL_FREQ
+#define TFT_BL_FREQ 25000
+#endif
+#ifndef TFT_BL_RES
+#define TFT_BL_RES  8
+#endif
 
 /* --- MicroSD 卡座 (1-bit SDMMC) --- */
 #define SD_CLK_PIN  12   // SD_CLK      -> IO12
@@ -69,9 +86,14 @@
 #define SCR_H        240          // 横屏高度
 #define MUSIC_DIR    "/music"     // TF 卡音乐目录 (子文件夹 = 分类, 如 /music/1-2岁/)
 #define STORY_DIR    "/story"     // TF 卡故事目录 (/story/<故事名>/)
+#define VIDEO_DIR    "/video"     // TF 卡视频目录 (MJPEG AVI; 同名 .mp3/.wav 作音轨)
+#define MAX_VIDEOS   64           // 最多视频条目数
+#define MAX_VIDEO_FRAMES 8000     // 单个视频最大帧数 (索引 8B/帧 -> 64KB PSRAM)
+#define MAX_VIDEO_BYTES  (192 * 1024) // 单帧上限 (MJPEG 通常 20~40KB, QOI 约 20~60KB)
 #define MAX_TRACKS   300          // 最大曲目数
 #define MAX_CATEGORIES 32         // 最大音乐分类数 (不含置顶的"全部歌曲")
-#define MAX_STORIES  32           // 最大故事数
+#define MAX_STORIES  128          // 最大故事条目数 (图文=文件夹, 音频=每个MP3)
+#define MAX_STORY_DEPTH 6         // /story 分类下的最大目录深度
 #define MAX_PANELS   256          // 每个故事最大插画数 (每个 Panel 32B, 256 -> 8KB)
 #define VOL_MAX      21           // 音量档位 0..21
 #define BRIGHT_MIN   10           // 最低亮度 (防止调黑后无法操作)

@@ -23,7 +23,7 @@ public:
       auto cfg = _bus.config();
       cfg.spi_host    = SPI2_HOST;      // ESP32-S3 通用 SPI
       cfg.spi_mode    = 0;
-      cfg.freq_write  = 40000000;
+      cfg.freq_write  = TFT_SPI_HZ;
       cfg.freq_read   = 16000000;
       cfg.spi_3wire   = true;           // 只写不读
       cfg.use_lock    = true;
@@ -63,11 +63,13 @@ static bool s_buffered = false, s_invalid = true, s_dirty = false;
 static uint32_t s_presentAt = 0;
 static constexpr int STRIP_H = 8;
 
-/* 背光 PWM (经 Q1 SS8050 驱动, 占空比越高越亮) */
+/* 背光 PWM (经 Q1 SS8050 驱动, 占空比越高越亮)
+   频率默认 25kHz: 5kHz 会落在可听频段, 让 IP5306 升压电路在某些亮度下啸叫。 */
 static const int BL_CHANNEL = 7;
-static const int BL_FREQ    = 5000;
-static const int BL_RES     = 8;
+static const int BL_FREQ    = TFT_BL_FREQ;
+static const int BL_RES     = TFT_BL_RES;
 static bool      s_blReady  = false;
+static uint8_t   s_blPercent = 100;
 
 lgfx::LGFX_Device& lcd() { return s_lcd; }
 
@@ -96,8 +98,10 @@ void begin() {
   }
 #ifdef ARDUINO
   Serial.printf("[UI] PSRAM canvas: %s\n", s_buffered ? "OK (300 KiB + 5 KiB staging)" : "unavailable, direct rendering");
-  ledcSetup(BL_CHANNEL, BL_FREQ, BL_RES);
+  const uint32_t blActual = ledcSetup(BL_CHANNEL, BL_FREQ, BL_RES);
   ledcAttachPin(TFT_BL, BL_CHANNEL);
+  Serial.printf("[UI] backlight PWM: %u Hz (asked %d), %d-bit\n",
+                (unsigned)blActual, BL_FREQ, BL_RES);
 #else
   ESP_LOGI("display", "PSRAM canvas: %s", s_buffered ? "ready" : "direct rendering fallback");
   ledc_timer_config_t timer{};
@@ -120,6 +124,7 @@ void begin() {
 
 void setBrightness(uint8_t percent) {
   if (percent > 100) percent = 100;
+  s_blPercent = percent;
   if (s_blReady) {
 #ifdef ARDUINO
     ledcWrite(BL_CHANNEL, (uint32_t)percent * ((1 << BL_RES) - 1) / 100);
@@ -137,6 +142,24 @@ void setBrightness(uint8_t percent) {
     ESP_ERROR_CHECK(gpio_set_level(static_cast<gpio_num_t>(TFT_BL), percent > 0));
 #endif
   }
+}
+
+/* 只换调光频率, 亮度保持 (重新配置定时器会把占空比清零, 这里补写一次) */
+void setBacklightFreq(uint32_t hz) {
+  if (!s_blReady || hz == 0) return;
+#ifdef ARDUINO
+  const uint32_t actual = ledcSetup(BL_CHANNEL, hz, BL_RES);
+  ledcAttachPin(TFT_BL, BL_CHANNEL);
+  ledcWrite(BL_CHANNEL, (uint32_t)s_blPercent * ((1 << BL_RES) - 1) / 100);
+  Serial.printf("[UI] backlight PWM -> %u Hz (asked %u)\n", (unsigned)actual, (unsigned)hz);
+#else
+  ESP_ERROR_CHECK(ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, hz));
+  ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, static_cast<ledc_channel_t>(BL_CHANNEL),
+                                uint32_t(s_blPercent) * ((1 << BL_RES) - 1) / 100));
+  ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, static_cast<ledc_channel_t>(BL_CHANNEL)));
+  ESP_LOGI("display", "backlight PWM -> %lu Hz (asked %lu)",
+           static_cast<unsigned long>(hz), static_cast<unsigned long>(hz));
+#endif
 }
 
 lgfx::LGFXBase& canvas() {

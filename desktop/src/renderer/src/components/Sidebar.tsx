@@ -4,6 +4,7 @@ import {
   FolderOpen,
   LayoutDashboard,
   LibraryBig,
+  MonitorCog,
   PenLine,
   ScanLine,
   Settings,
@@ -30,6 +31,7 @@ const WORKSPACE: NavItem[] = [
 ]
 
 const SYSTEM: NavItem[] = [
+  { view: 'center', label: '设备中心', icon: MonitorCog },
   { view: 'device', label: '设备与连接', icon: Cable },
   { view: 'extensions', label: '扩展中心', icon: Blocks, badge: 'BETA' },
   { view: 'settings', label: '设置', icon: Settings }

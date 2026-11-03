@@ -23,16 +23,28 @@ namespace Ui {
   /* 音乐分类 */
   void drawMusicList(int count, int selected);      // 分类列表整屏绘制, 进入该屏时调用 (名称取自 Storage::catName)
   void updateMusicList(int count, int selected);    // 选择变化时的增量刷新 (只重绘变化的行)
-  void drawTrackList(int count, int selected, int playing, bool nursery = false);  // 当前歌曲列表整屏绘制, 进入该屏时调用 (名称取自 Storage::name)
-  void updateTrackList(int count, int selected, int playing, bool nursery = false);  // 增量刷新 (选中行/播放中高亮)
+  void drawTrackList(int count, int selected, int playing);  // 当前歌曲列表整屏绘制, 进入该屏时调用 (名称取自 Storage::name)
+  void updateTrackList(int count, int selected, int playing);  // 增量刷新 (选中行/播放中高亮)
+
+  /* 视频模式 */
+  void drawVideoList(int count, int selected, int playing);   // /video 列表 (名称取自 Video::name)
+  void updateVideoList(int count, int selected, int playing);
+  void drawVideoLoadingBegin(const char* title);              // 解析 AVI 索引期间的等待页
+  void videoFrameReset();                                     // 起播: 清屏并允许首帧铺满
+  bool drawVideoFrame(const uint8_t* data, size_t len, bool qoi);  // 解码一帧 (QOI 或 MJPEG) 到画布
+  void drawVideoBar(uint32_t curMs, uint32_t durMs, uint8_t volume,
+                    bool paused, bool show, bool showTitle);  // 底部控制条 + 片名
+  void drawVideoStats(int fps, int dropped);                  // 右上角实际帧率角标
 
   /* 故事模式 */
-  void drawStoryList(int count, int selected);      // 故事列表整屏绘制, 进入该屏时调用 (标题取自 Story::title)
-  void updateStoryList(int count, int selected);    // 选择变化时的增量刷新 (只重绘变化的行)
+  void drawStoryCategoryList(int count, int selected);  // /story 一级分组 (音频故事/图文故事)
+  void updateStoryCategoryList(int count, int selected);
+  void drawStoryList(const char* path, int count, int selected, int playing);  // 当前目录的直接子文件夹/故事
+  void updateStoryList(const char* path, int count, int selected, int playing);
   void drawStoryLoadingBegin(const char* title);    // 加载页静态层 (背景/顶栏/小书/文案)
   void drawStoryLoadingSpin(int step);              // 加载页旋转圆环 (step 递增, 原位重绘不闪)
   void drawStoryFrame(const char* imgPath);         // 全屏插画 (JPEG)
-  void drawStoryAudio(const char* title, const PlayerStatus& st);  // 音频故事播放页 (整页重绘)
+  void drawStoryAudioStatic(const char* category);  // 音频故事播放页: 复用音乐播放器布局
   void setStoryTitle(const char* title);            // 设置播放页控制条上的故事名
   void drawStoryBar(int panel, int total, uint32_t curSec, uint32_t durSec,
                     uint8_t volume, bool paused);   // 插画底部控制条 (增量刷新, 内部含跑马灯)

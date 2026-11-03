@@ -4,6 +4,17 @@
 #include "ble.h"
 #include "filexfer.h"
 #include "transfer_frame.h"
+#include "settings.h"
+#include "session.h"
+#include "player.h"
+#include "parental.h"
+#include "storage.h"
+#include "story.h"
+#include "network.h"
+#include "display.h"
+#include "sysmon.h"
+#include <SD_MMC.h>
+#include <esp_ota_ops.h>
 #include <ArduinoJson.h>
 #include <cstring>
 
@@ -167,6 +178,134 @@ void buildNfcStatus(JsonObject obj) {
   }
 }
 
+/* ---------------- 设备中心: 系统状态与内部配置 ---------------- */
+
+void buildSystemStats(JsonObject obj) {
+  obj["uptime"] = millis() / 1000;
+
+  JsonObject cpu = obj["cpu"].to<JsonObject>();
+  cpu["load"]     = SysMon::cpuLoad();
+  cpu["cores"]    = ESP.getChipCores();
+  cpu["freq"]     = ESP.getCpuFreqMHz();
+  cpu["model"]    = ESP.getChipModel();
+  cpu["revision"] = ESP.getChipRevision();
+  cpu["sdk"]      = ESP.getSdkVersion();
+
+  JsonObject ram = obj["ram"].to<JsonObject>();
+  ram["heapTotal"] = ESP.getHeapSize();
+  ram["heapFree"]  = ESP.getFreeHeap();
+  ram["heapMin"]   = ESP.getMinFreeHeap();
+  ram["psramTotal"] = ESP.getPsramSize();
+  ram["psramFree"]  = ESP.getFreePsram();
+
+  JsonObject rom = obj["rom"].to<JsonObject>();
+  const uint32_t appSize = ESP.getSketchSize();
+  /* 当前工程是单 factory 分区，没有 OTA 槽；getFreeSketchSpace() 会返回 0。
+     用正在运行的分区大小计算应用占用，OTA 版本也能得到正确总量。 */
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  const uint32_t appTotal = running ? running->size : appSize;
+  rom["flashSize"] = ESP.getFlashChipSize();
+  rom["appSize"]   = appSize;
+  rom["appTotal"]  = appTotal;
+  rom["appFree"]   = appTotal > appSize ? appTotal - appSize : 0;
+  rom["partition"] = running ? running->label : "factory";
+
+  JsonObject storage = obj["storage"].to<JsonObject>();
+  const bool sdReady = Storage::ready();
+  uint64_t sdTotal = 0, sdUsed = 0;
+  if (sdReady && !FileXfer::busy()) {   // 传输中不要抢 SD 总线
+    sdTotal = SD_MMC.totalBytes();
+    sdUsed  = SD_MMC.usedBytes();
+  }
+  storage["ready"]   = sdReady;
+  storage["total"]   = sdTotal;
+  storage["used"]    = sdUsed;
+  storage["free"]    = sdTotal > sdUsed ? sdTotal - sdUsed : 0;
+  storage["tracks"]  = Storage::totalCount();
+  storage["stories"] = Story::count();
+
+  SettingsData& s = Settings::data();
+  JsonObject settings = obj["settings"].to<JsonObject>();
+  settings["volume"]       = Session::volume();
+  settings["volumeMax"]    = VOL_MAX;
+  settings["brightness"]   = s.brightness;
+  settings["brightnessMin"] = BRIGHT_MIN;
+  settings["rotation"]     = s.rotation;
+  settings["eq"]           = eqName(s.eq);
+  settings["screenOffMin"] = s.screenOffMin;
+  settings["sleepMin"]     = s.sleepMin;
+  settings["ble"]          = s.bleEnabled != 0;
+  settings["wifi"]         = s.wifiEnabled != 0;
+  settings["ap"]           = s.apEnabled != 0;
+  settings["childLock"]    = Parental::childLock();
+  settings["bound"]        = Parental::bound();
+  settings["name"]         = Ble::deviceName();
+  settings["fw"]           = "storybox-nfc-1.0";
+  settings["proto"]        = 4;
+  settings["role"]         = "storybox";
+
+  JsonObject network = obj["network"].to<JsonObject>();
+  network["wifi"]   = Network::wifiEnabled();
+  network["ap"]     = Network::apEnabled();
+  network["apSsid"] = Network::apSsid();
+
+  const PlayerStatus st = Player::status();
+  const bool story = Story::active();
+  const char* title = story ? Story::currentTitle() : st.name;
+  JsonObject player = obj["player"].to<JsonObject>();
+  player["playing"]    = st.playing && !st.paused;
+  player["paused"]     = st.paused;
+  player["hasTrack"]   = st.hasTrack || story;
+  player["story"]      = story;
+  player["title"]      = title ? title : "";
+  player["codec"]      = st.codec ? st.codec : "";
+  player["curSec"]     = st.curSec;
+  player["durSec"]     = st.durSec;
+  player["bitrate"]    = st.bitrateKbps;
+  player["sampleRate"] = st.sampleRate;
+  player["volume"]     = st.volume;
+}
+
+void sendSystemStats(int32_t id, const char* act) {
+  JsonDocument doc;
+  doc["v"] = 4;
+  if (id) doc["id"] = id;
+  doc["ok"]  = true;
+  doc["cmd"] = "sys";
+  doc["act"] = act;
+  JsonObject data = doc["data"].to<JsonObject>();
+  buildSystemStats(data);
+  sendDoc(doc);
+}
+
+void handleSysSet(JsonDocument& doc, int32_t id) {
+  bool changed = false;
+
+  if (doc["volume"].is<int>()) {
+    int v = doc["volume"].as<int>();
+    v = constrain(v, 0, (int)VOL_MAX);
+    v = Parental::clampVolume(v);
+    Player::setVolume(v);
+    Session::setVolume((uint8_t)v);
+    changed = true;
+  }
+
+  if (doc["brightness"].is<int>()) {
+    int b = doc["brightness"].as<int>();
+    b = constrain(b, BRIGHT_MIN, BRIGHT_MAX);
+    Settings::data().brightness = (uint8_t)b;
+    Display::setBrightness((uint8_t)b);
+    Settings::save();
+    changed = true;
+  }
+
+  if (!changed) {
+    sendError(id, "BAD_VALUE", "volume / brightness required");
+    return;
+  }
+  sendSystemStats(id, "set");
+}
+
 void sendHello(int32_t id) {
   JsonDocument doc;
   doc["v"]       = 4;
@@ -187,6 +326,8 @@ void sendHello(int32_t id) {
   features.add("fs.read");
   features.add("fs.write");
   features.add("fs.sd");
+  features.add("sys.stats");
+  features.add("sys.control");
   JsonObject fs = doc["fs"].to<JsonObject>();
   fs["ready"] = FileXfer::ready();
   JsonObject nfc = doc["nfc"].to<JsonObject>();
@@ -381,6 +522,8 @@ void processFrame(const uint8_t* json, size_t jsonLen, const uint8_t* raw, size_
   if (strcmp(cmd, "sys") == 0 || strcmp(cmd, "hello") == 0) {
     const char* act = doc["act"] | (strcmp(cmd, "hello") == 0 ? "hello" : "");
     if (strcmp(act, "hello") == 0) { sendHello(id); return; }
+    if (strcmp(act, "stats") == 0) { sendSystemStats(id, "stats"); return; }
+    if (strcmp(act, "set") == 0) { handleSysSet(doc, id); return; }
     if (strcmp(act, "ping") == 0) {
       JsonDocument out;
       out["v"] = 4;
@@ -455,6 +598,8 @@ void begin() {
   features.add("fs.read");
   features.add("fs.write");
   features.add("fs.sd");
+  features.add("sys.stats");
+  features.add("sys.control");
   JsonObject fs = doc["fs"].to<JsonObject>();
   fs["ready"] = FileXfer::ready();
   JsonObject nfc = doc["nfc"].to<JsonObject>();

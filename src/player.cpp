@@ -134,7 +134,8 @@ namespace {
       case CMD_PREV:       if (n) playIndexTask((s_st.index - 1 + n) % n, true); break;
 
       case CMD_TOGGLE:
-        if (!n) break;
+        /* 只有视频/故事的设备也可能没有任何音乐曲目: 已连接文件时仍要允许暂停 */
+        if (!n && !s_st.connected) break;
         if (s_st.index < 0) s_st.index = 0;
         if (!s_st.connected) { playIndexTask(s_st.index, true); break; }
         /* 已连接: pauseResume 只切输出开关, 文件位置保留 -> 暂停/继续不丢进度 */

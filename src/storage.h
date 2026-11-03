@@ -39,12 +39,4 @@ namespace Storage {
   const char* allTrackName(int index);
   int         allTrackCategory(int index);          // 0=根目录/全部歌曲, 1..N=分类
   bool        prepareTrack(int index, int& playlistIndex); // 选中曲目所在分类并返回播放列表下标
-
-  /* 童谣: 把分类名含"童谣/儿歌/nursery/rhyme"的曲目汇总成一个播放列表。
-     currentCategory() 返回 NURSERY_CATEGORY 表示当前正在使用这个汇总列表。 */
-  const int   NURSERY_CATEGORY = -2;
-  int         nurseryCount();                        // 符合童谣规则的曲目数 (受家长白名单约束)
-  const char* nurseryName(int view);                 // 童谣预览列表里的文件名
-  int         nurseryGlobal(int view);               // 童谣预览列表下标 -> 全量下标
-  bool        selectNursery();                       // 把童谣预览列表设为当前播放列表
 }
