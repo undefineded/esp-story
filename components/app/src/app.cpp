@@ -22,6 +22,7 @@
 #include "i2c_bus.h"
 #include "media_library.h"
 #include "nfc_service.h"
+#include "ota_service.h"
 #include "parental_binding.h"
 #include "parental_policy.h"
 #include "playback.h"
@@ -294,7 +295,8 @@ void addNfcStatus(cJSON* data) {
     }
 }
 
-bool hostRoute(void*, cJSON* request, const char* command, const char* action, cJSON* response, const char** error) {
+bool hostRoute(void*, cJSON* request, const char* command, const char* action, cJSON* response,
+               const char** error, const uint8_t* raw, std::size_t raw_length) {
     if (!command) return false;
     if (std::strcmp(command, "sys") == 0) {
         cJSON_AddStringToObject(response, "cmd", "sys");
@@ -303,7 +305,31 @@ bool hostRoute(void*, cJSON* request, const char* command, const char* action, c
             *error = "BAD_ACT";
             return true;
         }
-        if (std::strcmp(action, "set") == 0) {
+        if (std::strcmp(action, "ota_begin") == 0) {
+            const cJSON* size = cJSON_GetObjectItemCaseSensitive(request, "size");
+            const auto expected = cJSON_IsNumber(size) ? static_cast<std::size_t>(size->valuedouble) : 0;
+            const auto result = Ota::begin(expected);
+            if (result != ESP_OK) {
+                *error = result == ESP_ERR_NOT_SUPPORTED ? "NO_OTA_SLOT" : "OTA_BEGIN";
+                return true;
+            }
+        } else if (std::strcmp(action, "ota_chunk") == 0) {
+            if (!raw || !raw_length) {
+                *error = "BAD_LENGTH";
+                return true;
+            }
+            if (Ota::write(raw, raw_length) != ESP_OK) {
+                *error = "OTA_WRITE";
+                return true;
+            }
+        } else if (std::strcmp(action, "ota_end") == 0) {
+            if (Ota::finish() != ESP_OK) {
+                *error = "OTA_END";
+                return true;
+            }
+        } else if (std::strcmp(action, "ota_abort") == 0) {
+            Ota::abort();
+        } else if (std::strcmp(action, "set") == 0) {
             const cJSON* volume = cJSON_GetObjectItemCaseSensitive(request, "volume");
             const cJSON* brightness = cJSON_GetObjectItemCaseSensitive(request, "brightness");
             if (cJSON_IsNumber(volume)) setVolume(static_cast<int>(volume->valuedouble));
@@ -320,6 +346,12 @@ bool hostRoute(void*, cJSON* request, const char* command, const char* action, c
             return true;
         }
         addSystemStats(response);
+        const auto ota = Ota::status();
+        cJSON* info = cJSON_AddObjectToObject(response, "ota");
+        cJSON_AddBoolToObject(info, "supported", ota.supported);
+        cJSON_AddBoolToObject(info, "active", ota.active);
+        cJSON_AddNumberToObject(info, "written", static_cast<double>(ota.written));
+        cJSON_AddNumberToObject(info, "expected", static_cast<double>(ota.expected));
         return true;
     }
     if (std::strcmp(command, "nfc") == 0) {

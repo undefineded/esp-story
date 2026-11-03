@@ -187,10 +187,14 @@ std::size_t respond(const uint8_t* input,std::size_t size,uint32_t uptime,uint32
         cJSON_AddNumberToObject(response,"id",id->valuedouble);
     const auto* version=cJSON_GetObjectItemCaseSensitive(request,"v");
     const char* error=nullptr;
+    const bool fs_chunk = files && files->writable() &&
+        std::strcmp(string(request,"cmd"),"fs")==0 &&
+        std::strcmp(string(request,"act"),"write_chunk")==0;
+    const bool ota_chunk = std::strcmp(string(request,"cmd"),"sys")==0 &&
+        std::strcmp(string(request,"act"),"ota_chunk")==0;
     if (!request) error="BAD_JSON";
     else if (!cJSON_IsNumber(version) || version->valuedouble!=4) error="PROTOCOL_V4_REQUIRED";
-    else if (input_raw_size && (!files || !files->writable() ||
-        std::strcmp(string(request,"cmd"),"fs")!=0 || std::strcmp(string(request,"act"),"write_chunk")!=0)) error="BAD_LENGTH";
+    else if (input_raw_size && !fs_chunk && !ota_chunk) error="BAD_LENGTH";
     else {
         const auto* cmd=string(request,"cmd");
         const bool hello=std::strcmp(cmd,"hello")==0;
@@ -217,7 +221,8 @@ std::size_t respond(const uint8_t* input,std::size_t size,uint32_t uptime,uint32
             bool handled = false;
             if (route_handler) {
                 const char* route_error = nullptr;
-                handled = route_handler(route_context, request, cmd, string(request,"act"), response, &route_error);
+                handled = route_handler(route_context, request, cmd, string(request,"act"), response, &route_error,
+                                        input_raw, input_raw_size);
                 if (handled && route_error) error = route_error;
             }
             if (!handled) {

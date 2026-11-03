@@ -363,6 +363,20 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
   （`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` 需要固件启动后调用
   `esp_ota_mark_app_valid_cancel_rollback()`，本轮未开启）。
 
+### P6（第四批）：OTA 升级通道
+
+- 新增 `components/ota`：`begin(expected)/write/finish/abort/status`，封装
+  `esp_ota_begin/write/end/set_boot_partition`；单槽布局下 `begin` 返回
+  `ESP_ERR_NOT_SUPPORTED`，不会假装能升级。
+- hostlink 的 raw 通道从“只允许 fs write_chunk”扩展为也允许
+  `sys ota_chunk`；路由回调新增 raw 指针/长度参数，OTA 分块直接吃二进制帧。
+- `sys` 路由新增动作：`ota_begin`（带 `size`）、`ota_chunk`（raw 分块）、
+  `ota_end`（切槽，等重启生效）、`ota_abort`；每次 `sys` 响应都附
+  `ota: {supported, active, written, expected}`，客户端可显示进度。
+- 验证：`sdkconfig.defaults + sdkconfig.usb-product + sdkconfig.ota` 组合构建通过，
+  `storybox.bin` = `0x1d0f40`，槽位 3 MiB 余量 39%，`Ota::status` 等符号确认被链接。
+- 未做：回滚（未开 `APP_ROLLBACK_ENABLE`）、桌面端 OTA 上传界面、真机升级与断电失败演练。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
