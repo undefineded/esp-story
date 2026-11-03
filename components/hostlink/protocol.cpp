@@ -197,17 +197,6 @@ std::size_t respond(const uint8_t* input,std::size_t size,uint32_t uptime,uint32
         const auto* action=string(request,"act",hello?"hello":"");
         if (std::strcmp(cmd,"fs")==0 && files)
             error=fileRequest(request,response,*files,raw,raw_size?raw_capacity:0,length,monotonic_ms,input_raw,input_raw_size);
-        else if (!hello && std::strcmp(cmd,"sys")!=0) {
-            // Extra routers (NFC, ...) own their commands; anything they do not
-            // recognize stays an unsupported feature.
-            bool handled = false;
-            if (route_handler) {
-                const char* route_error = nullptr;
-                handled = route_handler(route_context, cmd, string(request,"act"), response, &route_error);
-                if (handled && route_error) error = route_error;
-            }
-            if (!handled) error="UNSUPPORTED_FEATURE";
-        }
         else if (std::strcmp(action,"hello")==0) {
             cJSON_AddStringToObject(response,"evt","hello");
             cJSON_AddStringToObject(response,"fw","storybox-idf-migration");
@@ -218,11 +207,23 @@ std::size_t respond(const uint8_t* input,std::size_t size,uint32_t uptime,uint32
             auto* features=cJSON_AddArrayToObject(response,"features");
             if (files) cJSON_AddItemToArray(features,cJSON_CreateString(files->writable()?"fs_transfer":"fs_readonly"));
             if (route_feature) cJSON_AddItemToArray(features,cJSON_CreateString(route_feature));
-        } else if (std::strcmp(action,"ping")==0) {
+        } else if (std::strcmp(cmd,"sys")==0 && std::strcmp(action,"ping")==0) {
             cJSON_AddStringToObject(response,"evt","pong");
             cJSON_AddNumberToObject(response,"uptime",uptime);
             cJSON_AddNumberToObject(response,"heap",heap);
-        } else error="BAD_ACT";
+        } else {
+            // Extra routers (sys stats/set, NFC, ...) own the remaining commands;
+            // anything they do not recognize keeps the previous error semantics.
+            bool handled = false;
+            if (route_handler) {
+                const char* route_error = nullptr;
+                handled = route_handler(route_context, request, cmd, string(request,"act"), response, &route_error);
+                if (handled && route_error) error = route_error;
+            }
+            if (!handled) {
+                error = (hello || std::strcmp(cmd,"sys")==0) ? "BAD_ACT" : "UNSUPPORTED_FEATURE";
+            }
+        }
     }
     cJSON_AddBoolToObject(response,"ok",!error);
     if (error) cJSON_AddStringToObject(response,"err",error);

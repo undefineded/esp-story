@@ -38,6 +38,14 @@
 #if CONFIG_STORYBOX_USB_PROTOCOL
 #include "file_reader.h"
 #include "usb_transport.h"
+#include "esp_app_desc.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_heap_caps.h"
+#include "esp_image_format.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_vfs_fat.h"
 #endif
 
 namespace App {
@@ -166,20 +174,105 @@ Ble::Hooks makeBleHooks() {
 // USB route for "cmd":"nfc". Only status is exposed: the native service still
 // has no raw read/write API, so those actions answer NOT_SUPPORTED.
 #if CONFIG_STORYBOX_USB_PROTOCOL
-bool nfcRoute(void*, const char* command, const char* action, cJSON* response, const char** error) {
-    if (!command || std::strcmp(command, "nfc") != 0) return false;
-    cJSON_AddStringToObject(response, "cmd", "nfc");
-    cJSON_AddStringToObject(response, "act", action ? action : "");
-    if (!s_nfc) {
-        *error = "NFC_UNAVAILABLE";
-        return true;
+void addSystemStats(cJSON* data) {
+    const auto state = g_playback.snapshot();
+    const auto* track = g_playlist.current();
+    const uint32_t seconds = state.sample_rate ? static_cast<uint32_t>(state.submitted_frames / state.sample_rate) : 0;
+
+    cJSON_AddNumberToObject(data, "uptime", static_cast<double>(esp_timer_get_time() / 1000000));
+    cJSON* cpu = cJSON_AddObjectToObject(data, "cpu");
+    // CPU load needs FreeRTOS run-time stats; report 0 until that is enabled.
+    cJSON_AddNumberToObject(cpu, "load", 0);
+    cJSON_AddNumberToObject(cpu, "cores", portNUM_PROCESSORS);
+    cJSON_AddNumberToObject(cpu, "freq", CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+    esp_chip_info_t chip{};
+    esp_chip_info(&chip);
+    cJSON_AddStringToObject(cpu, "model", "ESP32-S3");
+    cJSON_AddNumberToObject(cpu, "revision", chip.revision);
+    cJSON_AddStringToObject(cpu, "sdk", esp_get_idf_version());
+
+    cJSON* ram = cJSON_AddObjectToObject(data, "ram");
+    cJSON_AddNumberToObject(ram, "heapTotal",
+                            static_cast<double>(heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+    cJSON_AddNumberToObject(ram, "heapFree",
+                            static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+    cJSON_AddNumberToObject(ram, "heapMin",
+                            static_cast<double>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+    cJSON_AddNumberToObject(ram, "psramTotal",
+                            static_cast<double>(heap_caps_get_total_size(MALLOC_CAP_SPIRAM)));
+    cJSON_AddNumberToObject(ram, "psramFree",
+                            static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+
+    cJSON* rom = cJSON_AddObjectToObject(data, "rom");
+    uint32_t flash_bytes = 0;
+    esp_flash_get_size(nullptr, &flash_bytes);
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    uint32_t image_len = 0;
+    if (running) {
+        const esp_partition_pos_t position{running->address, running->size};
+        esp_image_metadata_t metadata{};
+        if (esp_image_get_metadata(&position, &metadata) == ESP_OK) image_len = metadata.image_len;
     }
-    if (!action || std::strcmp(action, "status") != 0) {
-        *error = "NOT_SUPPORTED";
-        return true;
-    }
+    cJSON_AddNumberToObject(rom, "flashSize", flash_bytes);
+    cJSON_AddNumberToObject(rom, "appSize", image_len);
+    cJSON_AddNumberToObject(rom, "appTotal", running ? running->size : 0);
+    cJSON_AddNumberToObject(rom, "appFree", running ? static_cast<double>(running->size - image_len) : 0);
+    cJSON_AddStringToObject(rom, "partition", running ? running->label : "");
+
+    cJSON* storage = cJSON_AddObjectToObject(data, "storage");
+    uint64_t total = 0, free_bytes = 0;
+    const bool mounted = s_context.sd_mounted &&
+                         esp_vfs_fat_info(Storage::SdVolume::root, &total, &free_bytes) == ESP_OK;
+    cJSON_AddBoolToObject(storage, "ready", mounted);
+    cJSON_AddNumberToObject(storage, "total", static_cast<double>(total));
+    cJSON_AddNumberToObject(storage, "free", static_cast<double>(free_bytes));
+    cJSON_AddNumberToObject(storage, "used", static_cast<double>(total - free_bytes));
+    cJSON_AddNumberToObject(storage, "tracks",
+                            s_catalog ? static_cast<double>(s_catalog->tracks.size()) : 0);
+    cJSON_AddNumberToObject(storage, "stories",
+                            s_catalog ? static_cast<double>(s_catalog->stories.size()) : 0);
+
+    cJSON* settings = cJSON_AddObjectToObject(data, "settings");
+    cJSON_AddNumberToObject(settings, "volume", s_context.volume);
+    cJSON_AddNumberToObject(settings, "volumeMax", 21);
+    cJSON_AddNumberToObject(settings, "brightness", s_context.settings.brightness);
+    cJSON_AddNumberToObject(settings, "brightnessMin", 10);
+    cJSON_AddNumberToObject(settings, "rotation", s_context.settings.rotation);
+    static const char* kEqNames[] = {"vocal", "pop", "bass", "flat"};
+    cJSON_AddStringToObject(settings, "eq", s_context.settings.eq < 4 ? kEqNames[s_context.settings.eq] : "flat");
+    cJSON_AddNumberToObject(settings, "screenOffMin", s_context.settings.screen_off_min);
+    cJSON_AddNumberToObject(settings, "sleepMin", s_context.settings.sleep_min);
+    cJSON_AddBoolToObject(settings, "ble", s_context.settings.ble != 0);
+    cJSON_AddBoolToObject(settings, "wifi", s_context.settings.wifi != 0);
+    cJSON_AddBoolToObject(settings, "ap", s_context.settings.ap != 0);
+    cJSON_AddBoolToObject(settings, "childLock", s_parental_ready && s_policy.childLocked());
+    cJSON_AddBoolToObject(settings, "bound", parentalBound());
+    cJSON_AddStringToObject(settings, "name", Ble::deviceName());
+    cJSON_AddStringToObject(settings, "fw", "storybox-idf");
+    cJSON_AddNumberToObject(settings, "proto", 4);
+    cJSON_AddStringToObject(settings, "role", "storybox");
+
+    cJSON* network = cJSON_AddObjectToObject(data, "network");
+    cJSON_AddBoolToObject(network, "wifi", false);
+    cJSON_AddBoolToObject(network, "ap", false);
+    cJSON_AddStringToObject(network, "apSsid", "");
+
+    cJSON* player = cJSON_AddObjectToObject(data, "player");
+    cJSON_AddBoolToObject(player, "playing", state.state == Audio::PlaybackState::Playing);
+    cJSON_AddBoolToObject(player, "paused", state.state == Audio::PlaybackState::Paused);
+    cJSON_AddBoolToObject(player, "hasTrack", track != nullptr);
+    cJSON_AddBoolToObject(player, "story", false);
+    cJSON_AddStringToObject(player, "title", track ? track->name.c_str() : "");
+    cJSON_AddStringToObject(player, "codec", "mp3");
+    cJSON_AddNumberToObject(player, "curSec", seconds);
+    cJSON_AddNumberToObject(player, "durSec", 0);
+    cJSON_AddNumberToObject(player, "bitrate", state.bitrate);
+    cJSON_AddNumberToObject(player, "sampleRate", state.sample_rate);
+    cJSON_AddNumberToObject(player, "volume", s_context.volume);
+}
+
+void addNfcStatus(cJSON* data) {
     const auto state = s_nfc->snapshot();
-    cJSON* data = cJSON_AddObjectToObject(response, "data");
     cJSON_AddBoolToObject(data, "module", state.module);
     cJSON_AddBoolToObject(data, "polling", state.polling);
     cJSON_AddStringToObject(data, "firmware", state.firmware);
@@ -196,7 +289,52 @@ bool nfcRoute(void*, const char* command, const char* action, cJSON* response, c
         }
         cJSON_AddStringToObject(data, "uid", uid);
     }
-    return true;
+}
+
+bool hostRoute(void*, cJSON* request, const char* command, const char* action, cJSON* response, const char** error) {
+    if (!command) return false;
+    if (std::strcmp(command, "sys") == 0) {
+        cJSON_AddStringToObject(response, "cmd", "sys");
+        cJSON_AddStringToObject(response, "act", action ? action : "");
+        if (!action) {
+            *error = "BAD_ACT";
+            return true;
+        }
+        if (std::strcmp(action, "set") == 0) {
+            const cJSON* volume = cJSON_GetObjectItemCaseSensitive(request, "volume");
+            const cJSON* brightness = cJSON_GetObjectItemCaseSensitive(request, "brightness");
+            if (cJSON_IsNumber(volume)) setVolume(static_cast<int>(volume->valuedouble));
+            if (cJSON_IsNumber(brightness)) {
+                int value = static_cast<int>(brightness->valuedouble);
+                if (value < 10) value = 10;
+                if (value > 100) value = 100;
+                s_context.settings.brightness = static_cast<uint8_t>(value);
+                Display::setBrightness(s_context.settings.brightness);
+                saveSettings();
+            }
+        } else if (std::strcmp(action, "stats") != 0) {
+            *error = "BAD_ACT";
+            return true;
+        }
+        addSystemStats(response);
+        return true;
+    }
+    if (std::strcmp(command, "nfc") == 0) {
+        cJSON_AddStringToObject(response, "cmd", "nfc");
+        cJSON_AddStringToObject(response, "act", action ? action : "");
+        if (!s_nfc) {
+            *error = "NFC_UNAVAILABLE";
+            return true;
+        }
+        if (!action || std::strcmp(action, "status") != 0) {
+            *error = "NOT_SUPPORTED";
+            return true;
+        }
+        cJSON* data = cJSON_AddObjectToObject(response, "data");
+        addNfcStatus(data);
+        return true;
+    }
+    return false;
 }
 #endif  // CONFIG_STORYBOX_USB_PROTOCOL
 
@@ -417,12 +555,13 @@ void run() {
         }
     }
 #if CONFIG_STORYBOX_NFC
-    {
-        if (!Host::attachRoutes(nfcRoute, nullptr, "nfc")) {
-            ESP_LOGW(kTag, "USB NFC route already registered");
-        }
-    }
+    constexpr const char* kHostFeature = "nfc";
+#else
+    constexpr const char* kHostFeature = nullptr;
 #endif
+    if (!Host::attachRoutes(hostRoute, nullptr, kHostFeature)) {
+        ESP_LOGW(kTag, "USB route already registered");
+    }
 #endif
 
     s_playback = &g_playback;

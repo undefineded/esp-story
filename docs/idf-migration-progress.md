@@ -309,6 +309,25 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
 - 尚未迁移：BLE 的 `set`/`pin set`/`reset`/`unbind` 命令、白名单逐项勾选 UI、
   就寝时段到点后的锁页（目前锁定只阻止播放并提示）。
 
+### P6（第一批）：系统监控 `sys stats` / `sys set`
+
+桌面端「设备中心」读取的是 `cmd:"sys", act:"stats"`，字段见
+`desktop/src/shared/types.ts` 的 `DeviceSystemStats`。本轮把这条链路接上：
+
+- hostlink 路由扩展：核心路由之外的命令（含 `sys` 的 `stats`/`set`）交给注册路由，
+  `sys ping`/`sys hello` 行为保持不变；路由拿到解析后的请求对象，可读 `set` 的补丁字段。
+- 固件返回真实的：`uptime`、CPU 核数/频率/型号/修订/IDF 版本、
+  内部堆总量/空闲/历史最低、PSRAM 总量/空闲、Flash 容量、运行分区的
+  `appSize`（`esp_image_get_metadata`）/`appTotal`/`appFree`/分区名、
+  TF 卡总量/已用/空闲（`esp_vfs_fat_info`）与曲目/故事数、
+  当前设置（音量/亮度/旋转/EQ/熄屏/休眠/蓝牙/WiFi/AP/童锁/绑定）、
+  播放器快照（播放态/曲名/码率/采样率/进度/音量）。
+- `sys set` 支持桌面端下发 `volume` 与 `brightness`（亮度写入设置并在 10..100 内夹取）。
+- 明确未实现：CPU 负载（需要 FreeRTOS run-time stats，目前固定 0）、
+  网络状态（产品还没启动 WiFi，固定 false/空串）、播放器总时长（解码器不提供）。
+- 构建：产品 + USB + NFC `storybox.bin` = `0x1ce970`；
+  主机协议测试跑过 hello/ping/fs 读的既有断言，之后仍卡在 POSIX-only 的写会话夹具。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
