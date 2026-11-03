@@ -328,6 +328,25 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
 - 构建：产品 + USB + NFC `storybox.bin` = `0x1ce970`；
   主机协议测试跑过 hello/ping/fs 读的既有断言，之后仍卡在 POSIX-only 的写会话夹具。
 
+### P6（第二批）：熄屏与深睡
+
+- 新增 `components/power`：
+  - `power_policy.h`：纯函数空闲策略（主机可测）——主机传输/BLE 连接保持全醒；
+    视频播放不熄屏不休眠；播放音频只熄屏；静音且两个窗口都到点才深睡；
+    0 分钟表示禁用该项。
+  - `power_service.cpp`：背光 0 熄屏、任意输入边沿亮屏并 `Input::swallowFor(600)`
+    吞掉唤醒那一下的按键；深睡用 EXT1（ENC_A/ENC_B/ENC_SW）低电平唤醒，
+    休眠前开 `ESP_PD_DOMAIN_RTC_PERIPH` 保上拉，避免引脚浮空立刻唤醒。
+- 应用接入：主循环每帧 `Power::loop()`，熄屏时跳过绘制/推屏但继续采样输入；
+  从熄屏恢复时强制整页重绘；视频页在进入/离开时置 `videoActive`，
+  保证看视频时不会中途熄屏。
+- **深睡默认关闭**（`CONFIG_STORYBOX_POWER_SLEEP=n`）：唤醒依赖编码器三个引脚，
+  未确认接线就开启会有“只能重新烧录才能唤醒”的风险。新增 `sdkconfig.power`
+  用于验证该分支。
+- 验证：`test/power_policy_test.cpp`（并入 `tools/test_host.sh`）覆盖窗口边界、
+  播放/视频/主机活跃、0 分钟禁用；产品配置 `0x1c73d0`，深睡配置 `0x1c9e60`
+  （`sdkconfig.power`）。真机熄屏电流、唤醒灵敏度与深睡电流未测。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。

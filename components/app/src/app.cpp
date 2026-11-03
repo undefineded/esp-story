@@ -25,6 +25,7 @@
 #include "parental_binding.h"
 #include "parental_policy.h"
 #include "playback.h"
+#include "power_service.h"
 #include "sd_volume.h"
 #include "sdkconfig.h"
 #include "storage_access.h"
@@ -71,6 +72,8 @@ CatalogPtr s_catalog;
 
 char s_notice[96] = {};
 uint32_t s_notice_until = 0;
+bool s_video_active = false;
+bool s_was_screen_off = false;
 
 #if CONFIG_STORYBOX_FRAM_CONFIRMED
 Persistence::SettingsStore<Board::FramDevice>* s_settings_store = nullptr;
@@ -450,6 +453,7 @@ void run() {
     Input::begin();
     Hall::begin();
     Ble::begin("StoryBox", makeBleHooks());
+    Power::begin();
     Theme::init();
     drawBoot("正在启动", "");
     Display::present(true);
@@ -650,7 +654,21 @@ void run() {
             page->invalidate();
         }
 
-        if (page->dirty()) {
+        // Idle policy: panel off while audio plays, deep sleep (if enabled)
+        // when silent. A host link or video playback keeps everything awake.
+        Power::Inputs power_inputs{};
+        power_inputs.audio_playing = playing;
+        power_inputs.video_playing = s_video_active;
+        power_inputs.host_active = Ble::connected();
+        Power::Config power_config{};
+        power_config.screen_off_min = s_context.settings.screen_off_min;
+        power_config.sleep_min = s_context.settings.sleep_min;
+        power_config.brightness = s_context.settings.brightness;
+        const bool screen_off = Power::loop(now, power_inputs, power_config);
+        if (!screen_off && s_was_screen_off) page->invalidate();
+        s_was_screen_off = screen_off;
+
+        if (page->dirty() && !screen_off) {
             page->draw();
             if (s_notice_until) {
                 auto& g = Display::canvas();
@@ -935,6 +953,9 @@ void notify(const char* message, uint32_t duration_ms) {
 
 bool noticeActive() { return s_notice_until != 0; }
 const char* noticeText() { return s_notice; }
+
+bool videoActive() { return s_video_active; }
+void setVideoActive(bool active) { s_video_active = active; }
 
 uint8_t cycleMinutes(uint8_t current, int direction) {
     static const uint8_t kMinutes[] = {0, 1, 3, 5, 10, 30};

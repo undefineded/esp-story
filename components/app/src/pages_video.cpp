@@ -141,6 +141,7 @@ public:
 
     void enter() override {
         close();
+        setVideoActive(true);
         const auto entries = Video::scanLibrary(Storage::SdVolume::root);
         if (index_ >= entries.size()) {
             error_ = "没有视频";
@@ -179,7 +180,10 @@ public:
         invalidate();
     }
 
-    void leave() override { close(); }
+    void leave() override {
+        close();
+        setVideoActive(false);
+    }
 
     void handle(const Event& event) override {
         if (event.delta) {

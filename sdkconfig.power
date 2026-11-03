@@ -1,0 +1,3 @@
+# Deep-sleep variant: wake-up uses EXT1 on the encoder pins (GPIO14/15/21).
+# Only flash this on a board where those pins are actually wired.
+CONFIG_STORYBOX_POWER_SLEEP=y

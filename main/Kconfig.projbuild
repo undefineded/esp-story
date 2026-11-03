@@ -8,6 +8,15 @@ menu "StoryBox migration"
             enabled, because those fragments are hardware acceptance builds.
             Pages beyond home/settings are still being migrated; see
             docs/idf-migration-progress.md.
+    config STORYBOX_POWER_SLEEP
+        bool "Enable deep sleep after the idle window"
+        default n
+        help
+            Sleeps the device after the configured idle minutes when nothing is
+            playing. Wake-up uses EXT1 on the encoder pins (GPIO14/15/21), so
+            only enable it after confirming those pins are wired on the target
+            board; otherwise the device can only be revived by reflashing.
+            Screen-off still works with this option disabled.
     config STORYBOX_NFC
         bool "Enable PN532 NFC on the shared I2C bus"
         default y

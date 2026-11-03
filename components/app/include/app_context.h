@@ -43,6 +43,10 @@ void notify(const char* message, uint32_t duration_ms = 2500);
 bool noticeActive();
 const char* noticeText();
 
+// Video playback is "content": the power policy keeps the panel on for it.
+bool videoActive();
+void setVideoActive(bool active);
+
 // Settings cycling helpers shared by the settings page.
 uint8_t cycleMinutes(uint8_t current, int direction);
 const char* minutesLabel(uint8_t minutes);
