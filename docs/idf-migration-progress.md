@@ -410,6 +410,13 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
 
 全部链接通过；OTA 配置的最小 app 分区 3 MiB，余量约 39%。
 
+### 真机验收清单
+
+迁移的功能面已经铺开，但**没有任何真机结论**。新增
+[真机验收清单](idf-hardware-acceptance.md)，按「显示/输入 → 音乐 → 故事 → 视频 →
+BLE → USB → NFC → 家长 → 电源 → OTA」十组给出可执行步骤、预期结果、
+失败信号和回填模板。后续每完成一组，把结论回填到本文件对应批次。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
