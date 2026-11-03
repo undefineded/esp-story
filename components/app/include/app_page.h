@@ -34,6 +34,8 @@ Page* createTrackListPage();
 Page* createPlayerPage();
 Page* createStoryListPage();
 Page* createStoryPlayerPage();
+Page* createVideoListPage();
+Page* createVideoPlayerPage();
 
 // Navigation stack helpers.
 void pushPage(Page* page);

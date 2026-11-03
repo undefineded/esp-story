@@ -202,7 +202,7 @@ private:
         switch (selected_) {
             case 0: pushPage(createMusicListPage()); break;
             case 1: pushPage(createStoryListPage()); break;
-            case 2: notify("视频播放：P3 接入"); break;
+            case 2: pushPage(createVideoListPage()); break;
             default: openSettings(); break;
         }
     }

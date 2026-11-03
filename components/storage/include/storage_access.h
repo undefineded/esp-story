@@ -94,6 +94,11 @@ public:
     std::size_t write(const uint8_t* data, std::size_t size) {
         return file_ ? std::fwrite(data, 1, size, file_) : 0;
     }
+    // Random access for container formats (the video index seeks to frames).
+    bool seek(long offset, int origin = SEEK_SET) {
+        return file_ && std::fseek(file_, offset, origin) == 0;
+    }
+    long tell() const { return file_ ? std::ftell(file_) : -1; }
     bool failed() const { return file_ && std::ferror(file_); }
     bool eof() const { return file_ && std::feof(file_); }
     bool available() {

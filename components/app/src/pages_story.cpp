@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -44,20 +45,69 @@ const char* kindLabel(Media::StoryKind kind) {
     return kind == Media::StoryKind::Illustrated ? "图文" : "音频";
 }
 
+// One row of the story browser: either a directory to descend into or a story
+// to play. Directory rows are produced on the fly from the flat catalog so the
+// index format does not need to store the tree.
+struct BrowseEntry {
+    std::string label;
+    std::string path;
+    bool directory = false;
+    std::size_t story = 0;
+};
+
+std::vector<BrowseEntry> entriesAt(const Media::Catalog& catalog, const std::string& base) {
+    const std::string prefix = base + "/";
+    std::vector<BrowseEntry> directories, stories;
+    std::vector<std::string> seen;
+    for (std::size_t i = 0; i < catalog.stories.size(); ++i) {
+        const auto& story = catalog.stories[i];
+        if (story.directory.compare(0, prefix.size(), prefix) != 0) continue;
+        const auto rest = story.directory.substr(prefix.size());
+        const auto slash = rest.find('/');
+        if (slash == std::string::npos) {
+            // The story lives directly in base (illustrated folder or an audio
+            // story whose MP3 sits in base).
+            stories.push_back({story.title, story.directory, false, i});
+        } else {
+            const auto child = rest.substr(0, slash);
+            if (std::find(seen.begin(), seen.end(), child) == seen.end()) {
+                seen.push_back(child);
+                directories.push_back({child, prefix + child, true, 0});
+            }
+        }
+    }
+    std::sort(directories.begin(), directories.end(),
+              [](const auto& a, const auto& b) { return a.label < b.label; });
+    std::sort(stories.begin(), stories.end(),
+              [](const auto& a, const auto& b) { return a.label < b.label; });
+    directories.insert(directories.end(), stories.begin(), stories.end());
+    return directories;
+}
+
+std::string baseName(const std::string& path) {
+    const auto slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
 class StoryListPage final : public Page {
 public:
     const char* id() const override { return "story-list"; }
 
     void enter() override {
+        path_ = "/story";
+        selected_ = 0;
         if (!catalog_) catalog_ = App::catalog();
-        if (selected_ >= count()) selected_ = 0;
         invalidate();
         if (!ctx().catalog_ready) requestScan();
+        reload();
     }
 
     void handle(const Event& event) override {
-        const int total = count();
-        if (!total) return;
+        const int total = static_cast<int>(entries_.size());
+        if (!total) {
+            if (event.key == Key::SetLong || event.key == Key::OkDouble) goHome();
+            return;
+        }
         if (event.delta) {
             selected_ = wrap(selected_ + event.delta, total);
             return;
@@ -67,12 +117,13 @@ public:
             case Key::Prev: selected_ = wrap(selected_ - 1, total); break;
             case Key::Ok:
             case Key::Set:
-                if (catalog_ && selected_ < static_cast<int>(catalog_->stories.size())) {
-                    openStory(static_cast<std::size_t>(selected_));
-                }
+                activate();
+                break;
+            case Key::OkLong:
+            case Key::OkDouble:
+                ascend();
                 break;
             case Key::SetLong:
-            case Key::OkDouble:
                 goHome();
                 break;
             default:
@@ -84,7 +135,7 @@ public:
         auto latest = App::catalog();
         if (latest != catalog_) {
             catalog_ = latest;
-            invalidate();
+            reload();
         }
     }
 
@@ -92,9 +143,9 @@ public:
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
         g.fillScreen(c.paper);
-        drawTopBar(g, "故事");
+        drawTopBar(g, path_ == "/story" ? "故事" : baseName(path_).c_str());
 
-        const int total = count();
+        const int total = static_cast<int>(entries_.size());
         int top = selected_ - (kVisibleRows - 1);
         if (top > total - kVisibleRows) top = total - kVisibleRows;
         if (top < 0) top = 0;
@@ -103,20 +154,50 @@ public:
         for (int row = 0; row < kVisibleRows; ++row) {
             const int index = top + row;
             if (index >= total) break;
-            const auto& story = catalog_->stories[index];
-            const int y = kListRowY + row * kListRowHeight;
-            drawRow(g, y, story, index == selected_);
+            drawRow(g, kListRowY + row * kListRowHeight, entries_[index],
+                    index == selected_);
         }
 
         g.setFont(Fonts::small());
         g.setTextColor(c.text, c.paper);
-        g.drawCenterString("旋钮选择  OK 播放  SET 长按回主页", 160, 224);
+        g.drawCenterString(total ? "OK 打开  长按OK返回上级  SET 长按回主页"
+                                 : "这个文件夹没有故事",
+                           160, 224);
     }
 
 private:
-    int count() const { return catalog_ ? static_cast<int>(catalog_->stories.size()) : 0; }
+    void reload() {
+        entries_.clear();
+        if (!catalog_) return;
+        entries_ = entriesAt(*catalog_, path_);
+        if (selected_ >= static_cast<int>(entries_.size())) selected_ = 0;
+        invalidate();
+    }
 
-    void drawRow(lgfx::LGFXBase& g, int y, const Media::Story& story, bool selected) {
+    void ascend() {
+        if (path_ == "/story") {
+            goHome();
+            return;
+        }
+        const auto slash = path_.find_last_of('/');
+        path_ = slash <= 5 ? std::string("/story") : path_.substr(0, slash);
+        selected_ = 0;
+        reload();
+    }
+
+    void activate() {
+        if (selected_ < 0 || selected_ >= static_cast<int>(entries_.size())) return;
+        const auto& entry = entries_[selected_];
+        if (entry.directory) {
+            path_ = entry.path;
+            selected_ = 0;
+            reload();
+        } else {
+            openStory(entry.story);
+        }
+    }
+
+    void drawRow(lgfx::LGFXBase& g, int y, const BrowseEntry& entry, bool selected) {
         const auto& c = Theme::colors();
         const uint16_t background = selected ? c.yellow : TFT_WHITE;
         if (selected) g.fillRoundRect(13, y + 3, 300, kListRowHeight, 6, c.ink);
@@ -124,15 +205,26 @@ private:
         g.fillRoundRect(12, y + 2, 296, kListRowHeight - 4, 5, background);
         if (!selected) g.drawRoundRect(10, y, 300, kListRowHeight, 6, c.track_border);
 
+        if (entry.directory) {
+            // Folder glyph, drawn rather than shipped as an asset.
+            g.fillRoundRect(24, y + 12, 16, 12, 2, c.aqua_dark);
+            g.fillRect(24, y + 9, 7, 4, c.aqua_dark);
+            g.fillRoundRect(24, y + 14, 16, 10, 2, c.aqua);
+        }
+
         char title[96];
-        Theme::fitText(g, story.title.c_str(), 210, title, sizeof(title));
+        Theme::fitText(g, entry.label.c_str(), entry.directory ? 220 : 210, title, sizeof(title));
         g.setFont(Fonts::body());
         g.setTextColor(c.text, background);
-        g.drawString(title, 24, y + 8);
+        g.drawString(title, entry.directory ? 48 : 24, y + 8);
 
         g.setFont(Fonts::small());
         g.setTextColor(c.text, background);
-        g.drawRightString(kindLabel(story.kind), 296, y + 11);
+        if (entry.directory) {
+            g.drawRightString(">", 296, y + 11);
+        } else if (catalog_ && entry.story < catalog_->stories.size()) {
+            g.drawRightString(kindLabel(catalog_->stories[entry.story].kind), 296, y + 11);
+        }
     }
 
     void requestScan() {
@@ -151,11 +243,13 @@ private:
         ctx().catalog_ready = ok;
         catalog_ = App::catalog();
         selected_ = 0;
-        invalidate();
+        reload();
         if (!ok) notify("扫描失败，请检查 TF 卡");
     }
 
     int selected_ = 0;
+    std::string path_ = "/story";
+    std::vector<BrowseEntry> entries_;
     CatalogPtr catalog_;
 };
 

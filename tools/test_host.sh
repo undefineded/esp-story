@@ -20,6 +20,10 @@ g++ -std=c++17 -pthread -Wall -Wextra -Werror -pedantic "${compat[@]}" \
     -Icomponents/media/include -Icomponents/storage/include -Isrc \
     test/media_cache_test.cpp components/media/media_library.cpp components/media/media_cache.cpp -o "$test_dir/media_cache"
 "$test_dir/media_cache"
+g++ -std=c++17 -pthread -Wall -Wextra -Werror -pedantic "${compat[@]}" \
+    -Icomponents/video/include -Icomponents/storage/include \
+    test/avi_index_test.cpp components/video/avi_index.cpp -o "$test_dir/avi"
+"$test_dir/avi"
 g++ -std=c++17 -Wall -Wextra -Werror -pedantic -DARDUINO "${compat[@]}" \
     -Itest/pn532_host -Isrc test/pn532_host/test_pn532.cpp src/pn532.cpp -o "$test_dir/pn532"
 "$test_dir/pn532"

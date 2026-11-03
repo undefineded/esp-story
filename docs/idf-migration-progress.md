@@ -179,6 +179,38 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
   Windows 上仍受 POSIX `rename` 覆盖语义与 UTF-8 路径限制，未跑通；以 Linux/CI 为准。
 - 构建：默认配置通过，`storybox.bin` = `0x169a00` 字节。
 
+### P2（第三批）：故事目录逐级浏览
+
+- 故事列表改为真正的目录浏览：从 `/story` 开始，目录行由扁平索引按路径**即时推导**
+  （不进索引格式），目录优先排序、故事在后；OK 打开目录/播放故事，长按 OK 返回
+  上一级（到根再回主页），长按 SET 直接回主页。
+- 顶栏标题显示当前目录名，目录行画文件夹图标、故事行显示 `图文/音频`。
+- 构建：`storybox.bin` = `0x16ad00` 字节。
+
+### P3（第一批）：视频索引与视频页
+
+- 存储层给 `FileStream` 增加 `seek()/tell()`（容器格式需要随机访问；租约语义不变）。
+- 新增 `components/video`：
+  - `AviIndex`：解析 RIFF/`hdrl`（`avih` 取宽高与帧间隔、`strl` 取 `vids`
+    处理器的 fourcc 与 `dwScale/dwRate`），顺序扫描 `movi` 记录 `00dc/00db`
+    视频块偏移，跳过音频块；帧数上限 8000、单帧上限 192 KiB；
+    编码从 `strh` 处理器判定，缺失时用首帧 `qoif`/JPEG SOI 兜底。
+  - `scanLibrary()`：列 `/video` 下的 AVI（不递归、按名排序），`audioPathFor()`
+    求同名 `.mp3` 旁白。
+- UI：视频列表页（胶片图标、AVI 标签）+ 播放页（按 `frameInterval` 取帧、
+  `drawQoi`/`drawJpg` 解码、可选同名 MP3 旁白、播放/暂停、上下切换、
+  控制条每帧重绘、解码耗时角标）。背光沿用 25 kHz 默认值，未额外切换。
+- 验证：
+  - 新增 `test/avi_index_test.cpp`（主机测试，已并入 `tools/test_host.sh`）：
+    合成 MJPG/QOI 容器、帧偏移与内容、帧间隔/时长、超限拒绝、缺失文件与
+    无 `movi` 容器的拒绝；本机 MinGW 通过。
+  - 用 `tools/build_video.mjs` 生成的真实 108 MB AVI 实测解析：
+    `QOI 320x240 / 1966 帧 / 83 ms 间隔 / 163 s 时长`，抽查首帧、中间帧、
+    末帧均读出且首字节为 `qoif`。
+  - 固件构建通过：`storybox.bin` = `0x16e3c0` 字节。
+- 已知限制：音视频仅“同时起播”，没有漂移校正；解码超时靠跳帧而不是丢帧统计；
+  未做真机帧率/发热验收（PSRAM 带宽与 SPI 推屏是主要风险点）。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
