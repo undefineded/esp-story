@@ -489,6 +489,34 @@ BLE → USB → NFC → 家长 → 电源 → OTA」十组给出可执行步骤�
 全部链接通过；OTA 配置最小 app 分区 3 MiB，余量约 39%。本轮比上一轮每套配置约 +4 KiB
 （确认 FRAM 那套 +5.5 KiB，因为家长命令的真实分支只有它编译）。
 
+### 真机首晚：BLE 与 NVS 两个 bug（2026-11-04）
+
+第一块板子上电 1.4 秒就否掉两条「编译通过」的假设，两处都是编译期看不出来的：
+
+- **BLE 从未注册过**：TX 特征定义里 `access_cb = nullptr`。NimBLE 5.5 的
+  `ble_gatts_chr_is_sane()` 对任何没有访问回调的特征都返回 0（哪怕是 notify-only），
+  于是 `ble_gatts_count_cfg()` 返回 `BLE_HS_EINVAL`(3)，服务未注册、无广播、无法连接。
+  日志表现是 `E ble: GATT registration failed: 3/0`。
+- **产品路径从未初始化 NVS**：`nvs_flash_init()` 只出现在 WiFi 服务里，产品启动不走那条路，
+  所以 `phy_init` 打印 `NVS has not been initialized` 并每次启动重做 RF 校准，
+  NimBLE 也没有地方存放绑定/CCCD 状态。已在 `app_main` 最前面初始化（带擦除重试）。
+
+修复后同一块板：`GAP procedure initiated: advertise` + `BLE service 'StoryBox' starting`，
+启动不再有 phy/NVS 告警。**修复版重新构建了五套配置**：
+
+| 配置 | 修复前 | 修复后 | SHA256 前 16 位 |
+|---|---|---|---|
+| 默认产品 | `0x1C8390` | `0x1CAA30` | `E23778F76E12F550` |
+| 产品 + USB | `0x1D1FB0` | `0x1D3BC0` | `1BDA5C12B9949940` |
+| 产品 + USB + OTA | `0x1D24E0` | `0x1D40F0` | `09A5CC882B6D9CD5` |
+| 深睡 | `0x1CAE10` | `0x1CD510` | `727E0D97BE430EF9` |
+| 确认 FRAM | `0x1CAB40` | `0x1CD1F0` | `78CD5E619B6C97F6` |
+
+同一晚的其它真机观察（记录在 [验收记录](idf-acceptance-log.md)）：Flash 16 MB / QIO 80 MHz、
+PSRAM 8 MB 但只跑 **40 MHz**、CPU **160 MHz**、SD 挂载正常、`display: PSRAM canvas ready`；
+PN532 探测失败（`NoDevice`）但 I2C 总线活着，扫描到 `0x50`~`0x57`（FRAM/EEPROM 区），
+且探测失败后仍每 3.5 s 刷 I2C NACK。
+
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 
 迁移分支：`feature/esp-idf-migration`。
