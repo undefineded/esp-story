@@ -11,7 +11,7 @@
 namespace App {
 namespace {
 
-constexpr int kItemCount = 8;
+constexpr int kItemCount = 9;
 constexpr int kVisibleRows = 4;
 constexpr int kRowY = 34;
 constexpr int kRowHeight = 44;
@@ -154,6 +154,9 @@ public:
                 case 6:
                     drawRow(g, y, "蓝牙广播", ctx().settings.ble ? "开" : "关", is_selected, -1);
                     break;
+                case 7:
+                    drawRow(g, y, "家长设置", parentalReady() ? "单击进入" : "不可用", is_selected, -1);
+                    break;
                 default:
                     drawRow(g, y, "显示绑定码", "单击查看", is_selected, -1);
                     break;
@@ -226,6 +229,7 @@ private:
                 notify(ctx().settings.ble ? "蓝牙广播已开启" : "蓝牙广播已关闭");
                 saveSettings();
                 break;
+            case 7: openParentalSettings(); break;
             default: openBindCode(); break;
         }
     }

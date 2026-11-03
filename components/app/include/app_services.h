@@ -49,6 +49,17 @@ const char* lockReasonText(Persistence::PolicyLock lock);
 uint32_t parentalUsedSeconds();
 const char* parentalLockCode();
 
+// Parental settings editing. The page is gated by the PIN: unlockParental()
+// marks the session (5 minutes) so re-entering the page does not ask again.
+Persistence::ParentalRecord parentalRecord();
+bool parentalApply(const Persistence::ParentalRecord& record);
+bool parentalHasPin();
+bool parentalUnlocked();
+bool unlockParental(const char* pin);
+void lockParentalSession();
+bool parentalSetPin(const char* pin);
+void openParentalSettings();
+
 Media::Catalog emptyCatalog();
 
 }

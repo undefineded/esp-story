@@ -73,6 +73,7 @@ Persistence::ParentalStore<Board::FramDevice>* s_parental_store = nullptr;
 Persistence::ParentalPolicy s_policy;
 bool s_parental_ready = false;
 uint32_t s_parental_save_at = 0;
+uint32_t s_parental_unlock_at = 0;
 uint32_t s_ble_publish_at = 0;
 
 #if CONFIG_STORYBOX_USB_PROTOCOL
@@ -710,6 +711,67 @@ const char* parentalLockCode() {
         case Persistence::PolicyLock::Remote: return "remote";
         default: return "";
     }
+}
+
+Persistence::ParentalRecord parentalRecord() {
+    Persistence::ParentalRecord record{};
+    if (s_parental_ready) record = s_policy.record();
+    return record;
+}
+
+bool parentalApply(const Persistence::ParentalRecord& record) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_parental_store) return false;
+    Persistence::ParentalRecord candidate = record;
+    candidate.checksum = Persistence::parentalChecksum(candidate);
+    if (!Persistence::validParentalRecord(candidate)) return false;
+    if (!s_parental_store->save(candidate)) return false;
+    s_parental_ready = s_policy.begin(s_parental_store->value(), nowMs());
+    return s_parental_ready;
+#else
+    (void)record;
+    return false;
+#endif
+}
+
+bool parentalHasPin() {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    return s_parental_store && Persistence::parentalHasPin(s_parental_store->value());
+#else
+    return false;
+#endif
+}
+
+bool parentalUnlocked() {
+    if (!s_parental_ready) return false;
+    if (!parentalHasPin()) return true;
+    return s_parental_unlock_at != 0 && nowMs() - s_parental_unlock_at < 300000;
+}
+
+bool unlockParental(const char* pin) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_parental_ready || !s_parental_store) return false;
+    if (!Persistence::parentalVerifyPin(s_parental_store->value(), pin ? pin : "")) return false;
+    s_parental_unlock_at = nowMs();
+    return true;
+#else
+    (void)pin;
+    return false;
+#endif
+}
+
+void lockParentalSession() { s_parental_unlock_at = 0; }
+
+bool parentalSetPin(const char* pin) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_parental_ready) return false;
+    Persistence::ParentalRecord record = s_policy.record();
+    if (!Persistence::parentalSetPin(record, randomU32, pin ? pin : "")) return false;
+    return parentalApply(record);
+#else
+    (void)pin;
+    return false;
+#endif
 }
 
 bool saveSettings() {
