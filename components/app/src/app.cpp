@@ -1,0 +1,339 @@
+#include "app.h"
+
+#include <cstdio>
+#include <cstring>
+
+#include "app_context.h"
+#include "app_page.h"
+#include "app_theme.h"
+#include "config.h"
+#include "display.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "fonts.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "hall.h"
+#include "input.h"
+#include "i2c_bus.h"
+#include "media_library.h"
+#include "playback.h"
+#include "sd_volume.h"
+#include "sdkconfig.h"
+#include "storage_access.h"
+
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+#include "fram_device.h"
+#include "media_records.h"
+#include "settings_record.h"
+#endif
+
+namespace App {
+namespace {
+
+constexpr char kTag[] = "app";
+constexpr int kMaxDepth = 6;
+constexpr uint32_t kFrameIntervalMs = 20;
+
+Context s_context;
+Page* s_stack[kMaxDepth] = {};
+int s_depth = 0;
+
+Audio::Playback* s_playback = nullptr;
+
+char s_notice[96] = {};
+uint32_t s_notice_until = 0;
+
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+Persistence::SettingsStore<Board::FramDevice>* s_settings_store = nullptr;
+Persistence::MediaRecords<Board::FramDevice>* s_records_store = nullptr;
+#endif
+
+uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
+
+void drawBoot(const char* title, const char* line) {
+    auto& g = Display::canvas();
+    const auto& c = Theme::colors();
+    Theme::setTopBarColor(c.coral);
+    g.fillScreen(c.paper);
+    g.fillRect(0, 0, 320, 30, c.coral);
+    g.fillRect(0, 30, 320, 2, c.coral_dark);
+    Theme::drawSmileFace(g, 19, 15, 10);
+    g.setFont(Fonts::body());
+    g.setTextColor(TFT_WHITE, c.coral);
+    g.drawString("小小故事盒", 36, 7);
+
+    Theme::drawSmileFace(g, 160, 92, 16);
+    g.setFont(Fonts::title());
+    g.setTextColor(c.text, c.paper);
+    g.drawCenterString(title, 160, 126);
+    if (line && line[0]) {
+        g.setFont(Fonts::body());
+        g.drawCenterString(line, 160, 158);
+    }
+}
+
+void sampleInput(Event& event) {
+    const int steps = Input::encoderSteps();
+    const auto ok = Input::okEvent();
+    const auto next = Input::nextEvent();
+    const auto prev = Input::prevEvent();
+    const auto set = Input::encEvent();
+
+    event.delta = steps;
+    if (ok == 1) event.key = Key::Ok;
+    else if (ok == 2) event.key = Key::OkDouble;
+    else if (ok == 3) event.key = Key::OkLong;
+    else if (next == 1) event.key = Key::Next;
+    else if (next == 2) event.key = Key::NextLong;
+    else if (prev == 1) event.key = Key::Prev;
+    else if (prev == 2) event.key = Key::PrevLong;
+    else if (set == 1) event.key = Key::Set;
+    else if (set == 2) event.key = Key::SetLong;
+}
+
+void run() {
+    Display::begin();
+    Fonts::begin();
+    Input::begin();
+    Hall::begin();
+    Theme::init();
+    drawBoot("正在启动", "");
+    Display::present(true);
+
+    s_context.fram_confirmed =
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+        true;
+#else
+        false;
+#endif
+
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    static Board::I2cBus bus;
+    static Board::FramDevice fram(
+#if CONFIG_STORYBOX_BOARD_REV_20261028
+        Board::rev20261028
+#else
+        Board::legacy
+#endif
+    );
+    static Persistence::SettingsStore<Board::FramDevice> settings(fram);
+    static Persistence::MediaRecords<Board::FramDevice> records(fram);
+    if (bus.begin() == ESP_OK && fram.begin(bus.handle(), true) == ESP_OK) {
+        const auto settings_result = settings.load();
+        s_context.fram_ready = settings_result != Persistence::LoadResult::IoError;
+        if (s_context.fram_ready) {
+            s_context.settings = settings.value();
+            s_settings_store = &settings;
+            Display::setBrightness(s_context.settings.brightness);
+            Display::setRotation(s_context.settings.rotation);
+            if (records.load()) {
+                s_records_store = &records;
+                s_context.volume = records.session().volume;
+            } else {
+                ESP_LOGW(kTag, "volume/favorites record unreadable; using defaults");
+            }
+        } else {
+            ESP_LOGW(kTag, "settings read failed; persistence disabled this boot");
+        }
+    } else {
+        ESP_LOGW(kTag, "FRAM unavailable; running with RAM-only settings");
+    }
+#else
+    ESP_LOGW(kTag, "FRAM not confirmed in this build; settings are RAM-only");
+#endif
+
+    static Storage::SdVolume volume;
+    s_context.sd_mounted = volume.mount() == ESP_OK;
+    ESP_LOGI(kTag, "SD mount: %s", s_context.sd_mounted ? "ok" : "unavailable");
+
+    static Storage::AccessGate gate;
+    static Media::Library library(gate);
+    static Audio::Playback playback(gate);
+    s_playback = &playback;
+    ESP_ERROR_CHECK(playback.begin());
+    playback.setVolume(static_cast<unsigned>(s_context.volume));
+    playback.setEq(static_cast<Audio::EqPreset>(s_context.settings.eq));
+
+    if (s_context.sd_mounted) {
+        if (library.loadCache(Storage::SdVolume::root)) {
+            s_context.catalog_ready = true;
+            ESP_LOGI(kTag, "media index loaded");
+        } else {
+            ESP_LOGI(kTag, "media index missing; scan deferred to the library page");
+        }
+    }
+
+    goHome();
+
+    uint32_t last_volume_save = nowMs();
+    int last_saved_volume = s_context.volume;
+    bool last_hall = Hall::detected();
+    s_context.hall = last_hall;
+
+    for (;;) {
+        const uint32_t now = nowMs();
+
+        Event event;
+        sampleInput(event);
+        if (!event.empty()) {
+            Page* page = s_stack[s_depth - 1];
+            page->handle(event);
+            page->invalidate();
+        }
+
+        const bool hall = Hall::detected();
+        if (hall != last_hall) {
+            last_hall = hall;
+            s_context.hall = hall;
+            s_stack[s_depth - 1]->invalidate();
+        }
+
+        Page* page = s_stack[s_depth - 1];
+        page->tick(now);
+
+        if (s_notice_until && now >= s_notice_until) {
+            s_notice_until = 0;
+            page->invalidate();
+        }
+
+        if (page->dirty()) {
+            page->draw();
+            if (s_notice_until) {
+                auto& g = Display::canvas();
+                const auto& c = Theme::colors();
+                g.fillRect(0, 218, 320, 22, c.paper);
+                g.setFont(Fonts::body());
+                g.setTextColor(c.text, c.paper);
+                char line[96];
+                Theme::fitText(g, s_notice, 304, line, sizeof(line));
+                g.drawCenterString(line, 160, 220);
+            }
+            page->clean();
+            Display::present();
+        }
+
+        if (s_context.volume != last_saved_volume && now - last_volume_save >= 1000) {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+            if (s_records_store &&
+                s_records_store->saveVolume(static_cast<uint8_t>(s_context.volume))) {
+                last_volume_save = now;
+                last_saved_volume = s_context.volume;
+            }
+#endif
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(kFrameIntervalMs));
+    }
+}
+
+}  // namespace
+
+Context& ctx() { return s_context; }
+
+int volume() { return s_context.volume; }
+
+void setVolume(int value) {
+    if (value < 0) value = 0;
+    if (value > 21) value = 21;
+    s_context.volume = value;
+    if (s_playback) s_playback->setVolume(static_cast<unsigned>(value));
+}
+
+void stepVolume(int steps) {
+    if (!steps) return;
+    setVolume(s_context.volume + steps);
+}
+
+void applyEq(uint8_t preset) {
+    s_context.settings.eq = preset > 3 ? 0 : preset;
+    if (s_playback) s_playback->setEq(static_cast<Audio::EqPreset>(s_context.settings.eq));
+}
+
+bool saveSettings() {
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    if (!s_settings_store) return false;
+    s_settings_store->set(s_context.settings);
+    if (!s_settings_store->save()) {
+        ESP_LOGW(kTag, "settings write failed; value kept in RAM");
+        return false;
+    }
+    return true;
+#else
+    (void)s_context;
+    return false;
+#endif
+}
+
+void notify(const char* message, uint32_t duration_ms) {
+    std::snprintf(s_notice, sizeof(s_notice), "%s", message ? message : "");
+    s_notice_until = nowMs() + (duration_ms ? duration_ms : 1);
+}
+
+bool noticeActive() { return s_notice_until != 0; }
+const char* noticeText() { return s_notice; }
+
+uint8_t cycleMinutes(uint8_t current, int direction) {
+    static const uint8_t kMinutes[] = {0, 1, 3, 5, 10, 30};
+    constexpr int kCount = static_cast<int>(sizeof(kMinutes) / sizeof(kMinutes[0]));
+    int index = 0;
+    for (int i = 0; i < kCount; ++i) {
+        if (kMinutes[i] == current) {
+            index = i;
+            break;
+        }
+    }
+    index = (index + (direction >= 0 ? 1 : -1) + kCount) % kCount;
+    return kMinutes[index];
+}
+
+const char* minutesLabel(uint8_t minutes) {
+    switch (minutes) {
+        case 0: return "关闭";
+        case 1: return "1 分钟";
+        case 3: return "3 分钟";
+        case 5: return "5 分钟";
+        case 10: return "10 分钟";
+        default: return "30 分钟";
+    }
+}
+
+void pushPage(Page* page) {
+    if (!page || s_depth >= kMaxDepth) return;
+    if (s_depth) s_stack[s_depth - 1]->leave();
+    s_stack[s_depth++] = page;
+    page->enter();
+    page->invalidate();
+}
+
+void popPage() {
+    if (s_depth <= 1) return;
+    s_stack[--s_depth]->leave();
+    s_stack[s_depth - 1]->enter();
+    s_stack[s_depth - 1]->invalidate();
+}
+
+void goHome() {
+    while (s_depth > 1) popPage();
+    if (s_depth == 0) pushPage(createHomePage());
+    s_stack[0]->enter();
+    s_stack[0]->invalidate();
+}
+
+void openSettings() { pushPage(createSettingsPage()); }
+
+bool start() {
+    const auto created = xTaskCreate(
+        [](void*) {
+            run();
+            vTaskDelete(nullptr);
+        },
+        "app", 16384, nullptr, 3, nullptr);
+    if (created != pdPASS) {
+        ESP_LOGE(kTag, "cannot create app task");
+        return false;
+    }
+    return true;
+}
+
+}  // namespace App

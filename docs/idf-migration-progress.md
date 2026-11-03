@@ -76,6 +76,10 @@ idf.py -B build-usb -D SDKCONFIG=build-usb/sdkconfig \
 剩余主要工作：完整产品页面与应用授权入口、家长策略和绑定、BLE、USB 文件/NFC 路由、
 索引中断后的自动恢复、准确音频元数据/时间、OTA/生命周期/电源以及全部真机验收。
 
+产品 UI 骨架已接入（`components/app`，见 2026-11-03 批次）：首页与设置页可用，
+音乐/故事/视频页面仍是占位；构建入口由 `CONFIG_STORYBOX_APP_UI` 控制，
+启用外设诊断时仍优先进入诊断镜像。
+
 ### 家长控制本轮验证
 
 - 主机回归、MP3 适配器故障测试和 USB bootstrap 协议测试通过。
@@ -85,6 +89,53 @@ idf.py -B build-usb -D SDKCONFIG=build-usb/sdkconfig \
 - CI 增加 `test/sdkconfig.fram-compile-only` 编译覆盖；该产物不上传，
   配置文件不是物理板型确认凭据。CI 尚未远端执行。
 - 绑定/PIN/token 仍未迁移或开放；旧格式中的 FNV hash 不被宣称为安全鉴权。
+
+## 2026-11-03：P1 应用骨架与首页 / 设置页
+
+先把主线 Arduino 功能整体合入迁移分支（视频播放器、故事分类、递归故事目录、
+音频目录展开等），再在原生侧建立产品 UI 层。合并后的 `src/` 同时服务
+PlatformIO 与 IDF 双构建，冲突文件逐个保留两套路径：
+
+- `src/display.cpp`：背光保留 `#ifdef ARDUINO` 的 LEDC 路径与 IDF 原生
+  `ledc_timer_config` 路径；新增 `setBacklightFreq()` 的 IDF 实现
+  （`ledc_set_freq` + 重写占空比）。合并残留的多余右花括号会让
+  `Display` 命名空间提前闭合、把 `canvas()/present()` 挤到全局作用域，已修正。
+- `src/input.cpp`：编码器累加器统一走 `portMUX` 临界区（Arduino 的
+  `noInterrupts()` 在 IDF 下不可用），ISR 与任务共用同一把锁。
+- `src/pn532.cpp`：新增 `SB_PN532_LOG` 宏（Arduino=`Serial`，IDF=`ESP_LOGI`），
+  `logBusScan()` 在 IDF 下改用 `i2c_master_probe` 扫描共享总线，
+  `begin()` 用 `gpio_set_pull_mode` 只改上拉、不动开漏方向。
+
+新增 `components/app`（产品 UI 层）：
+
+- `app.cpp`：UI 任务（16384 字节栈、prio 3、20 ms 帧间隔）串起初始化与主循环：
+  Display → Fonts → Input → Hall →（确认 FRAM 时）Settings/MediaRecords →
+  SD 挂载 → AccessGate/Library/Playback；随后每帧采样输入、分发页面、
+  只在页面标脏时重绘并 `Display::present()`。音量折中写回 FRAM（1 s 去抖）。
+- 页面栈与 `Page` 接口（`enter/leave/handle/tick/draw/invalidate`），最深 6 层，
+  页面为进程级单例、不占堆；导航失败不会打断音频任务。
+- `app_theme`：调色板、UTF-8 安全截断（按码点回退，不再切断汉字）、品牌笑脸、
+  霍尔卡片与童锁角标（角标底色跟随当前顶栏）。
+- 首页：复刻 Arduino `drawHome()`——四张车票、主题底色、`home_scenes.h` /
+  `home_video_scene.h` 烘焙插画直接编入（无解码）、音量药丸、页码圆点、
+  旋钮/上下换焦点、OK 进入。音乐/故事/视频入口暂时只提示后续批次。
+- 设置页：亮度（10..100，步进 5）、旋转 0°/180°（切向即整屏重绘）、
+  EQ 四档含频响示意、播放中熄屏与无播放休眠的分钟循环、刷新列表/蓝牙/绑定码
+  占位项。旋钮调值、NEXT/PREV 换行、双击 OK 保存返回、长按 SET 保存回主页。
+  FRAM 未确认的构建只改 RAM，不伪装成已保存。
+
+构建配置：新增 `CONFIG_STORYBOX_APP_UI`（默认 y）。诊断入口优先级更高，
+既有 `sdkconfig.*-diagnostics` 语义不变。
+
+验证（本机新装 IDF 5.5.1，源码 commit
+`fcae32885b0296b32044cb99ecbdc50d98dddb83`）：默认配置构建通过，
+`storybox.bin` = `0x161890` 字节，app 分区剩余 83%；**未烧录、未做真机验收**。
+本机没有系统 Python，IDF 的 Python 环境建在
+`~/.espressif/python_env/idf5.5_py3.11_env`；组件管理器需要用
+`GIT_CONFIG_*` 临时关闭 `core.autocrlf`，否则 LovyanGFX 的检出内容哈希不匹配。
+
+已知限制：音乐/故事/视频页面仍是占位提示；熄屏、深睡、BLE、家长绑定/鉴权、
+USB 文件写与 NFC 路由、视频解码、OTA 均未接入。
 
 ## 2026-10-29：M0 启动 / M1 诊断骨架
 

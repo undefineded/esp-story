@@ -9,6 +9,9 @@
 .vscode/launch.json
 .vscode/ipch
 
+# 本机 IDF 工具链启动脚本 (含本机绝对路径), 不纳入版本管理
+/tools/idf/
+
 # 根目录的临时/参考文件 (音频/视频素材、电路网表), 不纳入版本管理
 /*.mp3
 /*.mp4

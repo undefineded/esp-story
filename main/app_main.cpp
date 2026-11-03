@@ -1,3 +1,4 @@
+#include "app.h"
 #include "diagnostics.h"
 #include "usb_transport.h"
 #include "sdkconfig.h"
@@ -9,7 +10,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-// M1 diagnostic entry point. No peripheral writes until M0 board verification.
+// Product entry point. Peripheral diagnostics take precedence when enabled:
+// those sdkconfig fragments are hardware acceptance builds, not products.
 extern "C" void app_main()
 {
     constexpr const char *tag = "storybox";
@@ -21,7 +23,7 @@ extern "C" void app_main()
 #else
     constexpr const char *board = "legacy (unverified)";
 #endif
-    ESP_LOGI(tag, "M1 skeleton; board=%s; IDF=%s; reset=%d",
+    ESP_LOGI(tag, "board=%s; IDF=%s; reset=%d",
              board, esp_get_idf_version(), static_cast<int>(esp_reset_reason()));
     uint32_t flash_bytes = 0;
     const esp_err_t result = esp_flash_get_size(nullptr, &flash_bytes);
@@ -34,11 +36,17 @@ extern "C" void app_main()
              static_cast<unsigned>(esp_psram_get_size()),
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
-    ESP_LOGW(tag, "Migration diagnostics; product services and hardware acceptance incomplete");
 #if CONFIG_STORYBOX_PERIPHERAL_DIAGNOSTICS
+    ESP_LOGW(tag, "Peripheral diagnostics build; product UI is not started");
     if (xTaskCreate([](void*) { runDiagnostics(); vTaskDelete(nullptr); },
                     "diagnostics", 12288, nullptr, 2, nullptr) != pdPASS) {
         ESP_LOGE(tag, "Cannot start diagnostics: insufficient memory");
     }
+#elif CONFIG_STORYBOX_APP_UI
+    if (!App::start()) {
+        ESP_LOGE(tag, "Cannot start the product UI");
+    }
+#else
+    ESP_LOGW(tag, "No UI selected (CONFIG_STORYBOX_APP_UI is off)");
 #endif
 }

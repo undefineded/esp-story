@@ -1,4 +1,13 @@
 menu "StoryBox migration"
+    config STORYBOX_APP_UI
+        bool "Run the product UI (home, settings, media pages)"
+        default y
+        help
+            Starts the native app task instead of the diagnostic loop.
+            Diagnostics take precedence when STORYBOX_PERIPHERAL_DIAGNOSTICS is
+            enabled, because those fragments are hardware acceptance builds.
+            Pages beyond home/settings are still being migrated; see
+            docs/idf-migration-progress.md.
     config STORYBOX_USB_FILE_WRITES
         bool "Enable diagnostic USB file uploads (not full desktop FS support)"
         depends on STORYBOX_USB_PROTOCOL && STORYBOX_AUDIO_DIAGNOSTICS
