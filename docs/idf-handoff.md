@@ -1,5 +1,7 @@
 # 交接文档：esp-story ESP-IDF 迁移
 
+> 历史现场交接，机器路径、构建脚本、镜像和待办可能已过期；当前入口见 [README](../README.md)，播放器见 [IDF 视频播放器](idf-video-player.md)。
+
 > **写于 2026-11-04 凌晨（第一块板子上机当晚）**。新会话请从头读完这一页：
 > 第 4 节是**未结的 bug**，第 8 节是可复制的命令。
 > 批次细节见 `docs/idf-migration-progress.md`，逐组真机结论见 `docs/idf-acceptance-log.md`。

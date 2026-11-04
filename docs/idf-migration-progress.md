@@ -1,5 +1,7 @@
 # ESP-IDF 迁移实施记录
 
+> 历史实施记录，包含阶段性结论和旧格式；当前入口及状态见 [README](../README.md)。
+
 > 新会话接手请先读 [交接文档](idf-handoff.md)：环境、构建入口、已完成/剩余、已知坑都在那里。
 
 ## 当前状态（后面的批次记录为历史过程）
@@ -357,7 +359,7 @@ USB 联合诊断配置（`sdkconfig.usb-diagnostics`，含 USB v4 + NFC + 音频
 
 ### P6（第三批）：OTA 双槽分区
 
-- 新增 [partitions.ota.csv](partitions.ota.csv)：16 MB Flash 的双槽布局 ——
+- 新增 [partitions.ota.csv](../partitions.ota.csv)：16 MB Flash 的双槽布局 ——
   `nvs` 0x9000、`otadata` 0xf000（IDF 引导器要求这个位置）、`phy_init` 0x11000、
   `ota_0` 0x20000 / 3 MiB、`ota_1` 0x320000 / 3 MiB。当前镜像 1.9 MB，
   每槽余量 41%。

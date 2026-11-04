@@ -1,26 +1,17 @@
 # 真机验收清单（迁移分支）
 
-本文件是**可执行**的验收步骤。迁移分支（`feature/esp-idf-migration`，领先 `main` 28 个提交）
-目前**只有编译层证据**，下面每一项都还没有真机结论。建议按顺序做，每完成一组把结论填进
-[验收记录](idf-acceptance-log.md)，再回填到 `docs/idf-migration-progress.md` 对应批次。
+本文件是当前 IDF 固件的验收清单。先记录提交、配置、素材和板型；历史板卡结果见
+[验收记录](idf-acceptance-log.md)，不能替代当前版本的验证。
 
 先决条件：一块确认过板型的 S3 板（N16R8）、PN532 模块、已格式化的 TF 卡、一根能供电的 USB 线。
 
 ## 0. 环境与烧录
 
-本机唯一可用的构建入口是 `tools/idf/idf.ps1`：直接调 `idf.py` 会缺 IDF 环境，`-D` 短选项会被
-当成构建目标（必须用 `--define-cache-entry`），脚本带 Zone.Identifier 所以必须
-`-ExecutionPolicy Bypass`。以下命令都在仓库根目录执行。
+启用 ESP-IDF 5.5.3 环境，按 [README](../README.md) 构建默认或产品组合配置。
 
-### 0.1 镜像（2026-11-04 第二轮，含 FRAM / UI / BLE 修复）
+### 0.1 镜像
 
-| 配置 | 构建目录 | `storybox.bin` | SHA256 前 16 位 | 用于 |
-|---|---|---|---|---|
-| 默认产品（BLE + NFC，单槽，**FRAM 已开**） | `build-ui` | `0x1FA310` | `A4E636111788868E` | 第 0/1/2/3/4/5/7/8 组，**已在板子上** |
-| 产品 + USB 协议 | `build-usb-product` | `0x203540` | `96D65A0BA0D0BB67` | 第 6 组；也用于 FRAM 写读复测 |
-| 产品 + USB + OTA 双槽 | `build-ota-usb` | 待重建 | — | 第 10 组，**改分区表，整片擦除** |
-| 深睡 | `build-power` | 待重建 | — | 第 9 组 |
-| 确认 FRAM（编译覆盖） | `build-fram` | 历史产物 | — | 默认已开 FRAM，这套只剩历史意义 |
+按当前提交重新构建，记录实际镜像大小、哈希与配置。默认固件使用单槽；USB、OTA 和深睡按需通过配置片段启用。切换分区表前备份 Flash 数据并核对烧录要求。
 
 默认镜像现在会真的写 FRAM（设置/音量/收藏/家长记录）。`FramDevice` 启动时会先做
 8 bank 写读探测，探测不通过会退回 RAM-only 并打 `FRAM` 警告，不会写坏记录。
@@ -32,7 +23,7 @@
 Get-CimInstance Win32_SerialPort | Select-Object DeviceID, Description
 
 # 烧录并监视（COMx 换成实际端口）
-powershell -ExecutionPolicy Bypass -File tools\idf\idf.ps1 -B build-ui --define-cache-entry SDKCONFIG=build-ui/sdkconfig -p COMx flash monitor
+idf.py -p COMx flash monitor
 ```
 
 `Ctrl+]` 退出 monitor。要留档就另开一个窗口跑 monitor，把关键日志粘进
@@ -40,7 +31,7 @@ powershell -ExecutionPolicy Bypass -File tools\idf\idf.ps1 -B build-ui --define-
 
 ### 0.3 第 0 组：上电冒烟（5 分钟，先做这个）
 
-1. 烧 `build-ui`，看启动日志。
+1. 烧当前默认构建，看启动日志。
 2. 预期：板型 / IDF 版本 / 复位原因 / Flash / PSRAM / 内部堆，随后出现首页四张车票。
 3. 顺手确认：屏幕不花、旋钮能移动焦点、喇叭无底噪或无啸叫。
 4. **失败即停**：如果连启动都不过（看门狗复位、PSRAM 报错、全白屏），先别往下做，
@@ -79,13 +70,12 @@ JPEG 解码失败 → `Display::drawStoryImage` 返回 false，控制台会打 �
 
 ## 4. 视频
 
-1. 用 `tools/build_video.mjs` 生成 `/video/xxx.avi`（+ 同名 mp3）。
-2. 进入「视频」→ 列表 → 播放：画面连续、底部时间/帧号/解码耗时可见。
-3. 观察角标里的 `xx ms`（单帧解码耗时）与是否有明显掉帧。
-4. 同名 mp3 存在时应有旁白；暂停时音视频同时停。
+1. 用 `tools/build_video.mjs` 生成内嵌 MP3 的 MJPEG AVI，放入 `/video`。
+2. 检查加载反馈、暂停、快速切换、返回、结束重播，以及视频与音乐之间切换。
+3. 连续播放至少 10 分钟，检查音画同步、丢帧和异常复位；测试熄屏超时附近的结束收尾。
+4. 使用 USB 性能字段记录后端帧与 LCD 提交量；其口径和局限见 [播放器文档](idf-video-player.md)。
 
-**失败信号**：花屏 → QOI/JPEG 解码或 AVI 帧偏移；卡顿 → PSRAM 带宽或 SPI 推屏。
-记录：实测帧率、单帧耗时、是否发热明显。
+记录实际素材、测量方法和结果，不把后端帧数当作面板实际帧率。
 
 ## 5. BLE 控制（小程序/桌面端）
 
@@ -111,7 +101,7 @@ JPEG 解码失败 → `Display::drawStoryImage` 返回 false，控制台会打 �
 
 1. 用 `sdkconfig.usb-product` 构建并烧录，打开桌面端文件管理器。
 2. `hello` 应声明 `fs_transfer`；列出 `/music`、`/story`。
-3. 上传一个小 mp3 到已有目录 → 成功后设备提示“媒体已更新”，列表出现新曲目。
+3. 上传一个小 mp3 到已有目录，结束会话并等待空闲刷新，确认列表更新。
 4. 传输中断开 USB：设备侧会话应在 60 s 内释放（`AUDIO_BUSY` 消失）。
 
 **失败信号**：桌面端页面不开 → features 不含 `fs*`；上传失败 → 看 `FileReader` 返回的 `err` 码。
@@ -119,7 +109,7 @@ JPEG 解码失败 → `Display::drawStoryImage` 返回 false，控制台会打 �
 ## 7. NFC 状态
 
 1. 桌面端或 `sys` 调试口发 `{"cmd":"nfc","act":"status"}`。
-2. 无卡：`module:true, card:false`；放卡：`card:true` + `kind/uid`。
+2. 无卡与放卡时检查返回的模块、卡片状态；原始读写和 NDEF 写入尚未接入 USB 路由。
 3. 拔掉 PN532：应返回 `NFC_UNAVAILABLE`，设备其余功能不受影响。
 
 ## 8. 家长控制
@@ -148,5 +138,4 @@ JPEG 解码失败 → `Display::drawStoryImage` 返回 false，控制台会打 �
 
 ## 回填
 
-结论写进 [验收记录](idf-acceptance-log.md)（每次上机一段，模板在那边），
-然后再挑一条汇总回 `docs/idf-migration-progress.md` 的对应批次。
+结论写进 [验收记录](idf-acceptance-log.md)，注明当前提交和实际配置。

@@ -2,6 +2,8 @@
 
 小小故事盒的 PN532 NFC 桌面工作台。Electron + React + TypeScript，通过 USB CDC 与 ESP32-S3 固件通信。
 
+> 当前 ESP-IDF 固件的 USB NFC 路由仅提供状态查询，原始读写和 NDEF 写入尚未接入；文件路由也未实现新建、删除和重命名。下文的界面与演示模式功能不等于当前固件能力，连接前请参阅 [PN532 能力边界](../docs/pn532-i2c.md) 和 [USB 文件传输](../docs/file-transfer-refactor.md)。CPU 负载尚无有效测量值。
+
 界面配色参考 `C:\code\SMALL_WX` 小程序首页设计：蓝色主色、冷灰背景、白色卡片和轻阴影，避免大面积深色块。
 
 ![概览](../docs/nfc-studio-dashboard.png)
@@ -82,7 +84,7 @@ $env:NFC_USER_DATA_DIR = "D:\StoryBoxData"
 
 ## 使用流程
 
-1. USB 连接 ESP32-S3（固件需包含 `hostlink.cpp`，见 [`docs/pn532-i2c.md`](../docs/pn532-i2c.md)）。
+1. USB 连接使用 `sdkconfig.usb-product` 构建的 ESP32-S3，按 hello 能力确认支持范围，见 [PN532 说明](../docs/pn532-i2c.md)。
 2. 打开上位机 → **设备与连接** → 选择 `COMx`（Espressif / CP210x / CH340）→ 连接。
 3. 确认顶部出现 `PN532 1.6`，模块卡片显示“在线”。
 4. 把 NTAG 卡片放到 PN532 线圈上方 2–3 cm。
@@ -130,20 +132,19 @@ src/renderer/src/
 - 请求 id 与响应匹配、5s 心跳、3 次心跳失败自动重连。
 - 将非 JSON 的设备日志原样送到 UI 日志面板。
 - 事件：`conn:status`、`device:event`、`log:entry`。
-- 文件传输：`fs.list/mkdir/remove/rename/read/write/rescan`，内容以原始二进制分块传输；下载写入本机文件，上传支持浏览器拖放和 Windows 剪贴板路径（含文件夹）。
+- 文件界面包含 `fs.list/mkdir/remove/rename/read/write/rescan` 调用；当前 IDF 支持列表与文件读写等子集，详细能力见传输协议说明。数据以原始二进制分块传输。
 
 ### 协议
 
-USB 使用 SBX4 二进制帧，JSON 元数据版本为 v4，文件数据不使用 Base64。两端必须一起更新；详见 [传输协议](../docs/file-transfer-refactor.md)。旧协议文档中的动作名称仍有参考价值，线格式以新协议为准。
+USB 使用 SBX4 二进制帧，JSON 元数据版本为 v4，文件数据不使用 Base64。以下是帧内 JSON 元数据示例，不是可直接按行发送的完整帧；详见 [传输协议](../docs/file-transfer-refactor.md)。
 
 ```json
 {"v":4,"id":3,"cmd":"nfc","act":"status"}
-{"v":4,"evt":"nfc","type":"card","card":{...}}
 {"v":4,"id":4,"cmd":"sys","act":"stats"}
 {"v":4,"id":5,"cmd":"sys","act":"set","volume":14,"brightness":80}
 ```
 
-`sys · stats` 返回 CPU、RAM/PSRAM、Flash/APP、TF 卡、设备设置和当前播放器状态；`sys · set` 支持音量与亮度，返回更新后的同一份状态。旧固件没有这两个动作时，设备中心会提示升级固件。
+`sys · stats` 返回 CPU、RAM/PSRAM、Flash/APP、TF 卡、设备设置和当前播放器状态；CPU 负载的 `loadValid=false` 表示没有有效测量。`sys · set` 支持音量与亮度。
 
 ### 为什么要做扩展层
 

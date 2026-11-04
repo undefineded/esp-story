@@ -1,5 +1,7 @@
 # ESP32-S3 故事机全量迁移至 ESP-IDF 的实施计划
 
+> 历史规划，保留用于追溯；架构、依赖和功能状态以 [当前 README](../README.md) 及代码为准。
+
 编制日期：2026-10-28  
 工程目录：`esp-ccc`  
 目标平台：ESP32-S3-WROOM-1U-N16R8  
@@ -1023,7 +1025,7 @@ AFE 没有硬件输入时用离线夹具完成软件验证即可，并保留“�
 | 证据 | 相关文件 |
 | --- | --- |
 | 构建、引脚、分区 | [platformio.ini](../platformio.ini)、[config.h](../src/config.h)、[partitions.csv](../partitions.csv) |
-| 新硬件器件与网络 | [2026-10-28 网表](../Netlist_Schematic1_1_2026-10-28.enet)，关注 U1/U3/U5/U12/U13/U14/U15 |
+| 新硬件器件与网络 | 2026-10-28 网表（未包含在当前仓库），关注 U1/U3/U5/U12/U13/U14/U15 |
 | 初始化、页面和播放恢复 | [main.cpp](../src/main.cpp)，`setup()`、`loop()`、`restoreSessionPlayback()` |
 | 音频所有权、队列与停止 | [player.cpp](../src/player.cpp)，`audioTask()`、`enqueue()`、`stopAndWait()` |
 | 当前旧 I2S 依赖 | `.pio/libdeps/esp32-s3-devkitm-1/ESP32-audioI2S-master/src/Audio.h` 与 `Audio.cpp` |
