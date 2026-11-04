@@ -58,12 +58,8 @@ public:
     const char* id() const override { return "video-list"; }
 
     void enter() override {
-        const auto revision = storageGate().revision();
-        if (!scanned_ || revision != revision_) {
-            entries_ = Video::scanLibrary(Storage::SdVolume::root);
-            revision_ = revision;
-            scanned_ = true;
-        }
+        if (!cache_.refresh(storageGate(), Storage::SdVolume::root))
+            notify("视频目录暂不可用，请稍后重新进入");
         if (selected_ >= static_cast<int>(entries_.size())) selected_ = 0;
         invalidate();
     }
@@ -144,10 +140,9 @@ private:
     }
 
     void openVideo(std::size_t index);
-    std::vector<Video::Entry> entries_;
+    Video::LibraryCache cache_;
+    const std::vector<Video::Entry>& entries_ = cache_.entries;
     int selected_ = 0;
-    bool scanned_ = false;
-    uint64_t revision_ = 0;
 };
 
 class VideoPlayerPage final : public Page {
@@ -250,7 +245,9 @@ public:
                        status_.state == Video::State::Playing);
         if (status_.state == Video::State::Failed || status_.state == Video::State::Finished) {
             const bool failed = status_.state == Video::State::Failed;
-            finish_pending_ = true;
+            // Resource cleanup must not depend on draw(): power policy can
+            // suppress drawing in this very iteration. Keep the last canvas.
+            Video::close(!failed);
             setVideoActive(false);
             setCurrentVideo(-1);
             setNowPlaying("idle", "");
@@ -267,7 +264,6 @@ public:
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
         if (!error_.empty()) {
-            if (finish_pending_) { Video::close(); finish_pending_ = false; }
             Display::setVideoMode(false);
             g.fillScreen(c.paper);
             drawTopBar(g, "视频");
@@ -290,10 +286,9 @@ public:
             g.fillScreen(TFT_BLACK);
             g.setFont(Fonts::body());
             g.setTextColor(TFT_WHITE, TFT_BLACK);
-            g.drawCenterString("正在加载视频…", 160, 110);
+            g.drawCenterString(finished_ ? "播放完毕，OK 重播" : "正在加载视频…", 160, 110);
         }
         Display::setVideoMode(true);
-        if (finish_pending_) { Video::close(true); finish_pending_ = false; }
         drawOverlay();
     }
 
@@ -304,7 +299,6 @@ private:
         setVideoActive(false);
         setCurrentVideo(-1);
         Display::setVideoMode(false);
-        finish_pending_ = false;
         has_frame_ = false;
         error_.clear();
     }
@@ -381,7 +375,6 @@ private:
     std::size_t index_ = 0;
     std::string title_, error_;
     std::vector<Video::Entry> entries_;
-    bool finish_pending_ = false;
     bool has_frame_ = false;
     Video::Status status_{};
     bool paused_ = false;

@@ -174,7 +174,9 @@ lgfx::LGFXBase& canvas() {
 void present(bool force) {
   if (!s_buffered || !s_dirty) return;
   uint32_t now = millis();
-  if (!force && now - s_presentAt < 33) return;
+  // Video is paced by the UI's microsecond frame deadline. A second millis
+  // throttle can skip an entire frame when drawing time varies slightly.
+  if (!force && !s_videoMode && now - s_presentAt < 33) return;
   s_presentAt = now;
   const auto started = esp_timer_get_time();
   uint32_t bytes = 0;

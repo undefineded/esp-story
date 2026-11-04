@@ -1,5 +1,6 @@
 #include "app.h"
 #include "video_player.h"
+#include "frame_pacing.h"
 
 #include <cstdio>
 #include <cstring>
@@ -419,6 +420,8 @@ void addSystemStats(cJSON* data) {
     cJSON_AddNumberToObject(perf, "videoStopAudioMs", video.stop_audio_ms);
     cJSON_AddNumberToObject(perf, "videoQueueMs", video.queue_ms);
     cJSON_AddNumberToObject(perf, "videoCloseMs", video.close_ms);
+    cJSON_AddNumberToObject(perf, "videoCommandQueueMs", video.command_queue_ms);
+    cJSON_AddNumberToObject(perf, "videoCommandCloseMs", video.command_close_ms);
     cJSON_AddNumberToObject(perf, "videoControlStackMinBytes", video.control_stack_min_bytes);
     cJSON_AddNumberToObject(perf, "videoSetupMs", video.setup_ms);
     cJSON_AddNumberToObject(perf, "videoRunMs", video.run_ms);
@@ -930,7 +933,18 @@ void run() {
     bool last_hall = Hall::detected();
     s_context.hall = last_hall;
 
+    // This task owns its notification slot. The one-shot timer wakes it at a
+    // sub-tick deadline, avoiding another 10ms tick after a full SPI transfer.
+    esp_timer_handle_t frame_timer = nullptr;
+    esp_timer_create_args_t frame_args{};
+    frame_args.callback = [](void* task) { xTaskNotifyGive(static_cast<TaskHandle_t>(task)); };
+    frame_args.arg = xTaskGetCurrentTaskHandle();
+    frame_args.name = "ui-frame";
+    if (esp_timer_create(&frame_args, &frame_timer) != ESP_OK)
+        ESP_LOGW(kTag, "frame timer unavailable; using tick pacing");
+
     for (;;) {
+        const auto frame_started = esp_timer_get_time();
         const uint32_t now = nowMs();
 
         // Child lock is a parental flag, not an input state: apply it before
@@ -1016,7 +1030,8 @@ void run() {
         // when silent. A host link or video playback keeps everything awake.
         Power::Inputs power_inputs{};
         power_inputs.audio_playing = playing;
-        power_inputs.video_playing = s_video_active;
+        // Close is asynchronous: keep awake until I2S/storage are released.
+        power_inputs.video_playing = s_video_active || (Video::busy() && !Video::active());
         power_inputs.host_active = Ble::connected();
         Power::Config power_config{};
         power_config.screen_off_min = s_context.settings.screen_off_min;
@@ -1052,7 +1067,12 @@ void run() {
 #endif
         }
 
-        vTaskDelay(Video::active() ? 1 : pdMS_TO_TICKS(kFrameIntervalMs));
+        if (Video::active() && frame_timer &&
+            esp_timer_start_once(frame_timer, Video::frameWaitUs(frame_started, esp_timer_get_time())) == ESP_OK) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        } else {
+            vTaskDelay(Video::active() ? 1 : pdMS_TO_TICKS(kFrameIntervalMs));
+        }
     }
 }
 

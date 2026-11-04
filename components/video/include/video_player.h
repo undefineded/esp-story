@@ -13,6 +13,7 @@ struct Status {
     uint32_t frames = 0, replaced_frames = 0;
     uint32_t stop_audio_ms = 0, setup_ms = 0, run_ms = 0, first_frame_ms = 0;
     uint32_t queue_ms = 0, close_ms = 0;
+    uint32_t command_queue_ms = 0, command_close_ms = 0;
     uint32_t control_stack_min_bytes = 0;
     uint32_t backend_copy_us = 0;
     char error[96]{};

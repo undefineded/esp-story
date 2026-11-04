@@ -76,7 +76,8 @@ bool submit(Control command) {
     if (command.action == Action::Stop) command.audio = control.command().audio;
     const bool is_video = command.action == Action::Open;
     command.requested_at = esp_timer_get_time();
-    Status initial;
+    Status initial = is_video ? Status{} : control.snapshot();
+    initial.state = State::Idle;
     if (is_video) initial.state = State::Preparing;
     control.post(command, initial);
     video_requested = is_video;
@@ -249,7 +250,7 @@ bool closeSync(bool drain_audio) {
     if (audio_pool) { esp_gmf_pool_deinit(audio_pool); audio_pool = nullptr; }
     if (video_pool) { esp_gmf_pool_deinit(video_pool); video_pool = nullptr; }
     heap_caps_free(framebuffer); framebuffer = nullptr;
-    latest.attach(nullptr, 0);
+    latest.detach();
     heap_caps_free(mailbox); mailbox = nullptr;
     if (lease) { lease->release(); lease = nullptr; }
     if (!output_stopped) {
@@ -291,11 +292,21 @@ void controlTask(void*) {
         if (command.serial != processed) {
             working_serial = command.serial;
             working_requested_at = command.requested_at;
-            timings = {};
-            timings.queue_ms = static_cast<uint32_t>((esp_timer_get_time() - command.requested_at) / 1000);
+            const auto queue_ms = static_cast<uint32_t>((esp_timer_get_time() - command.requested_at) / 1000);
             const auto close_at = esp_timer_get_time();
             bool ok = closeSync(command.drain);
-            timings.close_ms = static_cast<uint32_t>((esp_timer_get_time() - close_at) / 1000);
+            const auto close_ms = static_cast<uint32_t>((esp_timer_get_time() - close_at) / 1000);
+            // Session measurements survive Stop/Audio requests. Reset only
+            // when starting the next video, including failed early opens.
+            if (command.action == Action::Open && control.serial() == command.serial) {
+                timings = {};
+                first_frame_ms = 0; copy_us = 0;
+                latest.attach(nullptr, 0);
+                timings.queue_ms = queue_ms;
+                timings.close_ms = close_ms;
+            }
+            timings.command_queue_ms = queue_ms;
+            timings.command_close_ms = close_ms;
             if (ok && control.serial() == command.serial) {
                 if (command.action == Action::Open)
                     ok = openSync(*command.gate, *command.audio, command.path);

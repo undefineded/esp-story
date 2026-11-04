@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -24,21 +25,34 @@ std::string withoutExtension(const std::string& name) {
 
 std::vector<Entry> scanLibrary(const std::string& root, std::size_t limit) {
     std::vector<Entry> entries;
+    scanLibraryChecked(root, entries, limit);
+    return entries;
+}
+
+bool scanLibraryChecked(const std::string& root, std::vector<Entry>& output, std::size_t limit) {
+    std::vector<Entry> entries;
     DIR* directory = opendir((root + "/video").c_str());
-    if (!directory) return entries;
-    while (const auto* item = readdir(directory)) {
+    if (!directory) return false;
+    bool ok = true;
+    while (entries.size() < limit) {
+        errno = 0;
+        const auto* item = readdir(directory);
+        if (!item) { ok = errno == 0; break; }
         const std::string name = item->d_name;
         if (name == "." || name == ".." || !isAvi(name)) continue;
         struct stat status {};
         const std::string full = "/video/" + name;
-        if (stat((root + full).c_str(), &status) != 0 || !S_ISREG(status.st_mode)) continue;
+        if (stat((root + full).c_str(), &status) != 0) { ok = false; break; }
+        if (!S_ISREG(status.st_mode)) continue;
         entries.push_back({full, name, withoutExtension(name)});
         if (entries.size() >= limit) break;
     }
-    closedir(directory);
+    if (closedir(directory) != 0) ok = false;
+    if (!ok) return false;
     std::sort(entries.begin(), entries.end(),
               [](const auto& a, const auto& b) { return a.name < b.name; });
-    return entries;
+    output = std::move(entries);
+    return true;
 }
 
 std::string audioPathFor(const std::string& video_path) {

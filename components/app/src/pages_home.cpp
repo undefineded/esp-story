@@ -13,7 +13,7 @@ namespace App {
 namespace {
 
 // Story Town home screen: four tickets on the left, one baked scene per theme
-// on the right. The third tile uses the code-generated projector scene.
+// on the right. The third tile uses the video theater illustration.
 struct HomeTheme {
     const char* title;
     const char* subtitle;

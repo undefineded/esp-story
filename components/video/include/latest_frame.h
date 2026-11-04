@@ -15,6 +15,12 @@ public:
         data_ = data; size_ = size;
         pending_ = false; available_ = false; frames_ = 0; replaced_ = 0;
     }
+    // Stop producers first. Retain session counters until the next attach.
+    void detach() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        data_ = nullptr; size_ = 0;
+        pending_ = false; available_ = false;
+    }
     bool publish(const void* data, std::size_t size) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!data_ || !data || !size_ || size != size_) return false;

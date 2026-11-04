@@ -45,4 +45,8 @@ g++ -std=c++17 -pthread -Wall -Wextra -Werror -pedantic \
 g++ -std=c++17 -Wall -Wextra -Werror -pedantic \
     -Icomponents/audio/include test/audio_run_budget_test.cpp -o "$test_dir/audio_run_budget"
 "$test_dir/audio_run_budget"
+g++ -std=c++17 -pthread -Wall -Wextra -Werror -pedantic \
+    -Icomponents/video/include -Icomponents/storage/include \
+    test/video_performance_test.cpp components/video/video_library.cpp -o "$test_dir/video_performance"
+"$test_dir/video_performance"
 echo "Host tests passed; executables: $test_dir"

@@ -45,6 +45,8 @@ SPI 满屏 320×240 RGB565 的理论传输时间约 30.72 ms（尚未计入指�
 只有视频控制任务能访问官方播放器句柄，UI 读取状态快照。
 连续选择会合并为最后一个请求，旧请求完成后的状态不会覆盖新请求；列表路径快照用于播放和切换，
 返回列表仅在存储版本变化后重新扫描。外部直接改卡而没有更新版本时，需要重启以重建列表。
+扫描持有存储租约；USB 维护期间不更新缓存，读取失败保留旧列表，重新进入时重试。
+EOF/错误在页面 tick 中提交关闭，不依赖绘制；保留最后已绘制的画布，关闭完成前不进入深睡。
 视频到音乐/故事的切换也交给同一任务处理，避免旧 I2S 尚未释放便启动新音频。
 取消可立即返回界面；若官方 API 正在阻塞，资源清理须等待该调用返回，不能安全地强杀任务。
 
@@ -60,7 +62,8 @@ idf.py -B build-player-performance -D SDKCONFIG=build-player-performance/sdkconf
 
 USB `sys` 状态的 `performance` 对象包含：
 
-- `videoQueueMs`、`videoCloseMs`、`videoStopAudioMs`、`videoSetupMs`、`videoRunMs`：各阶段耗时。
+- `videoQueueMs`、`videoCloseMs`、`videoStopAudioMs`、`videoSetupMs`、`videoRunMs`：最近一次视频打开的各阶段耗时。
+- `videoCommandQueueMs`、`videoCommandCloseMs`：最近一次控制命令的排队与资源关闭耗时，与视频会话统计分开。
 - `videoFirstBackendFrameMs`：请求提交至第一个后端画面的耗时；0 表示尚未到达，不代表瞬间完成。
 - `videoBackendCopyUs`、`videoBackendFrames`、`videoReplacedFrames`：最近一次后端拷贝及累计帧数。
 - `lcdSubmissions`、`lcdVideoSubmissions`、`lcdBytes`：实际提交到 LCD 的次数与字节数。
@@ -70,10 +73,14 @@ USB `sys` 状态的 `performance` 对象包含：
 
 计数为 32 位累计值，长时间运行会回绕。两次采样的 LCD 提交增量可用于计算提交速率，
 不代表面板扫描频率。CPU `load` 保留协议兼容值，并增加 `loadValid=false`，不能当作真实负载。
+视频会话的打开耗时、首帧耗时、后端帧数及替换帧数在关闭后保留，下一次打开时清零。
 官方视频解码内部耗时与 SD 独立读延迟尚未拆分，需结合真机分析。
 
 普通音频循环取消每个解码步骤后固定等待一个 tick：I2S 写入形成背压时自然阻塞；
 没有明显写入等待且连续处理达到 4 ms 后，主动让出一个 tick，保障低优先级任务和看门狗。
+
+视频 UI 以 33.334 ms 为循环预算，绘制和 SPI 发送计入预算，使用 esp_timer 通知等待剩余时间。
+超预算仍至少阻塞 1 ms 让出 CPU；定时器不可用时回退 tick 调度。该调整不代表实机已达到 30 fps。
 
 ## 素材迁移
 

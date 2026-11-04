@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 /**
+ * 历史版本：此脚本会覆盖现用插画。现用资源请运行 build_video_theater.py。
  * 画主页"视频剧场"插画 (128x128), 输出:
  *   docs/icons/video-scene.png   627x627 原图 (方便以后改配色/构图)
  *   src/home_video_scene.h       128x128 swap565 数组, 放 Flash, 运行时不解码 PNG

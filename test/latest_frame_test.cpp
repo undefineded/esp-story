@@ -47,9 +47,16 @@ int main() {
         }));
         assert(!frame.pending());
     }
-    frame.attach(nullptr, 0);
+    const auto frames = frame.frames(), replaced = frame.replaced();
+    frame.detach();
     assert(!frame.visit([](const void*) { assert(false); }));
+    assert(!frame.pending() && frame.frames() == frames && frame.replaced() == replaced);
+    assert(!frame.publish(input.data(), sizeof(input)));
+    frame.detach(); // repeated Stop must preserve the same completed session
+    assert(frame.frames() == frames && frame.replaced() == replaced);
+    frame.attach(storage.data(), sizeof(storage));
     assert(!frame.pending() && frame.frames() == 0);
+    frame.detach();
     assert(!frame.publish(input.data(), sizeof(input)));
     std::cout << "PASS: latest-frame replacement, bounds, detach and concurrent no-tearing\n";
 }
