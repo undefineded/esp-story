@@ -180,6 +180,8 @@ public:
         finished_ = false;
         status_ = {};
         status_.state = Video::State::Preparing;
+        fps_ = fps_frames_ = 0;
+        fps_window_ms_ = 0;
         invalidate();
     }
 
@@ -221,7 +223,7 @@ public:
         }
     }
 
-    void tick(uint32_t) override {
+    void tick(uint32_t now) override {
         if (finished_) return;
         if (!Video::active()) {
             if (!finished_ && error_.empty()) {
@@ -257,7 +259,18 @@ public:
             invalidate();
             return;
         }
-        if (Video::framePending()) invalidate();
+        // Displayed frame rate: pending frames only become counted when the page
+        // repaints them, so a slow SPI push shows up here instead of hiding.
+        if (Video::framePending()) {
+            ++fps_frames_;
+            invalidate();
+        }
+        if (!fps_window_ms_) fps_window_ms_ = now;
+        else if (now - fps_window_ms_ >= 1000) {
+            fps_ = static_cast<unsigned>(fps_frames_ * 1000u / (now - fps_window_ms_));
+            fps_frames_ = 0;
+            fps_window_ms_ = now;
+        }
     }
 
     void draw() override {
@@ -343,9 +356,10 @@ private:
         g.setTextColor(c.track, c.ink);
         g.drawRightString(time, 312, 219);
 
-        // Count UI mailbox replacements separately from decoder frames.
-        char stats[24];
-        std::snprintf(stats, sizeof(stats), "F%u D%u", unsigned(status_.frames), unsigned(status_.replaced_frames));
+        // Actual panel frame rate, plus the backend's frame/drop counters.
+        char stats[40];
+        std::snprintf(stats, sizeof(stats), "FPS%2u F%u D%u", unsigned(fps_),
+                      unsigned(status_.frames), unsigned(status_.replaced_frames));
         g.setTextColor(c.yellow, c.ink);
         g.drawRightString(stats, 312, 10);
 
@@ -379,6 +393,7 @@ private:
     Video::Status status_{};
     bool paused_ = false;
     bool finished_ = false;
+    uint32_t fps_window_ms_ = 0, fps_frames_ = 0, fps_ = 0;
 };
 
 VideoListPage& videoListInstance() { static VideoListPage instance; return instance; }

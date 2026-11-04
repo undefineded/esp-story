@@ -23,6 +23,9 @@ namespace {
 constexpr int kVisibleRows = 4;
 constexpr int kListRowY = 36;
 constexpr int kListRowHeight = 42;
+// A video hands its teardown off to the control task; if the queued play request
+// never reaches the decoder, the page must keep ticking instead of waiting forever.
+constexpr uint32_t kAudioHandoffTimeoutMs = 3000;
 
 bool s_story_page_active = false;
 
@@ -392,8 +395,17 @@ public:
         if (Video::busy()) return;
         const auto snapshot = playback().snapshot();
         if (waiting_audio_) {
-            if (snapshot.generation == awaiting_generation_ && snapshot.state != Audio::PlaybackState::Failed) return;
+            if (!waiting_since_) waiting_since_ = now;
+            // The decoder raises the generation once the queued play request is
+            // executed. If that never happens (the request was coalesced away),
+            // stop blocking the page; a late start still lands as a generation
+            // change and repaints through the normal path below.
+            const bool queued = snapshot.generation == awaiting_generation_ &&
+                                snapshot.state != Audio::PlaybackState::Failed;
+            if (queued && now - waiting_since_ < kAudioHandoffTimeoutMs) return;
             waiting_audio_ = false;
+            waiting_since_ = 0;
+            if (queued) notify("音频启动超时，可重新选择故事");
         }
         if (snapshot.generation != last_generation_) {
             last_generation_ = snapshot.generation;
@@ -527,6 +539,7 @@ private:
         uint64_t request = 0;
         awaiting_generation_ = playback().snapshot().generation;
         waiting_audio_ = Video::busy();
+        waiting_since_ = 0;
         if (Video::playAudio(playback(), story.audio.c_str(), true, request) == ESP_OK) {
             started_ = true;
             ended_generation_ = 0;
@@ -571,6 +584,7 @@ private:
     bool image_ok_ = true;
     bool started_ = false;
     bool waiting_audio_ = false;
+    uint32_t waiting_since_ = 0;
     uint64_t awaiting_generation_ = 0;
     uint64_t last_generation_ = 0;
     uint64_t ended_generation_ = 0;

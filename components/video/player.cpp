@@ -57,6 +57,9 @@ struct Control {
 VersionedControl<Control, Status> control;
 std::atomic<uint32_t> frame_serial{0};
 std::atomic<bool> video_requested{false}, pause_requested{false}, owns_audio{false};
+// A failed I2S release keeps the channel around for a retry; busy() stays false
+// so pages keep updating, but close()/playAudio() re-run teardown first.
+std::atomic<bool> teardown_failed{false};
 TaskHandle_t controller = nullptr;
 uint32_t working_serial = 0;
 int64_t working_requested_at = 0;
@@ -178,12 +181,16 @@ bool openSync(Storage::AccessGate& gate, Audio::Playback& audio, const std::stri
     opened_at = working_requested_at;
     first_frame_ms = 0; copy_us = 0;
     const auto stop_at = esp_timer_get_time();
+    // stopAndWait() closes playback admission, so every failure from here on has
+    // to reopen it again, including a stop that times out. closeSync() does that
+    // through `legacy`, and it must therefore be set before the stop starts.
+    legacy = &audio;
     if (audio.stopAndWait(3000) != ESP_OK) return fail("音频停止超时");
     timings.stop_audio_ms = static_cast<uint32_t>((esp_timer_get_time() - stop_at) / 1000);
     const auto setup_at = esp_timer_get_time();
-    if (control.serial() != working_serial) { audio.allowPlayback(); return false; }
+    if (control.serial() != working_serial) { legacy = nullptr; audio.allowPlayback(); return false; }
     owns_audio = true;
-    legacy = &audio; // Admission stays closed until all official renderers are destroyed.
+    // Admission stays closed until all official renderers are destroyed.
     if (!gate.acquire()) return fail("存储正在维护");
     lease = &gate; // esp_player owns FILE internally; keep our lease for its entire lifetime.
     framebuffer = static_cast<uint8_t*>(heap_caps_aligned_alloc(16, Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -198,7 +205,8 @@ bool openSync(Storage::AccessGate& gate, Audio::Playback& audio, const std::stri
             esp_avi_extractor_register()) return fail("解码器注册失败");
         defaults_registered = true;
     }
-    if (!pools() || output.begin(SampleRate) != ESP_OK) return fail("渲染资源不足");
+    if (!pools() || output.begin(SampleRate, Audio::PcmOutput::kVideoCapacity) != ESP_OK)
+        return fail("渲染资源不足");
     equalizer.reset();
     esp_audio_render_cfg_t ac{};
     ac.max_stream_num = 1; ac.out_writer = writeAudio;
@@ -244,8 +252,9 @@ bool closeSync(bool drain_audio) {
     if (audio_render) { esp_audio_render_destroy(audio_render); audio_render = nullptr; }
     if (video_render) { esp_video_render_destroy(video_render); video_render = nullptr; }
     // A successful PCM write means queued, not yet audible. Preserve the EOF
-    // tail (4 DMA descriptors * 240 frames / 44100 Hz), but stop immediately on cancel/error.
-    if (drain_audio && legacy) vTaskDelay(pdMS_TO_TICKS(30) + 1);
+    // tail (the video's smaller DMA ring), but stop immediately on cancel/error.
+    if (drain_audio && legacy)
+        vTaskDelay(pdMS_TO_TICKS(int64_t(output.capacity()) * 1000 / SampleRate) + 1);
     const bool output_stopped = output.stop() == ESP_OK;
     if (audio_pool) { esp_gmf_pool_deinit(audio_pool); audio_pool = nullptr; }
     if (video_pool) { esp_gmf_pool_deinit(video_pool); video_pool = nullptr; }
@@ -253,13 +262,18 @@ bool closeSync(bool drain_audio) {
     latest.detach();
     heap_caps_free(mailbox); mailbox = nullptr;
     if (lease) { lease->release(); lease = nullptr; }
+    // Admission and ownership are released even when the driver refuses to stop:
+    // leaving them behind made every later play request fail until a reboot.
+    // A channel that survives its stop() still fails the next open with a normal
+    // error, which is retryable, while a closed admission is not.
+    if (legacy) { legacy->allowPlayback(); legacy = nullptr; }
+    owns_audio = false;
+    teardown_failed = !output_stopped;
     if (!output_stopped) {
         last_error = "I2S 释放失败，请重试";
         ESP_LOGE("video", "%s", last_error);
         return false;
     }
-    if (legacy) { legacy->allowPlayback(); legacy = nullptr; }
-    owns_audio = false;
     return true;
 }
 Status statusSync() {
@@ -358,7 +372,8 @@ bool open(Storage::AccessGate& gate, Audio::Playback& audio, const std::string& 
     return submit(c);
 }
 bool close(bool drain_audio) {
-    if (!busy()) return true;
+    // A failed teardown must be retried even though nothing is busy any more.
+    if (!busy() && !teardown_failed) return true;
     Control c; c.drain = drain_audio;
     return submit(c);
 }
@@ -371,7 +386,9 @@ bool pause(bool paused) {
     return true;
 }
 esp_err_t playAudio(Audio::Playback& audio, const char* path, bool start, uint64_t& request) {
-    if (!busy()) return audio.play(path, start, request);
+    // Queue behind the control task while a video owns the audio path, or while a
+    // failed teardown still holds the I2S channel: only that task can release it.
+    if (!busy() && !teardown_failed) return audio.play(path, start, request);
     if (!path || std::strlen(path) >= sizeof(Control::path)) return ESP_ERR_INVALID_ARG;
     Control c; c.action = Action::Audio; c.audio = &audio; c.start = start;
     std::snprintf(c.path, sizeof(c.path), "%s", path);
