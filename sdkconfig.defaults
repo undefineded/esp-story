@@ -5,6 +5,11 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_SPIRAM_SPEED_80M=y
+# Keep small (ISR/DMA-sized) blocks in internal RAM, but let anything larger live
+# in PSRAM. Reserving 100 KiB of internal RAM leaves room for driver buffers and
+# the five esp_player task stacks while the UI canvas and video frames use PSRAM.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=102400
 CONFIG_ESP_PLAYER_ENABLE_AUDIO=y
 CONFIG_ESP_PLAYER_ENABLE_VIDEO=y
 CONFIG_ESP_PLAYER_ENABLE_FILE_IO=y

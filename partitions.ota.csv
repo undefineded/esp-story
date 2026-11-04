@@ -1,9 +1,12 @@
 # Name,   Type, SubType, Offset,  Size,     Flags
 # ESP32-S3 N16R8 (16MB) dual-slot OTA layout. Media stays on the TF card.
-# 7 MiB per slot: leave room for future player, UI and connectivity growth.
+# Slots are 6 MiB (image is ~2.6 MiB); the release build fails the size check
+# rather than silently overflow. The 3.9 MiB `assets` partition is reserved for
+# on-flash assets (prompts, fonts, wake-word models) and is not mounted yet.
 # otadata must start at 0xf000 for the IDF bootloader.
 nvs,      data, nvs,     0x9000,  0x6000,
 otadata,  data, ota,     0xf000,  0x2000,
 phy_init, data, phy,     0x11000, 0x1000,
-ota_0,    app,  ota_0,   0x20000, 0x700000,
-ota_1,    app,  ota_1,   0x720000, 0x700000,
+ota_0,    app,  ota_0,   0x20000, 0x600000,
+ota_1,    app,  ota_1,   0x620000, 0x600000,
+assets,   data, spiffs,  0xC20000, 0x3E0000,
