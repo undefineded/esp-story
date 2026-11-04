@@ -41,7 +41,7 @@ idf.py -p PORT flash monitor
 
 将 `PORT` 换成实际串口，例如 Linux 的 `/dev/ttyACM0` 或 Windows 的 `COM7`。默认配置使用 `sdkconfig.defaults` 和 `partitions.csv`；已有 `sdkconfig` 不会因为 defaults 更新而自动重置。
 
-需要 USB 文件传输、OTA 和深睡时，使用独立构建目录：
+需要 USB 文件传输、OTA 和深睡时，使用独立构建目录。当前 OTA 双槽每槽 7 MiB，给后续功能保留扩展空间：
 
 ```sh
 idf.py -B build-product -D SDKCONFIG=build-product/sdkconfig \
