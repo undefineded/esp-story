@@ -1,5 +1,12 @@
 dependencies:
-  idf: "==5.5.1"
+  idf: "==5.5.3"
+  espressif/esp_player: "==1.1.1"
+  espressif/esp_audio_render: "~1.1"
+  espressif/esp_video_render: "~1.1"
+  espressif/gmf_audio: "~1.1"
+  espressif/gmf_video: "~1.1"
+  espressif/esp_video_codec: "~0.5"
+  espressif/media_lib_sal: "~1.0"
   espressif/esp_audio_codec: "==2.6.2"
   LovyanGFX:
     git: https://github.com/lovyan03/LovyanGFX.git

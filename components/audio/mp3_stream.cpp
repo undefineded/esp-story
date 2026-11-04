@@ -14,11 +14,14 @@ constexpr uint32_t kSampleRates[3][3] = {
 };
 }
 
+esp_err_t ensureMp3Decoder() {
+    static const auto registered = esp_mp3_dec_register();
+    return registered == ESP_AUDIO_ERR_OK ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
 esp_err_t Mp3Stream::open(const std::string& root, const std::string& path) {
     if (!close()) return error_ = ESP_FAIL;
-    // Register only MP3; keep other codecs and their registries out of playback.
-    static const auto registered = esp_mp3_dec_register();
-    if (registered != ESP_AUDIO_ERR_OK) return error_ = ESP_ERR_NO_MEM;
+    if (ensureMp3Decoder() != ESP_OK) return error_ = ESP_ERR_NO_MEM;
     if (!file_.open(root, path, "rb")) return error_ = ESP_FAIL;
     esp_audio_simple_dec_cfg_t config{};
     config.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;

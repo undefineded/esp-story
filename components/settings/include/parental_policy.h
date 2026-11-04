@@ -90,8 +90,9 @@ public:
     }
 private:
     bool allowed(uint64_t mask,int index) const {
-        if (!ready_ || index<0 || index>=64) return false;
-        return !(record_.flags&0x08) || ((mask>>index)&1);
+        if (!ready_ || index<0) return false;
+        if (!(record_.flags&0x08)) return true;
+        return index<64 && ((mask>>index)&1);
     }
     uint64_t localSeconds(uint32_t epoch) const {
         return static_cast<uint64_t>(std::max<int64_t>(0,int64_t(epoch)+int64_t(record_.timezone)*60));

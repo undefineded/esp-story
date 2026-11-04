@@ -15,6 +15,7 @@
 #include "sd_volume.h"
 #include "story_image.h"
 #include "story_timeline.h"
+#include "video_player.h"
 
 namespace App {
 namespace {
@@ -388,7 +389,12 @@ public:
 
     void tick(uint32_t now) override {
         if (!started_ || !catalog_ || index_ >= catalog_->stories.size()) return;
+        if (Video::busy()) return;
         const auto snapshot = playback().snapshot();
+        if (waiting_audio_) {
+            if (snapshot.generation == awaiting_generation_ && snapshot.state != Audio::PlaybackState::Failed) return;
+            waiting_audio_ = false;
+        }
         if (snapshot.generation != last_generation_) {
             last_generation_ = snapshot.generation;
             invalidate();
@@ -506,6 +512,10 @@ public:
 private:
     void start() {
         if (!catalog_ || index_ >= catalog_->stories.size()) return;
+        if (!playbackAllowed() || !storyAllowed(index_)) {
+            notify("该故事已被家长限制");
+            return;
+        }
         const auto& story = catalog_->stories[index_];
         timeline_ = Media::Timeline{};
         if (story.kind == Media::StoryKind::Illustrated && !story.timeline.empty()) {
@@ -515,7 +525,9 @@ private:
             }
         }
         uint64_t request = 0;
-        if (playback().play(story.audio.c_str(), true, request) == ESP_OK) {
+        awaiting_generation_ = playback().snapshot().generation;
+        waiting_audio_ = Video::busy();
+        if (Video::playAudio(playback(), story.audio.c_str(), true, request) == ESP_OK) {
             started_ = true;
             ended_generation_ = 0;
             last_generation_ = 0;
@@ -558,6 +570,8 @@ private:
     int shown_panel_ = -2;
     bool image_ok_ = true;
     bool started_ = false;
+    bool waiting_audio_ = false;
+    uint64_t awaiting_generation_ = 0;
     uint64_t last_generation_ = 0;
     uint64_t ended_generation_ = 0;
     uint32_t drawn_second_ = 0xFFFFFFFF;

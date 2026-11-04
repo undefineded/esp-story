@@ -1,4 +1,5 @@
 #include "playback.h"
+#include "audio_run_budget.h"
 #include "esp_timer.h"
 #include "freertos/task.h"
 #include <cstring>
@@ -114,7 +115,10 @@ void Playback::step() {
     }
     if (current_.state != PlaybackState::Playing) return;
     if (!pending_frames_) {
-        switch (stream_.next()) {
+        const auto decode_at = esp_timer_get_time();
+        const auto decoded = stream_.next();
+        current_.decode_us = static_cast<uint32_t>(esp_timer_get_time() - decode_at);
+        switch (decoded) {
         case DecodeStep::NeedInput: return;
         case DecodeStep::Error: finish(PlaybackState::Failed, stream_.error()); return;
         case DecodeStep::End:
@@ -140,8 +144,10 @@ void Playback::step() {
         last_output_progress_ = esp_timer_get_time();
     }
     std::size_t written = 0;
+    const auto write_at = esp_timer_get_time();
     const auto result = output_.write(stream_.samples() + pending_offset_ * 2,
                                      pending_frames_, written, 20);
+    current_.write_us = static_cast<uint32_t>(esp_timer_get_time() - write_at);
     if (written % 4 || written / 4 > pending_frames_) {
         finish(PlaybackState::Failed, ESP_ERR_INVALID_SIZE); return;
     }
@@ -155,14 +161,22 @@ void Playback::step() {
     if (result != ESP_OK && result != ESP_ERR_TIMEOUT) finish(PlaybackState::Failed, result);
 }
 void Playback::run() {
+    RunBudget budget(esp_timer_get_time());
     while (true) {
         Command command{};
         const auto active = current_.state == PlaybackState::Playing;
         if (xQueueReceive(queue_, &command, active ? 0 : pdMS_TO_TICKS(10)) == pdTRUE) execute(command);
+        current_.write_us = 0;
         step();
         publish();
-        // Parser/cache-only iterations must not starve idle/watchdog tasks.
-        if (active) vTaskDelay(1);
+        const auto now = esp_timer_get_time();
+        // I2S backpressure already blocks this task. Only force a tick when
+        // cached parsing/decoding runs continuously for a bounded CPU budget.
+        if (budget.shouldYield(active, now, current_.write_us)) {
+            ++current_.budget_yields;
+            vTaskDelay(1);
+            budget.yielded(esp_timer_get_time());
+        }
     }
 }
 }

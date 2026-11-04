@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "fonts.h"
 #include "player_view.h"
+#include "video_player.h"
 
 // Music pages rebuilt from the Arduino UI (src/ui.cpp). The layout constants,
 // fonts and icons intentionally match that implementation: 42px rows with a
@@ -357,7 +358,7 @@ private:
     }
 
     void toggleFavorite() {
-        const auto index = globalIndex(0);
+        const auto index = globalIndex(selected_ - static_cast<int>(playlist().position()));
         const bool enabled = !App::favorite(index);
         if (!App::setFavorite(index, enabled)) notify("收藏保存失败");
         else notify(enabled ? "已收藏" : "已取消收藏");
@@ -420,6 +421,7 @@ public:
     }
 
     void tick(uint32_t now) override {
+        if (Video::busy()) return;
         const auto snapshot = playback().snapshot();
         const uint32_t seconds = snapshot.sample_rate ? snapshot.submitted_frames / snapshot.sample_rate : 0;
         const int state = static_cast<int>(snapshot.state);
@@ -432,11 +434,13 @@ public:
         // New generation: the decoder restarted, so the playlist advances once
         // when the previous track reported EOF.
         if (snapshot.generation != last_generation_) {
-            const bool ended = snapshot.state == Audio::PlaybackState::Ended;
             last_generation_ = snapshot.generation;
             last_state_ = -1;
             invalidate();
-            if (ended && playlist().move(1)) playCurrent(true);
+        }
+        if (snapshot.state == Audio::PlaybackState::Ended && snapshot.generation != ended_generation_) {
+            ended_generation_ = snapshot.generation;
+            if (playlist().move(1)) playCurrent(true);
         }
 
         const auto model = data();
@@ -487,6 +491,7 @@ private:
 
     PlayerView view_;
     uint64_t last_generation_ = 0;
+    uint64_t ended_generation_ = 0;
     uint32_t drawn_second_ = 0xFFFFFFFF;
     int last_state_ = -1;
     int drawn_volume_ = -1;

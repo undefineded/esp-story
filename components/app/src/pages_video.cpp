@@ -1,16 +1,13 @@
 #include <cstdio>
 #include <string>
-#include <sys/stat.h>
 #include <vector>
 
 #include "app_context.h"
 #include "app_page.h"
 #include "app_services.h"
 #include "app_theme.h"
-#include "avi_index.h"
+#include "video_player.h"
 #include "display.h"
-#include "esp_err.h"
-#include "esp_timer.h"
 #include "fonts.h"
 #include "sd_volume.h"
 #include "video_library.h"
@@ -30,7 +27,6 @@ int wrap(int value, int count) {
     return value < 0 ? value + count : value;
 }
 
-uint64_t nowUs() { return static_cast<uint64_t>(esp_timer_get_time()); }
 
 void drawTopBar(lgfx::LGFXBase& g, const char* title = nullptr) {
     const auto& c = Theme::colors();
@@ -62,8 +58,13 @@ public:
     const char* id() const override { return "video-list"; }
 
     void enter() override {
-        entries_ = Video::scanLibrary(Storage::SdVolume::root);
-        selected_ = 0;
+        const auto revision = storageGate().revision();
+        if (!scanned_ || revision != revision_) {
+            entries_ = Video::scanLibrary(Storage::SdVolume::root);
+            revision_ = revision;
+            scanned_ = true;
+        }
+        if (selected_ >= static_cast<int>(entries_.size())) selected_ = 0;
         invalidate();
     }
 
@@ -145,55 +146,45 @@ private:
     void openVideo(std::size_t index);
     std::vector<Video::Entry> entries_;
     int selected_ = 0;
+    bool scanned_ = false;
+    uint64_t revision_ = 0;
 };
 
 class VideoPlayerPage final : public Page {
 public:
     const char* id() const override { return "video-player"; }
 
-    void setVideo(std::size_t index) { index_ = index; }
+    void setVideo(std::size_t index, const std::vector<Video::Entry>& entries) { index_ = index; entries_ = entries; }
 
     void enter() override {
         close();
-        setVideoActive(true);
         setCurrentVideo(-1);
-        const auto entries = Video::scanLibrary(Storage::SdVolume::root);
-        if (index_ >= entries.size()) {
+        if (!playbackAllowed()) {
+            error_ = "家长限制播放";
+            invalidate();
+            return;
+        }
+        if (index_ >= entries_.size()) {
             error_ = "没有视频";
             invalidate();
             return;
         }
-        const auto& entry = entries[index_];
-        if (!avi_.open(storageGate(), Storage::SdVolume::root, entry.path)) {
-            error_ = avi_.error().empty() ? "打开失败" : avi_.error();
-            invalidate();
-            return;
-        }
-        if (avi_.width() != kVideoWidth || avi_.height() != kVideoHeight) {
-            error_ = "仅支持 320x240";
-            avi_.close();
+        const auto& entry = entries_[index_];
+        Video::setVolume(ctx().volume);
+        Video::setEq(static_cast<Audio::EqPreset>(ctx().settings.eq));
+        if (!Video::open(storageGate(), playback(), Storage::SdVolume::root + entry.path)) {
+            error_ = Video::error();
             invalidate();
             return;
         }
         setCurrentVideo(static_cast<int>(index_));
+        setVideoActive(true);
         title_ = entry.title;
-        started_at_us_ = nowUs();
-        paused_at_us_ = 0;
-        paused_ms_ = 0;
+        setNowPlaying("video", title_.c_str());
         paused_ = false;
         finished_ = false;
-        shown_frame_ = -1;
-        last_decode_us_ = 0;
-
-        // The narration track is optional; without it the clip is silent.
-        const auto audio = Video::audioPathFor(entry.path);
-        struct stat status {};
-        const bool has_track = stat((Storage::SdVolume::root + audio).c_str(), &status) == 0;
-        has_audio_ = false;
-        if (has_track) {
-            uint64_t request = 0;
-            has_audio_ = playback().play(audio.c_str(), true, request) == ESP_OK;
-        }
+        status_ = {};
+        status_.state = Video::State::Preparing;
         invalidate();
     }
 
@@ -223,9 +214,8 @@ public:
                 break;
             case Key::Next:
             case Key::Prev: {
-                const auto entries = Video::scanLibrary(Storage::SdVolume::root);
-                if (entries.empty()) break;
-                const int count = static_cast<int>(entries.size());
+                if (entries_.empty()) break;
+                const int count = static_cast<int>(entries_.size());
                 index_ = static_cast<std::size_t>(
                     wrap(static_cast<int>(index_) + (event.key == Key::Next ? 1 : -1), count));
                 enter();
@@ -237,23 +227,48 @@ public:
     }
 
     void tick(uint32_t) override {
-        if (!avi_.frames() || !error_.empty()) return;
-        const uint32_t interval = avi_.frameIntervalMs() ? avi_.frameIntervalMs() : 40;
-        std::size_t frame = elapsedMs() / interval;
-        if (frame >= avi_.frames()) {
-            frame = avi_.frames() - 1;
-            if (!finished_) {
+        if (finished_) return;
+        if (!Video::active()) {
+            if (!finished_ && error_.empty()) {
+                setVideoActive(false);
                 finished_ = true;
-                notify("播放完毕", 1500);
+                invalidate();
             }
+            return;
         }
-        if (static_cast<int>(frame) != shown_frame_) invalidate();
+        if (!playbackAllowed()) {
+            close();
+            error_ = "家长限制播放";
+            invalidate();
+            return;
+        }
+        const auto previous = status_.state;
+        status_ = Video::status();
+        if (previous != status_.state) invalidate();
+        paused_ = status_.state == Video::State::Paused;
+        setVideoActive(status_.state == Video::State::Preparing ||
+                       status_.state == Video::State::Playing);
+        if (status_.state == Video::State::Failed || status_.state == Video::State::Finished) {
+            const bool failed = status_.state == Video::State::Failed;
+            finish_pending_ = true;
+            setVideoActive(false);
+            setCurrentVideo(-1);
+            setNowPlaying("idle", "");
+            finished_ = true;
+            if (failed) error_ = status_.error[0] ? status_.error : "解码失败，请转换为 MJPEG AVI";
+            else notify("播放完毕，OK 重播", 1500);
+            invalidate();
+            return;
+        }
+        if (Video::framePending()) invalidate();
     }
 
     void draw() override {
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
         if (!error_.empty()) {
+            if (finish_pending_) { Video::close(); finish_pending_ = false; }
+            Display::setVideoMode(false);
             g.fillScreen(c.paper);
             drawTopBar(g, "视频");
             Theme::drawSmileFace(g, 160, 96, 16);
@@ -266,49 +281,39 @@ public:
             g.drawCenterString("长按 OK 返回列表", 160, 210);
             return;
         }
-        const uint32_t interval = avi_.frameIntervalMs() ? avi_.frameIntervalMs() : 40;
-        std::size_t frame = elapsedMs() / interval;
-        if (frame >= avi_.frames()) frame = avi_.frames() - 1;
-
-        if (static_cast<int>(frame) != shown_frame_) {
-            decodeFrame(frame);
-            shown_frame_ = static_cast<int>(frame);
-        }
-        drawOverlay(frame);
-    }
-
-private:
-    void close() {
-        if (has_audio_) stopPlayback();
-        has_audio_ = false;
-        avi_.close();
-        error_.clear();
-    }
-
-    void decodeFrame(std::size_t frame) {
-        auto& g = Display::canvas();
-        const uint64_t started = nowUs();
-        if (!avi_.readFrame(frame, storageGate(), Storage::SdVolume::root, buffer_)) {
-            error_ = avi_.error().empty() ? "读取帧失败" : avi_.error();
-            return;
-        }
-        const bool ok = avi_.codec() == Video::Codec::Qoi
-                            ? g.drawQoi(buffer_.data(), buffer_.size(), 0, 0, kVideoWidth, kVideoHeight)
-                            : g.drawJpg(buffer_.data(), buffer_.size(), 0, 0, kVideoWidth, kVideoHeight);
-        if (!ok) {
+        const bool drawn = Video::visitFrame([](const uint16_t* pixels, void* context) {
+            static_cast<lgfx::LGFXBase*>(context)->pushImage(0, 0, kVideoWidth, kVideoHeight,
+                reinterpret_cast<const lgfx::rgb565_t*>(pixels));
+        }, &g);
+        has_frame_ = has_frame_ || drawn;
+        if (!has_frame_) {
             g.fillScreen(TFT_BLACK);
             g.setFont(Fonts::body());
             g.setTextColor(TFT_WHITE, TFT_BLACK);
-            g.drawCenterString("帧解码失败", 160, 110);
+            g.drawCenterString("正在加载视频…", 160, 110);
         }
-        last_decode_us_ = nowUs() - started;
+        Display::setVideoMode(true);
+        if (finish_pending_) { Video::close(true); finish_pending_ = false; }
+        drawOverlay();
     }
 
-    void drawOverlay(std::size_t frame) {
+private:
+    void close(bool drain_audio = false) {
+        if (Video::active()) setNowPlaying("idle", "");
+        Video::close(drain_audio);
+        setVideoActive(false);
+        setCurrentVideo(-1);
+        Display::setVideoMode(false);
+        finish_pending_ = false;
+        has_frame_ = false;
+        error_.clear();
+    }
+
+    void drawOverlay() {
         auto& g = Display::canvas();
         const auto& c = Theme::colors();
-        const uint32_t elapsed = elapsedMs();
-        const uint32_t total = avi_.durationMs();
+        const uint64_t elapsed = status_.position_ms;
+        const uint64_t total = status_.duration_ms;
 
         // The frame covers the whole panel, so the bar is redrawn every frame.
         // Geometry follows the Arduino video bar: 30px ink bar, yellow top edge,
@@ -344,9 +349,9 @@ private:
         g.setTextColor(c.track, c.ink);
         g.drawRightString(time, 312, 219);
 
-        // Decode time badge at the top-right, like the Arduino FPS badge.
+        // Count UI mailbox replacements separately from decoder frames.
         char stats[24];
-        std::snprintf(stats, sizeof(stats), "%u ms", static_cast<unsigned>(last_decode_us_ / 1000));
+        std::snprintf(stats, sizeof(stats), "F%u D%u", unsigned(status_.frames), unsigned(status_.replaced_frames));
         g.setTextColor(c.yellow, c.ink);
         g.drawRightString(stats, 312, 10);
 
@@ -365,43 +370,29 @@ private:
     }
 
     void togglePause() {
-        if (paused_) {
-            paused_ = false;
-            paused_ms_ += static_cast<uint32_t>((nowUs() - paused_at_us_) / 1000);
-            if (has_audio_) pausePlayback(false);
-        } else {
-            paused_ = true;
-            paused_at_us_ = nowUs();
-            if (has_audio_) pausePlayback(true);
+        if (finished_ || !error_.empty()) { enter(); return; }
+        if (Video::pause(!paused_)) {
+            paused_ = !paused_;
+            setVideoActive(!paused_);
+            invalidate();
         }
-        invalidate();
-    }
-
-    uint32_t elapsedMs() const {
-        const uint64_t reference = paused_ ? paused_at_us_ : nowUs();
-        return static_cast<uint32_t>((reference - started_at_us_) / 1000) - paused_ms_;
     }
 
     std::size_t index_ = 0;
-    std::string title_;
-    Video::AviIndex avi_;
-    std::vector<uint8_t> buffer_;
-    std::string error_;
-    bool has_audio_ = false;
+    std::string title_, error_;
+    std::vector<Video::Entry> entries_;
+    bool finish_pending_ = false;
+    bool has_frame_ = false;
+    Video::Status status_{};
     bool paused_ = false;
     bool finished_ = false;
-    uint64_t started_at_us_ = 0;
-    uint64_t paused_at_us_ = 0;
-    uint32_t paused_ms_ = 0;
-    uint64_t last_decode_us_ = 0;
-    int shown_frame_ = -1;
 };
 
 VideoListPage& videoListInstance() { static VideoListPage instance; return instance; }
 VideoPlayerPage& videoPlayerInstance() { static VideoPlayerPage instance; return instance; }
 
 void VideoListPage::openVideo(std::size_t index) {
-    videoPlayerInstance().setVideo(index);
+    videoPlayerInstance().setVideo(index, entries_);
     pushPage(createVideoPlayerPage());
 }
 

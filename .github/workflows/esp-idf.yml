@@ -3,7 +3,7 @@ on: [push, pull_request]
 jobs:
   firmware:
     runs-on: ubuntu-latest
-    container: espressif/idf:v5.5.1
+    container: espressif/idf:v5.5.3
     steps:
       - uses: actions/checkout@v4
       - name: Build native firmware
@@ -13,6 +13,8 @@ jobs:
           idf.py build
           bash tools/test_mp3_stream.sh
           bash tools/test_native_protocol.sh
+          idf.py -B build-player-product -D SDKCONFIG=build-player-product/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.usb-product;sdkconfig.ota;sdkconfig.power' build
+          idf.py -B build-player-performance -D SDKCONFIG=build-player-performance/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.performance;sdkconfig.usb-product;sdkconfig.ota;sdkconfig.power' build
           idf.py -B build-diagnostics -D SDKCONFIG=build-diagnostics/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.diagnostics' build
           idf.py -B build-audio -D SDKCONFIG=build-audio/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.audio-diagnostics' build
           idf.py -B build-usb -D SDKCONFIG=build-usb/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.usb-diagnostics' build
@@ -32,3 +34,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash tools/test_host.sh
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: bash tools/test_video_conversion.sh

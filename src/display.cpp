@@ -3,6 +3,8 @@
 #include "render_math.h"
 #include <esp_heap_caps.h>
 #include <cstring>
+#include <atomic>
+#include "esp_timer.h"
 #ifndef ARDUINO
 #include "esp_timer.h"
 #include "esp_psram.h"
@@ -61,6 +63,8 @@ static uint16_t* s_previous = nullptr;
 static uint16_t* s_transfer = nullptr;
 static bool s_buffered = false, s_invalid = true, s_dirty = false;
 static uint32_t s_presentAt = 0;
+static bool s_videoMode = false;
+static std::atomic<uint32_t> s_submissions{0}, s_videoSubmissions{0}, s_bytes{0}, s_lastUs{0}, s_maxUs{0};
 static constexpr int STRIP_H = 8;
 
 /* 背光 PWM (经 Q1 SS8050 驱动, 占空比越高越亮)
@@ -85,7 +89,7 @@ void begin() {
     s_canvas.setColorDepth(16);
     s_canvas.setPsram(true);
     s_previous = static_cast<uint16_t*>(heap_caps_malloc(SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    s_transfer = static_cast<uint16_t*>(heap_caps_malloc(SCR_W * STRIP_H * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+    s_transfer = static_cast<uint16_t*>(heap_caps_malloc(SCR_W * STRIP_H * 2 * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
     s_buffered = s_previous && s_transfer && s_canvas.createSprite(SCR_W, SCR_H);
   }
   if (s_buffered) {
@@ -97,7 +101,7 @@ void begin() {
     s_previous = s_transfer = nullptr;
   }
 #ifdef ARDUINO
-  Serial.printf("[UI] PSRAM canvas: %s\n", s_buffered ? "OK (300 KiB + 5 KiB staging)" : "unavailable, direct rendering");
+  Serial.printf("[UI] PSRAM canvas: %s\n", s_buffered ? "OK (300 KiB + 10 KiB staging)" : "unavailable, direct rendering");
   const uint32_t blActual = ledcSetup(BL_CHANNEL, BL_FREQ, BL_RES);
   ledcAttachPin(TFT_BL, BL_CHANNEL);
   Serial.printf("[UI] backlight PWM: %u Hz (asked %d), %d-bit\n",
@@ -172,28 +176,51 @@ void present(bool force) {
   uint32_t now = millis();
   if (!force && now - s_presentAt < 33) return;
   s_presentAt = now;
+  const auto started = esp_timer_get_time();
+  uint32_t bytes = 0;
+  unsigned staging = 0;
   const auto* pixels = static_cast<const uint16_t*>(s_canvas.getBuffer());
   // Sprite RGB565 storage is already byte-swapped. Typed pixels preserve this
   // representation without relying on the LCD's mutable setSwapBytes setting.
   s_lcd.startWrite();
   for (int y = 0; y < SCR_H; y += STRIP_H) {
     const auto span = RenderMath::changedSpan(pixels + y * SCR_W,
-        s_previous + y * SCR_W, SCR_W, STRIP_H, s_invalid);
+        s_previous + y * SCR_W, SCR_W, STRIP_H, s_invalid || s_videoMode);
     const int left = span.left, right = span.right;
     if (right < left) continue;
     int width = right - left + 1;
+    auto* transfer = s_transfer + staging * SCR_W * STRIP_H;
     for (int row = 0; row < STRIP_H; ++row) {
       int offset = (y + row) * SCR_W + left;
-      memcpy(s_transfer + row * width, pixels + offset, width * 2);
-      memcpy(s_previous + offset, pixels + offset, width * 2);
+      memcpy(transfer + row * width, pixels + offset, width * 2);
+      if (!s_videoMode) memcpy(s_previous + offset, pixels + offset, width * 2);
     }
+    // Prepare the alternate buffer while the previous transfer is in flight.
+    s_lcd.waitDMA();
     s_lcd.pushImageDMA(left, y, width, STRIP_H,
-                    reinterpret_cast<const lgfx::swap565_t*>(s_transfer));
-    s_lcd.waitDMA();  // staging memory must not change while SPI owns it
+                    reinterpret_cast<const lgfx::swap565_t*>(transfer));
+    staging ^= 1;
+    bytes += width * STRIP_H * 2;
   }
+  s_lcd.waitDMA();
   s_lcd.endWrite();
-  s_invalid = s_dirty = false;
+  s_invalid = s_videoMode; // Previous-frame mirror is stale after video mode.
+  s_dirty = false;
+  if (bytes) {
+    ++s_submissions;
+    if (s_videoMode) ++s_videoSubmissions;
+    s_bytes += bytes;
+    const auto elapsed = static_cast<uint32_t>(esp_timer_get_time() - started);
+    s_lastUs = elapsed;
+    if (elapsed > s_maxUs.load()) s_maxUs = elapsed;
+  }
 }
+
+void setVideoMode(bool enabled) {
+  if (s_videoMode != enabled) s_invalid = true;
+  s_videoMode = enabled;
+}
+Stats stats() { return {s_submissions.load(), s_videoSubmissions.load(), s_bytes.load(), s_lastUs.load(), s_maxUs.load()}; }
 
 void setRotation(uint8_t r) {
   lcd().setRotation(r);

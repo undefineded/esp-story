@@ -9,6 +9,7 @@ struct FakeWire {
     void begin(int,int,uint32_t){}
     void end(){}
     void setClock(uint32_t){}
+    void setTimeOut(uint32_t){}
     void beginTransmission(uint8_t){command.clear();}
     std::size_t write(const uint8_t* data,std::size_t size){command.assign(data,data+size);return size;}
     int endTransmission(bool=true){if(!present)return 2;if(!command.empty())ack=true;return 0;}

@@ -1,6 +1,6 @@
 # Name,   Type, SubType, Offset,  Size,     Flags
 # ESP32-S3 N16R8 (16MB) dual-slot OTA layout. Media stays on the TF card.
-# 3 MiB per slot: the current image is ~1.9 MiB with BLE + NFC.
+# 3 MiB per slot: esp_player + BLE + NFC + USB image is ~2.6 MiB.
 # otadata must start at 0xf000 for the IDF bootloader.
 nvs,      data, nvs,     0x9000,  0x6000,
 otadata,  data, ota,     0xf000,  0x2000,

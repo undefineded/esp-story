@@ -565,8 +565,8 @@ void processLine(const char* line) {
         const char* token = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "token"));
         const char* pin = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(request, "pin"));
         bool ok = token && s_hooks.verify_token && s_hooks.verify_token(s_hooks.context, token);
-        if (!ok && pin && s_hooks.verify_pin) ok = s_hooks.verify_pin(s_hooks.context, pin);
         const auto status = readStatus();
+        if (!ok && status.has_pin && pin && s_hooks.verify_pin) ok = s_hooks.verify_pin(s_hooks.context, pin);
         // Legacy rule: a bound device without a PIN has no verifiable secret.
         if (!ok && status.bound && !status.has_pin) ok = true;
         if (!ok) {

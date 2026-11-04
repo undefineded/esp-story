@@ -36,4 +36,13 @@ g++ -std=c++17 -Wall -Wextra -Werror -pedantic "${compat[@]}" \
 g++ -std=c++17 -Wall -Wextra -Werror -pedantic -DARDUINO "${compat[@]}" \
     -Itest/pn532_host -Isrc test/pn532_host/test_pn532.cpp src/pn532.cpp -o "$test_dir/pn532"
 "$test_dir/pn532"
+g++ -std=c++17 -pthread -Wall -Wextra -Werror -pedantic \
+    -Icomponents/video/include test/latest_frame_test.cpp -o "$test_dir/latest_frame"
+"$test_dir/latest_frame"
+g++ -std=c++17 -pthread -Wall -Wextra -Werror -pedantic \
+    -Icomponents/video/include test/versioned_control_test.cpp -o "$test_dir/versioned_control"
+"$test_dir/versioned_control"
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic \
+    -Icomponents/audio/include test/audio_run_budget_test.cpp -o "$test_dir/audio_run_budget"
+"$test_dir/audio_run_budget"
 echo "Host tests passed; executables: $test_dir"

@@ -1,4 +1,5 @@
 #include "app.h"
+#include "video_player.h"
 
 #include <cstdio>
 #include <cstring>
@@ -404,6 +405,7 @@ void addSystemStats(cJSON* data) {
     cJSON* cpu = cJSON_AddObjectToObject(data, "cpu");
     // CPU load needs FreeRTOS run-time stats; report 0 until that is enabled.
     cJSON_AddNumberToObject(cpu, "load", 0);
+    cJSON_AddBoolToObject(cpu, "loadValid", false);
     cJSON_AddNumberToObject(cpu, "cores", portNUM_PROCESSORS);
     cJSON_AddNumberToObject(cpu, "freq", CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
     esp_chip_info_t chip{};
@@ -411,6 +413,27 @@ void addSystemStats(cJSON* data) {
     cJSON_AddStringToObject(cpu, "model", "ESP32-S3");
     cJSON_AddNumberToObject(cpu, "revision", chip.revision);
     cJSON_AddStringToObject(cpu, "sdk", esp_get_idf_version());
+    const auto video = Video::status();
+    const auto display = Display::stats();
+    cJSON* perf = cJSON_AddObjectToObject(data, "performance");
+    cJSON_AddNumberToObject(perf, "videoStopAudioMs", video.stop_audio_ms);
+    cJSON_AddNumberToObject(perf, "videoQueueMs", video.queue_ms);
+    cJSON_AddNumberToObject(perf, "videoCloseMs", video.close_ms);
+    cJSON_AddNumberToObject(perf, "videoControlStackMinBytes", video.control_stack_min_bytes);
+    cJSON_AddNumberToObject(perf, "videoSetupMs", video.setup_ms);
+    cJSON_AddNumberToObject(perf, "videoRunMs", video.run_ms);
+    cJSON_AddNumberToObject(perf, "videoFirstBackendFrameMs", video.first_frame_ms);
+    cJSON_AddNumberToObject(perf, "videoBackendCopyUs", video.backend_copy_us);
+    cJSON_AddNumberToObject(perf, "videoBackendFrames", video.frames);
+    cJSON_AddNumberToObject(perf, "videoReplacedFrames", video.replaced_frames);
+    cJSON_AddNumberToObject(perf, "lcdSubmissions", display.submissions);
+    cJSON_AddNumberToObject(perf, "lcdVideoSubmissions", display.video_submissions);
+    cJSON_AddNumberToObject(perf, "lcdBytes", display.bytes);
+    cJSON_AddNumberToObject(perf, "lcdLastUs", display.last_us);
+    cJSON_AddNumberToObject(perf, "lcdMaxUs", display.max_us);
+    cJSON_AddNumberToObject(perf, "audioDecodeUs", state.decode_us);
+    cJSON_AddNumberToObject(perf, "audioWriteUs", state.write_us);
+    cJSON_AddNumberToObject(perf, "audioBudgetYields", state.budget_yields);
 
     cJSON* ram = cJSON_AddObjectToObject(data, "ram");
     cJSON_AddNumberToObject(ram, "heapTotal",
@@ -648,12 +671,21 @@ void handleBleCommands() {
                 pausePlayback(true);
                 break;
             case Ble::Action::Toggle:
-                pausePlayback(g_playback.snapshot().state == Audio::PlaybackState::Playing);
+                pausePlayback(Video::active() ? Video::status().state == Video::State::Playing :
+                              g_playback.snapshot().state == Audio::PlaybackState::Playing);
                 break;
             case Ble::Action::Next:
+                if (Video::active() && s_depth) {
+                    s_stack[s_depth - 1]->handle(Event{Key::Next, 0});
+                    break;
+                }
                 if (g_playlist.move(1)) playCurrent(true);
                 break;
             case Ble::Action::Prev:
+                if (Video::active() && s_depth) {
+                    s_stack[s_depth - 1]->handle(Event{Key::Prev, 0});
+                    break;
+                }
                 if (g_playlist.move(-1)) playCurrent(true);
                 break;
             case Ble::Action::Stop:
@@ -685,6 +717,11 @@ void publishBleState() {
     const auto state = g_playback.snapshot();
     snapshot.playing = state.state == Audio::PlaybackState::Playing;
     snapshot.paused = state.state == Audio::PlaybackState::Paused;
+    const auto video = Video::status();
+    if (Video::active()) {
+        snapshot.playing = video.state == Video::State::Playing;
+        snapshot.paused = video.state == Video::State::Paused;
+    }
     snapshot.volume = s_context.volume;
     const auto* track = g_playlist.current();
     const bool active = snapshot.playing || snapshot.paused;
@@ -693,6 +730,10 @@ void publishBleState() {
     else snapshot.title = track ? track->name.c_str() : "";
     snapshot.current = state.sample_rate ? static_cast<uint32_t>(state.submitted_frames / state.sample_rate) : 0;
     snapshot.duration = state.duration;
+    if (Video::active()) {
+        snapshot.current = static_cast<uint32_t>(video.position_ms / 1000);
+        snapshot.duration = static_cast<uint32_t>(video.duration_ms / 1000);
+    }
     Ble::setSnapshot(snapshot);
 }
 
@@ -869,11 +910,13 @@ void run() {
 
     s_playback = &g_playback;
     ESP_ERROR_CHECK(g_playback.begin());
+    s_context.volume = clampVolume(s_context.volume);
     g_playback.setVolume(static_cast<unsigned>(s_context.volume));
     g_playback.setEq(static_cast<Audio::EqPreset>(s_context.settings.eq));
 
     s_catalog = g_library.snapshot();
     if (s_context.sd_mounted && g_library.loadCache(Storage::SdVolume::root)) {
+        s_catalog = g_library.snapshot();
         s_context.catalog_ready = true;
         ESP_LOGI(kTag, "media index loaded");
     } else if (s_context.sd_mounted) {
@@ -907,7 +950,7 @@ void run() {
 
         Event event;
         sampleInput(event);
-        if (!event.empty()) {
+        if (!event.empty() && !Power::screenOff()) {
             Page* page = s_stack[s_depth - 1];
             page->handle(event);
             page->invalidate();
@@ -927,10 +970,10 @@ void run() {
         // bedtime window or remote lock becomes active while audio is running.
         const auto playback_state = g_playback.snapshot().state;
         const bool playing = playback_state == Audio::PlaybackState::Playing;
-        parentalTick(playing);
+        parentalTick(playing || s_video_active);
         if (s_parental_ready && !playbackAllowed() &&
             (playing || playback_state == Audio::PlaybackState::Paused)) {
-            g_playback.stopAndWait(3000);
+            stopPlayback();
             setNowPlaying("idle", "");
             page->invalidate();
         }
@@ -954,7 +997,7 @@ void run() {
             const bool idle = state_now == Audio::PlaybackState::Stopped ||
                               state_now == Audio::PlaybackState::Ended ||
                               state_now == Audio::PlaybackState::Failed;
-            if (idle) {
+            if (idle && !Video::active()) {
                 s_catalog_refresh_at = now;
                 if (refreshCatalog()) {
                     s_context.catalog_ready = true;
@@ -996,8 +1039,8 @@ void run() {
                 g.drawCenterString(line, 160, 220);
             }
             page->clean();
-            Display::present();
         }
+        if (!screen_off) Display::present();
 
         if (s_context.volume != last_saved_volume && now - last_volume_save >= 1000) {
 #if CONFIG_STORYBOX_FRAM_CONFIRMED
@@ -1009,7 +1052,7 @@ void run() {
 #endif
         }
 
-        vTaskDelay(pdMS_TO_TICKS(kFrameIntervalMs));
+        vTaskDelay(Video::active() ? 1 : pdMS_TO_TICKS(kFrameIntervalMs));
     }
 }
 
@@ -1024,6 +1067,7 @@ void setVolume(int value) {
     if (value > 21) value = 21;
     value = clampVolume(value);
     s_context.volume = value;
+    Video::setVolume(static_cast<unsigned>(value));
     if (s_playback) s_playback->setVolume(static_cast<unsigned>(value));
 }
 
@@ -1034,6 +1078,7 @@ void stepVolume(int steps) {
 
 void applyEq(uint8_t preset) {
     s_context.settings.eq = preset > 3 ? 0 : preset;
+    Video::setEq(static_cast<Audio::EqPreset>(s_context.settings.eq));
     if (s_playback) s_playback->setEq(static_cast<Audio::EqPreset>(s_context.settings.eq));
 }
 
@@ -1046,13 +1091,14 @@ Media::Catalog emptyCatalog() { return Media::Catalog{}; }
 
 bool refreshCatalog() {
     if (!s_context.sd_mounted) return false;
+    if (Video::busy()) return false;
     // Playback holds a file lease for the whole track; maintenance needs every
     // lease released, so stop first and re-allow playback afterwards.
     setNowPlaying("idle", "");
     g_playback.stopAndWait(3000);
     const auto result = g_library.scan(Storage::SdVolume::root);
     g_playback.allowPlayback();
-    if (result != Media::ScanResult::Ok && result != Media::ScanResult::LimitExceeded) {
+    if (result != Media::ScanResult::Ok) {
         ESP_LOGW(kTag, "media scan failed: %d", static_cast<int>(result));
         return false;
     }
@@ -1079,8 +1125,13 @@ bool playCurrent(bool auto_start) {
         notify("该分类已被家长限制");
         return false;
     }
+    if (Video::active()) {
+        Video::close();
+        setVideoActive(false);
+        setCurrentVideo(-1);
+    }
     uint64_t request = 0;
-    const auto result = g_playback.play(track->path.c_str(), auto_start, request);
+    const auto result = Video::playAudio(g_playback, track->path.c_str(), auto_start, request);
     if (result != ESP_OK) ESP_LOGW(kTag, "play %s: %s", track->path.c_str(), esp_err_to_name(result));
     else setNowPlaying("music", track->name.c_str());
     return result == ESP_OK;
@@ -1097,11 +1148,19 @@ void setCurrentVideo(int index) { s_now_video = index; }
 int currentVideo() { return s_now_video; }
 
 bool stopPlayback() {
+    const bool video_busy = Video::busy();
+    if (!Video::close()) return false;
+    setVideoActive(false);
+    setCurrentVideo(-1);
     setNowPlaying("idle", "");
-    return g_playback.stopAndWait(3000) == ESP_OK;
+    if (video_busy) return true;
+    const bool stopped = g_playback.stopAndWait(3000) == ESP_OK;
+    if (stopped) g_playback.allowPlayback();
+    return stopped;
 }
 
 void pausePlayback(bool paused) {
+    if (Video::active()) { Video::pause(paused); return; }
     uint64_t request = 0;
     g_playback.pause(paused, request);
 }
@@ -1200,6 +1259,7 @@ bool parentalApply(const Persistence::ParentalRecord& record) {
     // Keep the trusted clock and the usage accumulator: editing one setting must
     // not turn a bedtime rule into "clock required" and block playback.
     s_parental_ready = s_policy.rebind(s_parental_store->value(), nowMs());
+    if (s_parental_ready) setVolume(s_context.volume);
     return s_parental_ready;
 #else
     (void)record;
@@ -1323,12 +1383,12 @@ void goHome() {
 void openSettings() { pushPage(createSettingsPage()); }
 
 bool start() {
-    const auto created = xTaskCreate(
+    const auto created = xTaskCreatePinnedToCore(
         [](void*) {
             run();
             vTaskDelete(nullptr);
         },
-        "app", 16384, nullptr, 3, nullptr);
+        "app", 16384, nullptr, 3, nullptr, 0);
     if (created != pdPASS) {
         ESP_LOGE(kTag, "cannot create app task");
         return false;

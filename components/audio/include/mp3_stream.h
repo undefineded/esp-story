@@ -5,6 +5,8 @@
 #include <array>
 
 namespace Audio {
+// Process-global decoder registration shared by music and esp_player video.
+esp_err_t ensureMp3Decoder();
 enum class DecodeStep { Pcm, NeedInput, End, Error };
 // Called only by the audio owner task. No I2S or control thread inside decoder.
 class Mp3Stream {

@@ -1,81 +1,41 @@
 #!/usr/bin/env node
-/**
- * 检查 /video 里的文件能不能被故事盒播放 (不用上机)。
- *
- *   node tools/verify_video.mjs D:\video
- *   node tools/verify_video.mjs 动画.avi
- *
- * 检查项与固件 src/video.cpp 一致:
- *   - RIFF/AVI 容器、movi 列表、strf 编码为 MJPG 或 QOI
- *   - 帧数 <= 8000, 单帧 <= 192KB (PSRAM 帧缓冲上限)
- *   - 建议 320x240 (其它尺寸也能播, 但会超出屏幕/被裁切)
- *   - 同名 .mp3 / .wav 音轨是否存在
- */
+// Asset format validation for the IDF esp_player path (not a hardware performance test).
 import { existsSync, readdirSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { extname, join } from 'node:path'
-import { parseAvi } from './lib/avi.mjs'
-
-const MAX_FRAMES = 8000
-const MAX_FRAME_BYTES = 192 * 1024
-const CODECS = new Set(['MJPG', 'QOI '])
-const VIDEO_EXT = new Set(['.avi', '.mjpg', '.mjpeg'])
 
 function collect(target) {
-  if (!existsSync(target)) return []
-  if (statSync(target).isDirectory()) {
-    return readdirSync(target)
-      .filter((n) => VIDEO_EXT.has(extname(n).toLowerCase()))
-      .sort()
-      .map((n) => join(target, n))
-  }
-  return [target]
+  if (!existsSync(target)) throw new Error('文件不存在: ' + target)
+  if (!statSync(target).isDirectory()) return [target]
+  return readdirSync(target).filter(n => extname(n).toLowerCase() === '.avi').sort().map(n => join(target, n))
 }
-
 function check(file) {
-  const issues = []      // 会让设备播不了
-  const warnings = []    // 能播, 但值得知道
-  let info
   try {
-    info = parseAvi(file)
+    const info = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', file], {encoding: 'utf8'}))
+    const video = info.streams.find(s => s.codec_type === 'video')
+    const audio = info.streams.filter(s => s.codec_type === 'audio')
+    const issues = []
+    if (info.format.format_name !== 'avi' || extname(file).toLowerCase() !== '.avi') issues.push('需要 AVI 容器及 .avi 扩展名')
+    if (!video || video.codec_name !== 'mjpeg') issues.push('需要 MJPEG；旧 QOI 请从源视频重新转换')
+    if (video && (video.width !== 320 || video.height !== 240)) issues.push('需要 320x240')
+    if (audio.some(s => s.codec_name !== 'mp3')) issues.push('内嵌音轨需要 MP3')
+    if (issues.length) throw new Error(issues.join('；'))
+    console.log('✓ ' + file + '：MJPEG 320x240，' + (audio.length ? '内嵌 MP3' : '无内嵌音轨（外挂 MP3 不会播放）'))
+    return true
   } catch (e) {
-    console.log(`✗ ${file}\n    ${e.message}`)
+    console.error('✗ ' + file + ': ' + e.message)
     return false
   }
-
-  const worst = info.frames.reduce((m, f) => Math.max(m, f.size), 0)
-  if (!CODECS.has(info.codec.toUpperCase())) issues.push(`编码 ${info.codec.trim()} 不支持 (需要 MJPG 或 QOI)`)
-  if (info.frames.length > MAX_FRAMES) issues.push(`帧数 ${info.frames.length} > ${MAX_FRAMES}`)
-  if (worst > MAX_FRAME_BYTES) issues.push(`最大帧 ${(worst / 1024) | 0}KB > ${MAX_FRAME_BYTES / 1024}KB`)
-  if (info.width !== 320 || info.height !== 240) warnings.push(`分辨率 ${info.width}x${info.height} ≠ 320x240`)
-
-  const base = file.replace(/\.[^.]+$/, '')
-  const audio = ['.mp3', '.wav'].find((e) => existsSync(base + e))
-  if (!audio) warnings.push('没有同名音轨 (会静音播放)')
-
-  const mb = (info.size / 1024 / 1024).toFixed(1)
-  console.log(`${issues.length ? '✗' : '✓'} ${file}`)
-  console.log(`    ${info.codec.trim()} ${info.width}x${info.height} ${info.fps}fps ${info.frames.length}帧 ` +
-    `${(info.durationMs / 1000).toFixed(1)}s ${mb}MB · ` +
-    `音轨 ${audio ? base + audio : '无'}`)
-  if (info.indexed) console.log('    · 内嵌帧索引 (设备打开时不用逐帧扫卡)')
-  for (const w of warnings) console.log(`    · ${w}`)
-  for (const i of issues) console.log(`    ! ${i}`)
-  return issues.length === 0
 }
-
-const targets = process.argv.slice(2)
-if (!targets.length) {
-  console.log('用法: node tools/verify_video.mjs <文件或目录> [...]')
-  process.exit(2)
+try {
+  if (process.argv.length < 3) throw new Error('用法: node tools/verify_video.mjs <文件或目录> [...]')
+  const files = process.argv.slice(2).flatMap(collect)
+  if (!files.length) throw new Error('没有找到 AVI 文件')
+  let failed = 0
+  for (const file of files) if (!check(file)) ++failed
+  console.log('共 ' + files.length + ' 个视频，' + failed + ' 个需要处理；帧率仍须上板验证')
+  if (failed) process.exitCode = 1
+} catch (e) {
+  console.error(e.message)
+  process.exitCode = 1
 }
-
-let total = 0
-let bad = 0
-for (const t of targets) {
-  for (const file of collect(t)) {
-    total++
-    if (!check(file)) bad++
-  }
-}
-console.log(`\n共 ${total} 个视频, ${bad} 个需要处理`)
-if (bad) process.exitCode = 1

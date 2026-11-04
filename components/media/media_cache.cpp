@@ -69,7 +69,8 @@ bool readCatalog(Storage::FileStream& file,Catalog& catalog) {
         Story story;
         if (!archive.text(story.directory) || !inside(story.directory,"/story") ||
             !archive.text(story.audio) || !archive.text(story.timeline) ||
-            (!story.audio.empty() && !inside(story.audio,story.directory,".mp3")) ||
+            (!story.audio.empty() && !(story.timeline.empty() && story.audio==story.directory) &&
+             !inside(story.audio,story.directory,".mp3")) ||
             (!story.timeline.empty() && !inside(story.timeline,story.directory,".lrc"))) return false;
         normalizeStory(story);
         catalog.stories.push_back(std::move(story));

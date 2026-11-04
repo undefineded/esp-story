@@ -275,6 +275,7 @@ public:
 
 private:
     void adjust(int direction) {
+        record_ = parentalRecord();
         switch (selected_) {
             case 0:
                 record_.daily_limit = cycleDailyLimit(record_.daily_limit, direction);
@@ -316,6 +317,7 @@ private:
     }
 
     void activate() {
+        record_ = parentalRecord();
         switch (selected_) {
             case 6:
                 pinEntryReset(PinPurpose::SetPin);
