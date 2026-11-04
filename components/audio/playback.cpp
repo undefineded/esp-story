@@ -123,8 +123,9 @@ void Playback::step() {
         case DecodeStep::Error: finish(PlaybackState::Failed, stream_.error()); return;
         case DecodeStep::End:
             current_.state = PlaybackState::Draining;
-            // TX configured with four 240-frame DMA descriptors; allow final tail.
-            drain_until_ = esp_timer_get_time() + 10000 + 960000000LL / current_.sample_rate;
+            // Wait out the DMA ring plus a small margin.
+            drain_until_ = esp_timer_get_time() + 10000 +
+                           int64_t(output_.capacity()) * 1000000LL / current_.sample_rate;
             return;
         case DecodeStep::Pcm: break;
         }

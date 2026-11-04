@@ -1,14 +1,16 @@
 #include "pcm_output.h"
+#include <algorithm>
 #include <limits>
 namespace Audio {
 PcmOutput::~PcmOutput() { stop(); }
-esp_err_t PcmOutput::begin(uint32_t sample_rate) {
+esp_err_t PcmOutput::begin(uint32_t sample_rate, uint32_t total_frames) {
     if (channel_) return ESP_ERR_INVALID_STATE;
     if (sample_rate < 8000 || sample_rate > 48000) return ESP_ERR_INVALID_ARG;
+    if (total_frames < kChunkFrames || total_frames % kChunkFrames) return ESP_ERR_INVALID_ARG;
     i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     channel.auto_clear = true;
-    channel.dma_desc_num = 4;
-    channel.dma_frame_num = 240;
+    channel.dma_desc_num = total_frames / kChunkFrames;
+    channel.dma_frame_num = kChunkFrames;
     auto result = i2s_new_channel(&channel, &channel_, nullptr);
     if (result != ESP_OK) return result;
     i2s_std_config_t config{};
@@ -22,6 +24,7 @@ esp_err_t PcmOutput::begin(uint32_t sample_rate) {
     result = i2s_channel_init_std_mode(channel_, &config);
     if (result == ESP_OK) result = i2s_channel_enable(channel_);
     if (result != ESP_OK) { i2s_del_channel(channel_); channel_ = nullptr; return result; }
+    capacity_ = total_frames;
     enabled_ = true;
     return ESP_OK;
 }
@@ -32,8 +35,21 @@ esp_err_t PcmOutput::write(const int16_t* samples, std::size_t frames,
     if ((!samples && frames) || frames > std::numeric_limits<std::size_t>::max() / 4)
         return ESP_ERR_INVALID_ARG;
     if (!frames) return ESP_OK;
-    // Caller must handle partial writes, including progress returned on timeout.
-    return i2s_channel_write(channel_, samples, frames * 4, &written, timeout_ms);
+    // One descriptor per call. A chunk larger than the ring makes every write wait
+    // for the whole chunk to drain, which folds decode time into the audio clock;
+    // callers keep partial progress so a timeout is retried with the remainder.
+    std::size_t sent = 0;
+    while (sent < frames) {
+        const std::size_t chunk = std::min<std::size_t>(frames - sent, kChunkFrames);
+        std::size_t done = 0;
+        const auto result = i2s_channel_write(channel_, samples + sent * 2, chunk * 4,
+                                              &done, timeout_ms);
+        sent += done / 4;
+        written = sent * 4;
+        if (result != ESP_OK) return result;
+        if (!done) return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
 }
 esp_err_t PcmOutput::stop() {
     if (!channel_) return ESP_OK;
@@ -43,7 +59,7 @@ esp_err_t PcmOutput::stop() {
         enabled_ = false;
     }
     const auto result = i2s_del_channel(channel_);
-    if (result == ESP_OK) channel_ = nullptr;
+    if (result == ESP_OK) { channel_ = nullptr; capacity_ = 0; }
     return result;
 }
 }
