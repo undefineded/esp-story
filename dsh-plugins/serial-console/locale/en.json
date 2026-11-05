@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Serial Console",
+    "description": "Right-sidebar panel for live serial output, COM-port connection status, and PlatformIO flash progress."
+  }
+}

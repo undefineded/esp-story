@@ -1,0 +1,12 @@
+- insert:
+    - id: serial-console
+      name: '@local/dsh-serial-console'
+      config:
+        # PlatformIO project the 烧录 button runs in; empty means the Harness working directory.
+        projectDir: 'C:\Users\a1509\Documents\PlatformIO\Projects\music-demo'
+        # PlatformIO environment (from platformio.ini) used for uploads.
+        env: esp32-s3-devkitm-1
+        # Default serial baud rate for a newly opened port.
+        baud: 115200
+        # Optional explicit PlatformIO executable; empty means auto-detect.
+        pioPath: ''

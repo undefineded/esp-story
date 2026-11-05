@@ -20,3 +20,11 @@ Netlist_*.enet
 
 # 视频转码输出 (tools/build_video.mjs 默认目录)
 /out-video/
+
+# Whisper 转录环境与中间产物（本机）
+/.whisper-venv/
+/.whisper-work/
+/.whisper-*.log
+
+# 原始视频素材（大文件，不入库）
+/raw-video/

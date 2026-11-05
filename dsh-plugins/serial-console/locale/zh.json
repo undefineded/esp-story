@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "串口控制台",
+    "description": "右侧栏面板：查看串口通信数据、串口连接状态和 PlatformIO 烧录进度。"
+  }
+}
