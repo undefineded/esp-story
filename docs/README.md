@@ -3,6 +3,7 @@
 当前使用指南：
 
 - [视频播放器、转换和性能统计](idf-video-player.md)，[性能优化待办](PERFORMANCE-TODO.md)
+- [音频/视频卡顿排查记录](audio-video-bugfix-log.md)：两次断音的现场数据、误判和最终修复。
 - [显示刷新](display-refresh.md)、[主页资源](home-design.md)、[媒体索引](media-index.md)
 - [USB 文件传输](file-transfer-refactor.md)、[PN532 和桌面端能力边界](pn532-i2c.md)
 - [硬件验收清单](idf-hardware-acceptance.md)、[验收记录](idf-acceptance-log.md)
