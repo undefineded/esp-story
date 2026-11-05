@@ -6,7 +6,7 @@
  * Existing QOI clips must be regenerated from their original source.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, renameSync, unlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { basename, extname, join, resolve } from 'node:path'
 
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v', '.ts', '.mpg', '.mpeg'])
@@ -60,7 +60,13 @@ function convert(input, opts) {
     if (!video || video.codec_name !== 'mjpeg' || video.width !== 320 || video.height !== 240 ||
         !audio || audio.codec_name !== 'mp3') throw new Error('输出音视频格式校验失败')
     renameSync(temp, destination)
-    console.log(destination + '  MJPEG 320x240 ' + opts.fps + 'fps + 内嵌 MP3' + (hasAudio ? '' : '（静音）'))
+    const seconds = Number(info.format.duration)
+    const kbps = seconds > 0 ? statSync(destination).size / 1024 / seconds : 0
+    console.log(destination + '  MJPEG 320x240 ' + opts.fps + 'fps + 内嵌 MP3' +
+                (hasAudio ? '' : '（静音）') + (kbps ? '  ' + kbps.toFixed(0) + ' KB/s' : ''))
+    // The device reads video and its embedded audio from the same 1-bit TF card
+    // (~150-200 KB/s measured); above ~100 KB/s the audio pipeline starts to starve.
+    if (kbps > 100) console.warn('  ! 码率偏高：建议 ≤100 KB/s（--fps 10 --quality 12 约 75 KB/s）')
   } finally {
     if (existsSync(temp)) unlinkSync(temp)
   }

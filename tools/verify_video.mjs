@@ -20,7 +20,14 @@ function check(file) {
     if (video && (video.width !== 320 || video.height !== 240)) issues.push('需要 320x240')
     if (audio.some(s => s.codec_name !== 'mp3')) issues.push('内嵌音轨需要 MP3')
     if (issues.length) throw new Error(issues.join('；'))
-    console.log('✓ ' + file + '：MJPEG 320x240，' + (audio.length ? '内嵌 MP3' : '无内嵌音轨（外挂 MP3 不会播放）'))
+    const seconds = Number(info.format.duration)
+    const kbps = seconds > 0 ? statSync(file).size / 1024 / seconds : 0
+    console.log('✓ ' + file + '：MJPEG 320x240，' + (audio.length ? '内嵌 MP3' : '无内嵌音轨（外挂 MP3 不会播放）') +
+                (kbps ? '，平均 ' + kbps.toFixed(0) + ' KB/s' : ''))
+    // The player reads video and its embedded audio from the same card. This
+    // 1-bit TF slot measures ~150-200 KB/s, so a high-bitrate asset starves the
+    // audio pipeline even when the picture keeps up.
+    if (kbps > 100) console.warn('  ! 码率偏高：1-bit TF 卡实测约 150-200 KB/s，建议 ≤100 KB/s（10 fps / quality 12 约 75 KB/s）')
     return true
   } catch (e) {
     console.error('✗ ' + file + ': ' + e.message)
