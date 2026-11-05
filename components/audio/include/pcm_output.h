@@ -10,9 +10,9 @@ public:
     // Writes are split into one DMA descriptor each, so a caller may hand over any
     // chunk size without forcing a wait for the whole chunk to drain. The ring then
     // only sets latency and slack:
-    //   music: 6 x 480 = 65 ms, room for a slow SD read or decode step;
+    //   music: 8 x 480 = 87 ms, covers the page-redraw burst when a track starts;
     //   video: 3 x 480 = 33 ms, keeps A/V latency close to the picture.
-    static constexpr uint32_t kMusicCapacity = 6 * 480;
+    static constexpr uint32_t kMusicCapacity = 8 * 480;
     static constexpr uint32_t kVideoCapacity = 3 * 480;
     static constexpr uint32_t kChunkFrames = 480;
     PcmOutput() = default;
