@@ -41,7 +41,7 @@ std::atomic<Audio::EqPreset> eq{Audio::EqPreset::Vocal};
 LatestFrame latest;
 std::mutex framebuffer_mutex;
 uint8_t* framebuffer = nullptr;
-uint8_t* mailbox = nullptr;
+uint8_t* mailbox[3] = {nullptr, nullptr, nullptr};
 const char* last_error = "";
 bool defaults_registered = false;
 enum class Action { Open, Stop, Audio };
@@ -132,6 +132,8 @@ int writeAudio(uint8_t* pcm, uint32_t size, void*) {
     if (!pcm || size % 4) return -1;
     equalizer.configure(SampleRate, eq.load());
     equalizer.process(reinterpret_cast<int16_t*>(pcm), size / 4, volume.load());
+    // esp_player hands over 100 ms of PCM per call; the I2S ring is sized for a
+    // full chunk, so this only blocks on real backpressure.
     std::size_t offset = 0;
     while (offset < size) {
         std::size_t written = 0;
@@ -194,10 +196,12 @@ bool openSync(Storage::AccessGate& gate, Audio::Playback& audio, const std::stri
     if (!gate.acquire()) return fail("存储正在维护");
     lease = &gate; // esp_player owns FILE internally; keep our lease for its entire lifetime.
     framebuffer = static_cast<uint8_t*>(heap_caps_aligned_alloc(16, Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    mailbox = static_cast<uint8_t*>(heap_caps_aligned_alloc(16, Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!framebuffer || !mailbox) return fail("视频需要 PSRAM");
+    mailbox[0] = static_cast<uint8_t*>(heap_caps_aligned_alloc(16, Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    mailbox[1] = static_cast<uint8_t*>(heap_caps_aligned_alloc(16, Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    mailbox[2] = static_cast<uint8_t*>(heap_caps_aligned_alloc(16, Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!framebuffer || !mailbox[0] || !mailbox[1] || !mailbox[2]) return fail("视频需要 PSRAM");
     std::memset(framebuffer, 0, Bytes);
-    latest.attach(mailbox, Bytes);
+    latest.attach(mailbox[0], mailbox[1], mailbox[2], Bytes);
     if (!defaults_registered) {
         media_lib_add_default_adapter();
         // Registries are process-global and shared with the MP3 service. Never unregister on page exit.
@@ -223,20 +227,10 @@ bool openSync(Storage::AccessGate& gate, Audio::Playback& audio, const std::stri
     esp_player_config_t cfg = ESP_PLAYER_CONFIG_DEFAULT();
     cfg.audio_render_hd = stream; cfg.video_render_hd = video_render;
     if (esp_player_init(&cfg, &player)) return fail("播放器初始化失败");
-    // Core 0: SD demux + audio + UI/SPI; core 1: expensive video decode.
-    // Internal stacks avoid flash/cache-disabled access to PSRAM stacks.
-    esp_player_task_config_t tasks{};
-    auto task = [](int core, int priority) {
-        esp_gmf_task_config_t t{};
-        t.stack = 6144; t.prio = priority; t.core = core; t.stack_in_ext = false;
-        return t;
-    };
-    tasks.extractor = task(0, 4);
-    tasks.audio_decoder = task(0, 5);
-    tasks.audio_render = task(0, 6);
-    tasks.video_decoder = task(1, 5);
-    tasks.video_render = task(1, 4);
-    if (esp_player_set_task_config(player, &tasks)) return fail("分核配置失败");
+    // Task placement stays on the library defaults (player_defaults_cfg.h):
+    // extractor/audio-render/video-decoder on core 0, audio-decoder/video-render
+    // on core 1. The vendor example runs the same layout; an earlier override that
+    // put audio decoding on core 0 competed with the extractor and starved audio.
     frame_serial = working_serial;
     if (control.serial() != working_serial) { closeSync(); return false; }
     timings.setup_ms = static_cast<uint32_t>((esp_timer_get_time() - setup_at) / 1000);
@@ -260,7 +254,8 @@ bool closeSync(bool drain_audio) {
     if (video_pool) { esp_gmf_pool_deinit(video_pool); video_pool = nullptr; }
     heap_caps_free(framebuffer); framebuffer = nullptr;
     latest.detach();
-    heap_caps_free(mailbox); mailbox = nullptr;
+    heap_caps_free(mailbox[0]); heap_caps_free(mailbox[1]); heap_caps_free(mailbox[2]);
+    mailbox[0] = mailbox[1] = mailbox[2] = nullptr;
     if (lease) { lease->release(); lease = nullptr; }
     // Admission and ownership are released even when the driver refuses to stop:
     // leaving them behind made every later play request fail until a reboot.
@@ -315,7 +310,7 @@ void controlTask(void*) {
             if (command.action == Action::Open && control.serial() == command.serial) {
                 timings = {};
                 first_frame_ms = 0; copy_us = 0;
-                latest.attach(nullptr, 0);
+                latest.detach();
                 timings.queue_ms = queue_ms;
                 timings.close_ms = close_ms;
             }

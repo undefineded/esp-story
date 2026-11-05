@@ -6,9 +6,9 @@
 
 int main() {
     Video::LatestFrame frame;
-    std::array<uint32_t, 320 * 240 / 2> storage{}, input{}, result{};
+    std::array<uint32_t, 320 * 240 / 2> storage{}, storage2{}, storage3{}, input{}, result{};
     assert(!frame.publish(input.data(), sizeof(input)));
-    frame.attach(storage.data(), sizeof(storage));
+    frame.attach(storage.data(), storage2.data(), storage3.data(), sizeof(storage));
     assert(!frame.consume(result.data(), sizeof(result)));
     input.fill(1);
     assert(frame.publish(input.data(), sizeof(input)));
@@ -36,8 +36,8 @@ int main() {
     }
     producer.join();
     assert(frame.frames() == consumed + frame.replaced());
-    // The UI now borrows the mailbox under its lock instead of copying to a
-    // separate page buffer. Cached visits support pause/overlay redraws.
+    // The UI reads a stable buffer outside the lock; cached visits support pause
+    // and overlay redraws without a second page buffer.
     input.fill(42);
     assert(frame.publish(input.data(), sizeof(input)));
     for (int n = 0; n < 2; ++n) {
@@ -54,7 +54,7 @@ int main() {
     assert(!frame.publish(input.data(), sizeof(input)));
     frame.detach(); // repeated Stop must preserve the same completed session
     assert(frame.frames() == frames && frame.replaced() == replaced);
-    frame.attach(storage.data(), sizeof(storage));
+    frame.attach(storage.data(), storage2.data(), storage3.data(), sizeof(storage));
     assert(!frame.pending() && frame.frames() == 0);
     frame.detach();
     assert(!frame.publish(input.data(), sizeof(input)));
