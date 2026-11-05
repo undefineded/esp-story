@@ -11,9 +11,12 @@ public:
     // chunk size without forcing a wait for the whole chunk to drain. The ring then
     // only sets latency and slack:
     //   music: 8 x 480 = 87 ms, covers the page-redraw burst when a track starts;
-    //   video: 3 x 480 = 33 ms, keeps A/V latency close to the picture.
+    //   video: 12 x 480 = 130 ms, because esp_player's render element hands over
+    //          100 ms of PCM per call (ESP_PLAYER_AUDIO_RB_TIME_MS >> 2); a ring
+    //          smaller than that chunk makes every write block for a full chunk
+    //          and the 8-9 ms gap between chunks becomes a permanent underrun.
     static constexpr uint32_t kMusicCapacity = 8 * 480;
-    static constexpr uint32_t kVideoCapacity = 3 * 480;
+    static constexpr uint32_t kVideoCapacity = 12 * 480;
     static constexpr uint32_t kChunkFrames = 480;
     PcmOutput() = default;
     PcmOutput(const PcmOutput&) = delete;
