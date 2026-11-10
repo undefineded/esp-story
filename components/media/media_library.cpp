@@ -1,9 +1,12 @@
-#include "media_library.h"
+﻿#include "media_library.h"
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <dirent.h>
 #include <sys/stat.h>
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#endif
 
 namespace Media {
 namespace {
@@ -33,7 +36,11 @@ struct Scanner {
         while (true) {
             errno=0;
             const auto* entry = readdir(directory.handle);
-            if (!entry) { if (errno) result=ScanResult::IoError; break; }
+            if (!entry) { if (errno) {
+#ifdef ESP_PLATFORM
+                ESP_LOGW("media", "readdir %s failed: errno=%d", (root+path).c_str(), errno);
+#endif
+                result=ScanResult::IoError; } break; }
             const std::string name=entry->d_name;
             if (name=="." || name=="..") continue;
             const auto child=path+"/"+name;
@@ -45,7 +52,11 @@ struct Scanner {
 #else
             const int status=lstat((root+child).c_str(),&st);
 #endif
-            if (status!=0) { result=ScanResult::IoError; break; }
+            if (status!=0) {
+#ifdef ESP_PLATFORM
+                ESP_LOGW("media", "stat %s failed: errno=%d", (root+child).c_str(), errno);
+#endif
+                result=ScanResult::IoError; break; }
 #ifdef S_ISLNK
             if (S_ISLNK(st.st_mode)) { result=ScanResult::IoError; break; }
 #endif
@@ -55,17 +66,17 @@ struct Scanner {
         return result==ScanResult::Ok;
     }
     void addTrack(const std::string& path,const std::string& name,int category) {
-        if (catalog.tracks.size()>=300) { result=ScanResult::LimitExceeded; return; }
+        if (catalog.tracks.size()>=kMaxTracks) { result=ScanResult::LimitExceeded; return; }
         catalog.tracks.push_back({path,name,Library::nameId(name),category});
     }
     void music(const std::string& path,int category,unsigned depth) {
         std::vector<std::pair<std::string,unsigned>> pending{{path,depth}};
         while (!pending.empty() && result==ScanResult::Ok) {
             const auto current=std::move(pending.back()); pending.pop_back();
-            if (current.second>16) { result=ScanResult::LimitExceeded; return; }
+            if (current.second>24) { result=ScanResult::LimitExceeded; return; }
             visit(current.first,[&](const auto& child,const auto& name,bool dir,bool regular) {
                 if (dir) {
-                    if (pending.size()>=300) { result=ScanResult::LimitExceeded; return; }
+                    if (pending.size()>=512) { result=ScanResult::LimitExceeded; return; }
                     pending.emplace_back(child,current.second+1);
                 } else if (regular && extension(name,".mp3")) addTrack(child,name,category);
             });
@@ -77,7 +88,7 @@ struct Scanner {
         std::vector<std::string> songs;
         visit(path,[&](const auto& child,const auto& name,bool dir,bool regular) {
             if (dir && depth<6) {
-                if (children.size()>=300) { result=ScanResult::LimitExceeded; return; }
+                if (children.size()>=512) { result=ScanResult::LimitExceeded; return; }
                 children.emplace_back(child,name);
             }
             if (regular && audio.empty() && extension(name,".mp3")) audio=child;
@@ -150,7 +161,7 @@ ScanResult Library::scan(const std::string& root) {
     Scanner scanner{root,*next};
     scanner.visit("/music",[&](const auto& path,const auto& name,bool dir,bool regular) {
         if (dir) {
-            if (next->categories.size()>=32) { scanner.result=ScanResult::LimitExceeded; return; }
+            if (next->categories.size()>=kMaxCategories) { scanner.result=ScanResult::LimitExceeded; return; }
             const auto before=next->tracks.size();
             scanner.music(path,next->categories.size()+1,1);
             if (next->tracks.size()>before) next->categories.push_back(name);
@@ -171,7 +182,7 @@ bool Playlist::select(std::shared_ptr<const Catalog> catalog,int category,bool n
     std::vector<std::size_t> indices;
     for (std::size_t i=0;i<catalog->tracks.size();++i) {
         const auto& track=catalog->tracks[i];
-        if (track.category<0 || track.category>32 || std::size_t(track.category)>catalog->categories.size()) return false;
+        if (track.category<0 || track.category>static_cast<int>(kMaxCategories) || std::size_t(track.category)>catalog->categories.size()) return false;
         if (!(allowed & (uint64_t{1}<<track.category))) continue;
         if (category && category!=track.category) continue;
         if (nursery_only && (!track.category || !Library::nursery(catalog->categories[track.category-1]))) continue;
@@ -198,3 +209,4 @@ bool Playlist::seekId(uint32_t id) {
     return false;
 }
 }
+

@@ -25,7 +25,8 @@ bool open(Storage::AccessGate& gate, Audio::Playback& audio, const std::string& 
 bool close(bool drain_audio = false);
 bool active();
 bool busy(); // Includes queued teardown / audio handoff, not just video playback.
-esp_err_t playAudio(Audio::Playback& audio, const char* path, bool start, uint64_t& request);
+esp_err_t playAudio(Audio::Playback& audio, const char* path, bool start, uint64_t& request,
+                    uint32_t start_offset = 0, uint32_t start_seconds = 0);
 bool pause(bool paused);
 void setVolume(unsigned volume);
 void setEq(Audio::EqPreset preset);

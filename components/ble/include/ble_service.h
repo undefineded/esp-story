@@ -67,6 +67,15 @@ struct Hooks {
     // "ctrl fav": toggles the favourite flag of one track and reports the new
     // state plus the total. Returns false when favourites are unavailable.
     bool (*toggle_favorite)(void* context, int32_t index, bool* now, int32_t* total) = nullptr;
+    // "del": removes the music track at `index` from the card and rescans the
+    // catalog. Returns nullptr on success or a protocol error code.
+    const char* (*delete_music)(void* context, int32_t index) = nullptr;
+    // Version of the catalog the phone would download (tracks, stories,
+    // categories and the allowlist flags they carry). The phone caches the last
+    // full sync and only re-downloads when this changes, so a big SD card no
+    // longer costs a long sync on every connect. 0 means "no revision known":
+    // the phone then always downloads.
+    uint32_t (*catalog_rev)(void* context) = nullptr;
 };
 
 // GATT service (RX writes JSON lines, TX notifies JSON lines) plus the protocol
@@ -76,6 +85,9 @@ void loop();
 void setAdvertisingEnabled(bool enabled);
 bool advertisingEnabled();
 bool connected();
+// Millisecond timestamp of the last RX line from the phone. The idle policy uses
+// it so a connected but silent link does not keep the panel awake forever.
+uint32_t lastActivityMs();
 void setSnapshot(const Snapshot& snapshot);
 bool takeCommand(Command& out);
 const char* deviceName();

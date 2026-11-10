@@ -25,7 +25,8 @@ esp_err_t Playback::submit(Command& command, uint64_t& id) {
     id = ++next_request_;
     return ESP_OK;
 }
-esp_err_t Playback::play(const char* path, bool auto_start, uint64_t& id) {
+esp_err_t Playback::play(const char* path, bool auto_start, uint64_t& id,
+                         uint32_t start_offset, uint32_t start_seconds) {
     if (inhibited_) return ESP_ERR_INVALID_STATE;
     if (!path || std::strlen(path) >= sizeof(Command::path)) return ESP_ERR_INVALID_ARG;
     std::string normalized;
@@ -33,6 +34,8 @@ esp_err_t Playback::play(const char* path, bool auto_start, uint64_t& id) {
     Command command{};
     command.action = Action::Play;
     command.auto_start = auto_start;
+    command.start_offset = start_offset;
+    command.start_seconds = start_seconds;
     std::strcpy(command.path, normalized.c_str());
     return submit(command, id);
 }
@@ -74,6 +77,7 @@ esp_err_t Playback::stopAndWait(uint32_t timeout_ms) {
 }
 void Playback::finish(PlaybackState state, esp_err_t error) {
     const auto stopped = output_.stop();
+    output_started_ = false;
     const bool closed = stream_.close();
     pending_frames_ = pending_offset_ = 0;
     if (stopped != ESP_OK) error = stopped;
@@ -93,11 +97,23 @@ void Playback::execute(const Command& command) {
         equalizer_.reset();
         current_.submitted_frames = 0;
         current_.sample_rate = current_.bitrate = current_.duration = 0;
+        current_.offset_bytes = 0;
         std::strcpy(current_.path, command.path);
-        const auto result = stream_.open("/sdcard", command.path);
+        const auto result = stream_.open("/sdcard", command.path, command.start_offset);
         if (result != ESP_OK) finish(PlaybackState::Failed, result);
         else {
             current_.duration = stream_.duration();
+            // The header parse already knows the bitrate, so a track that was
+            // opened paused (session restore) shows it without decoding a frame.
+            current_.bitrate = stream_.bitrate();
+            current_.sample_rate = stream_.sampleRate();
+            current_.offset_bytes = stream_.byteOffset();
+            // Resume: seed the frame counter so the progress bar starts at the
+            // remembered position; decoded frames add on top of it.
+            if (command.start_seconds) {
+                const uint32_t rate = stream_.sampleRate();
+                current_.submitted_frames = uint64_t(command.start_seconds) * (rate ? rate : 44100u);
+            }
             current_.state = command.auto_start ? PlaybackState::Playing : PlaybackState::Paused;
         }
     } else if (command.action == Action::Pause && current_.state == PlaybackState::Playing) {
@@ -129,9 +145,12 @@ void Playback::step() {
             return;
         case DecodeStep::Pcm: break;
         }
-        if (!current_.sample_rate) {
+        // sample_rate is already known from the frame header (kept for the
+        // paused/resumed UI), so a separate flag owns the I2S bring-up.
+        if (!output_started_) {
             const auto result = output_.begin(stream_.sampleRate());
             if (result != ESP_OK) { finish(PlaybackState::Failed, result); return; }
+            output_started_ = true;
             current_.sample_rate = stream_.sampleRate();
         } else if (current_.sample_rate != stream_.sampleRate()) {
             finish(PlaybackState::Failed, ESP_ERR_NOT_SUPPORTED); return;
@@ -155,6 +174,7 @@ void Playback::step() {
     pending_offset_ += written / 4;
     pending_frames_ -= written / 4;
     current_.submitted_frames += written / 4;
+    current_.offset_bytes = stream_.byteOffset();
     if (written) last_output_progress_ = esp_timer_get_time();
     else if (esp_timer_get_time() - last_output_progress_ > 2000000) {
         finish(PlaybackState::Failed, ESP_ERR_TIMEOUT); return;

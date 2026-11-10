@@ -1,6 +1,7 @@
 #include "ble_service.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "cJSON.h"
@@ -66,9 +67,14 @@ uint16_t s_rx_handle = 0;
 uint16_t s_tx_handle = 0;
 int64_t s_connected_at = 0;
 int64_t s_last_state_at = 0;
+// A catalog page spans several notifications. The 1 Hz state event waits until
+// the page is fully on the air so the two streams do not interleave (which costs
+// airtime and can drop the tail of a page).
+int64_t s_quiet_until = 0;
 char s_rx[kLineCapacity];
 std::size_t s_rx_length = 0;
 bool s_rx_overflow = false;
+int64_t s_last_rx_ms = 0;
 
 int64_t millisNow() {
     return static_cast<int64_t>(esp_timer_get_time() / 1000);
@@ -116,18 +122,30 @@ bool sendText(const char* text) {
 }
 
 void sendDoc(cJSON* root) {
-    char buffer[1024];
-    const bool ok = cJSON_PrintPreallocated(root, buffer, sizeof(buffer), false);
+    // A catalog page can be several KiB now that the phone asks for larger pages,
+    // so the buffer is sized from the document instead of a fixed 1024 bytes.
+    // (cJSON_PrintUnformatted allocates from the cJSON heap and must be freed
+    // with cJSON_free.) The '\n' terminator is added in a second buffer because
+    // the printed string has no spare byte.
+    char* text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
-    if (!ok) {
+    if (!text) {
         ESP_LOGW(kTag, "tx overflow");
         return;
     }
-    const std::size_t length = std::strlen(buffer);
-    if (length + 1 >= sizeof(buffer)) return;
-    buffer[length] = '\n';
-    buffer[length + 1] = '\0';
-    sendText(buffer);
+    const std::size_t length = std::strlen(text);
+    char* line = static_cast<char*>(std::malloc(length + 2));
+    if (!line) {
+        cJSON_free(text);
+        ESP_LOGW(kTag, "tx alloc failed (%u bytes)", static_cast<unsigned>(length));
+        return;
+    }
+    std::memcpy(line, text, length);
+    line[length] = '\n';
+    line[length + 1] = '\0';
+    cJSON_free(text);
+    sendText(line);
+    std::free(line);
 }
 
 // Parental status straight from the app; a device without a usable PCTL record
@@ -224,6 +242,11 @@ void sendHello(int32_t id) {
     cJSON_AddBoolToObject(root, "hasPin", status.has_pin);
     cJSON_AddNumberToObject(root, "volMin", status.volume_min);
     cJSON_AddNumberToObject(root, "volMax", status.volume_max);
+    // The phone compares this against the catalog it cached last time and skips
+    // the whole listing when it matches.
+    if (s_hooks.catalog_rev) {
+        cJSON_AddNumberToObject(root, "rev", s_hooks.catalog_rev(s_hooks.context));
+    }
     if (!status.bound && s_hooks.bind_code) {
         cJSON_AddStringToObject(root, "code", s_hooks.bind_code(s_hooks.context));
     }
@@ -370,6 +393,8 @@ void handleGet(cJSON* request, int32_t id) {
     if (s_hooks.list) {
         cJSON* data = cJSON_AddObjectToObject(root, "data");
         if (s_hooks.list(s_hooks.context, what, request, data)) {
+            // Keep the periodic state event off the air until this page is done.
+            s_quiet_until = millisNow() + 1200;
             sendDoc(root);
             return;
         }
@@ -527,6 +552,26 @@ void handleUnbind(int32_t id) {
     sendDoc(root);
 }
 
+// "del": removes one music track from the card (see Hooks::delete_music).
+void handleDelete(cJSON* request, int32_t id) {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(request, "i");
+    if (!cJSON_IsNumber(item)) {
+        sendError(id, "BAD_INDEX");
+        return;
+    }
+    if (!s_hooks.delete_music) {
+        sendError(id, "NOT_SUPPORTED");
+        return;
+    }
+    const char* error = s_hooks.delete_music(s_hooks.context,
+                                             static_cast<int32_t>(item->valuedouble));
+    if (error) {
+        sendError(id, error);
+        return;
+    }
+    sendOk(id);
+}
+
 void processLine(const char* line) {
     cJSON* request = cJSON_Parse(line);
     if (!request) {
@@ -609,6 +654,11 @@ void processLine(const char* line) {
         cJSON_Delete(request);
         return;
     }
+    if (std::strcmp(cmd, "del") == 0) {
+        handleDelete(request, id);
+        cJSON_Delete(request);
+        return;
+    }
     if (std::strcmp(cmd, "set") == 0) {
         handleSet(request, id);
         cJSON_Delete(request);
@@ -686,6 +736,7 @@ void startAdvertising() {
 
 int accessCallback(uint16_t, uint16_t attr_handle, ble_gatt_access_ctxt* ctxt, void*) {
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR || attr_handle != s_rx_handle) return BLE_ATT_ERR_UNLIKELY;
+    s_last_rx_ms = millisNow();
     const uint16_t length = OS_MBUF_PKTLEN(ctxt->om);
     uint8_t buffer[512];
     if (length > sizeof(buffer)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -826,7 +877,7 @@ void loop() {
         processLine(line.text);
     }
     if (s_conn != BLE_HS_CONN_HANDLE_NONE && s_authed &&
-        millisNow() - s_last_state_at >= 1000) {
+        millisNow() - s_last_state_at >= 1000 && millisNow() >= s_quiet_until) {
         s_last_state_at = millisNow();
         sendStateEvent();
     }
@@ -859,6 +910,14 @@ bool connected() {
     return s_conn != BLE_HS_CONN_HANDLE_NONE;
 #else
     return false;
+#endif
+}
+
+uint32_t lastActivityMs() {
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    return static_cast<uint32_t>(s_last_rx_ms);
+#else
+    return 0;
 #endif
 }
 

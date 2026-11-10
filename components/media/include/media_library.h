@@ -7,8 +7,17 @@
 
 namespace Media {
 enum class StoryKind { Audio, Illustrated };
-inline constexpr std::size_t kMaxStories = 128;
-inline constexpr std::size_t kMaxTracks = 300;
+// Catalog limits. Tracks are two std::string each, so 1000 tracks costs roughly
+// 60-80 KiB of internal heap; the parental allowlist is a uint64 bitmask with
+// one bit per category (bit 0 is "loose /music files"), hence 32 categories.
+// Story is five std::string (directory/title/audio/timeline/category), i.e. 124 B
+// on the 32-bit target: the 1024-entry vector is one >8 KiB malloc and therefore
+// lands in PSRAM, while the individual path strings (SSO overflows at 15 chars)
+// stay in internal heap. The real card already holds 656 stories, so 512 forced
+// LimitExceeded and dropped the whole catalog.
+inline constexpr std::size_t kMaxStories = 1024;
+inline constexpr std::size_t kMaxTracks = 2000;
+inline constexpr std::size_t kMaxCategories = 32;
 struct Track { std::string path, name; uint32_t id; int category; };
 struct Story {
     std::string directory, title, audio, timeline;
@@ -64,3 +73,5 @@ private:
     int category_ = 0;
 };
 }
+
+

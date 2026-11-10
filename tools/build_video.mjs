@@ -11,7 +11,7 @@ import { basename, extname, join, resolve } from 'node:path'
 
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v', '.ts', '.mpg', '.mpeg'])
 function parseArgs(argv) {
-  const opts = { out: 'out-video', fps: 15, quality: 6, audio: true, crop: false, inputs: [] }
+  const opts = { out: 'out-video', fps: 15, quality: 6, audio: true, crop: false, dual: false, fillOnly: false, group: '', inputs: [] }
   for (let i = 0; i < argv.length; ++i) {
     const a = argv[i]
     const value = () => { if (!argv[i + 1]) throw new Error(a + ' 缺少参数'); return argv[++i] }
@@ -23,6 +23,9 @@ function parseArgs(argv) {
     else if (a === '--codec') { if (value() !== 'jpeg') throw new Error('官方播放器使用 --codec jpeg；不再支持 QOI') }
     else if (a === '--no-audio') opts.audio = false
     else if (a === '--scale-crop') opts.crop = true
+    else if (a === '--dual') opts.dual = true
+    else if (a === '--fill-only') opts.fillOnly = true
+    else if (a === '--group') opts.group = value()
     else if (a === '--all-in') {
       const dir = value()
       opts.inputs.push(...readdirSync(dir).filter(n => VIDEO_EXT.has(extname(n).toLowerCase())).map(n => join(dir, n)))
@@ -37,14 +40,19 @@ function parseArgs(argv) {
 function probe(path) {
   return JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', path], { encoding: 'utf8' }))
 }
-function convert(input, opts) {
-  const destination = join(opts.out, basename(input, extname(input)) + '.avi')
+function convert(input, opts, subdir, crop) {
+  const parts = [opts.out]
+  if (subdir) parts.push(subdir)
+  if (opts.group) parts.push(opts.group)
+  const folder = join(...parts)
+  mkdirSync(folder, { recursive: true })
+  const destination = join(folder, basename(input, extname(input)) + '.avi')
   if (resolve(input) === resolve(destination)) throw new Error('输入和输出不能是同一文件')
   const temp = destination + '.partial-' + process.pid
   const hasAudio = opts.audio && probe(input).streams.some(s => s.codec_type === 'audio')
-  const scale = opts.crop
-    ? 'scale=320:240:force_original_aspect_ratio=increase,crop=320:240'
-    : 'scale=320:240:force_original_aspect_ratio=decrease,pad=320:240:(320-iw)/2:(240-ih)/2:color=black'
+  const scale = crop
+    ? 'scale=320:240:force_original_aspect_ratio=increase:flags=lanczos,crop=320:240'
+    : 'scale=320:240:force_original_aspect_ratio=decrease:flags=lanczos,pad=320:240:(320-iw)/2:(240-ih)/2:color=black'
   const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', input]
   if (!hasAudio) args.push('-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo')
   args.push('-map', '0:v:0', '-map', hasAudio ? '0:a:0' : '1:a:0',
@@ -76,7 +84,16 @@ try {
   mkdirSync(opts.out, { recursive: true })
   const targets = opts.inputs.map(p => basename(p, extname(p)) + '.avi')
   if (new Set(targets).size !== targets.length) throw new Error('多个输入文件具有相同输出名称')
-  for (const input of opts.inputs) convert(input, opts)
+  for (const input of opts.inputs) {
+    if (opts.dual) {
+      convert(input, opts, '', false)
+      convert(input, opts, '.fill', true)
+    } else if (opts.fillOnly) {
+      convert(input, opts, '.fill', true)
+    } else {
+      convert(input, opts, '', opts.crop)
+    }
+  }
 } catch (e) {
   console.error('失败: ' + e.message)
   process.exitCode = 1

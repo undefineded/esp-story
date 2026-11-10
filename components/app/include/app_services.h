@@ -26,6 +26,13 @@ bool refreshCatalog();
 
 // Plays the current playlist entry. Returns ESP_OK when the command was queued.
 bool playCurrent(bool auto_start);
+// Same, but resumes a track at a byte offset (per-folder memory).
+bool playCurrentAt(uint32_t offset_bytes, uint32_t seconds, bool auto_start);
+bool hasResume(const char* folder, uint32_t* track, uint32_t* seconds, uint32_t* offset_bytes);
+// Writes the current track + position into the per-folder resume record.
+void saveProgress();
+// Reopens the remembered track in the player page after boot (paused).
+void restoreLastSession();
 bool stopPlayback();
 void pausePlayback(bool paused);
 // What the phone should show in evt:state. Set by the page that started the

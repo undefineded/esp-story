@@ -6,8 +6,11 @@ namespace Persistence {
 struct Settings {
     uint8_t brightness=100, rotation=3, eq=0, reserved=0;
     uint8_t ble=1, wifi=0, ap=0, screen_off_min=5, sleep_min=1;
+    // Video framing on the 320x240 panel: 0 = fit width (letterbox, the frame is
+    // used as decoded), 1 = fill height (zoom in and crop the sides).
+    uint8_t video_fit=0;
 };
-using SettingsRecord = std::array<uint8_t,14>;
+using SettingsRecord = std::array<uint8_t,15>;
 enum class LoadResult { Loaded, Migrated, Invalid, IoError };
 inline uint8_t checksum(const uint8_t* data,unsigned size) {
     uint8_t result=0; for (unsigned i=0;i<size;++i) result+=data[i]; return result;
@@ -24,24 +27,27 @@ inline Settings sanitize(Settings value) {
     if (value.ap>1) value.ap=0;
     if (!validMinutes(value.screen_off_min)) value.screen_off_min=5;
     if (!validMinutes(value.sleep_min)) value.sleep_min=1;
+    if (value.video_fit>1) value.video_fit=0;
     return value;
 }
 inline LoadResult decodeSettings(const SettingsRecord& record,Settings& settings) {
+    const bool v5=std::memcmp(record.data(),"MPL5",4)==0 && checksum(record.data(),14)==record[14];
     const bool v4=std::memcmp(record.data(),"MPL4",4)==0 && checksum(record.data(),13)==record[13];
     const bool v3=std::memcmp(record.data(),"MPL3",4)==0 && checksum(record.data(),11)==record[11];
-    if (!v4 && !v3) return LoadResult::Invalid;
+    if (!v5 && !v4 && !v3) return LoadResult::Invalid;
     Settings value;
     value.brightness=record[4]; value.rotation=record[5]; value.eq=record[6]; value.reserved=record[7];
     value.ble=record[8]; value.wifi=record[9]; value.ap=record[10];
-    if (v4) { value.screen_off_min=record[11]; value.sleep_min=record[12]; }
+    if (v5) { value.screen_off_min=record[11]; value.sleep_min=record[12]; value.video_fit=record[13]; }
+    else if (v4) { value.screen_off_min=record[11]; value.sleep_min=record[12]; }
     settings=sanitize(value);
-    return v4?LoadResult::Loaded:LoadResult::Migrated;
+    return v5?LoadResult::Loaded:LoadResult::Migrated;
 }
 inline SettingsRecord encodeSettings(Settings value) {
     value=sanitize(value);
-    SettingsRecord result={'M','P','L','4',value.brightness,value.rotation,value.eq,value.reserved,
-        value.ble,value.wifi,value.ap,value.screen_off_min,value.sleep_min,0};
-    result[13]=checksum(result.data(),13); return result;
+    SettingsRecord result={'M','P','L','5',value.brightness,value.rotation,value.eq,value.reserved,
+        value.ble,value.wifi,value.ap,value.screen_off_min,value.sleep_min,value.video_fit,0};
+    result[14]=checksum(result.data(),14); return result;
 }
 // Owner-task API. Device exposes read/write(offset, bytes, size), returning 0 on
 // success. Read failure never triggers an implicit factory-reset write.

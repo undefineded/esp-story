@@ -264,21 +264,84 @@ int categoryTrackCount(int category) {
     return count;
 }
 
-// "get stories|music|cats|report": one page of a catalog listing. Paging keeps
-// the legacy limits (at most four items) so the JSON notification stays small.
+// Content revision of everything a full listing would return: track and story
+// names, their categories and the allowlist flag attached to each item. The
+// phone caches its last listing and re-downloads it only when this changes, so
+// a card with hundreds of songs costs one round trip per connect instead of
+// dozens of pages.
+uint32_t catalogRev() {
+    const auto snapshot = s_catalog;
+    if (!snapshot) return 0;
+    const auto record = parentalRecord();
+    // Only the allowlist switch and the two masks change the "a" flags a listing
+    // carries; the other PCTL flags (remote/child lock, bedtime) must not force a
+    // re-download.
+    const uint64_t allowlist = (record.flags & 0x08u) ? 1ULL : 0ULL;
+    const uint64_t masks = record.story_mask * 0x9E3779B97F4A7C15ULL ^
+                           record.category_mask * 0xC2B2AE3D27D4EB4FULL ^
+                           allowlist;
+    // Hashing a few hundred names is cheap but not free, and every page would do
+    // it. The generation counter bumps on each catalog publication, so it works
+    // as the cache key together with the allowlist masks.
+    static uint64_t cached_generation = 0;
+    static uint64_t cached_masks = 0;
+    static uint32_t cached_rev = 0;
+    if (cached_rev && cached_generation == snapshot->generation && cached_masks == masks) {
+        return cached_rev;
+    }
+    uint32_t hash = 2166136261u;
+    auto mix = [&hash](uint32_t value) { hash = (hash ^ value) * 16777619u; };
+    auto mixText = [&mix](const std::string& text) {
+        for (unsigned char c : text) mix(c);
+        mix(0x1fu);   // separator: "ab"+"c" must not hash like "a"+"bc"
+    };
+    mix(static_cast<uint32_t>(record.story_mask));
+    mix(static_cast<uint32_t>(record.story_mask >> 32));
+    mix(static_cast<uint32_t>(record.category_mask));
+    mix(static_cast<uint32_t>(record.category_mask >> 32));
+    mix(static_cast<uint32_t>(allowlist));
+    for (const auto& story : snapshot->stories) mixText(story.title);
+    for (const auto& track : snapshot->tracks) {
+        mixText(track.name);
+        mix(static_cast<uint32_t>(track.category + 1));
+    }
+    if (!hash) hash = 1;
+    cached_generation = snapshot->generation;
+    cached_masks = masks;
+    cached_rev = hash;
+    return hash;
+}
+
+uint32_t bleCatalogRev(void*) { return catalogRev(); }
+
+// "get stories|music|cats|report": one page of a catalog listing. The phone
+// picks the page size from the negotiated MTU; this is only the upper bound that
+// keeps one response from growing without limit.
+constexpr int kListPageMax = 24;
+
 bool bleListPage(void*, const char* what, const cJSON* request, cJSON* data) {
     const cJSON* offset_item = cJSON_GetObjectItemCaseSensitive(request, "offset");
     const cJSON* limit_item = cJSON_GetObjectItemCaseSensitive(request, "limit");
     int offset = cJSON_IsNumber(offset_item) ? static_cast<int>(offset_item->valuedouble) : 0;
     int limit = cJSON_IsNumber(limit_item) ? static_cast<int>(limit_item->valuedouble) : 4;
     if (limit < 1) limit = 1;
-    if (limit > 4) limit = 4;
+    if (limit > kListPageMax) limit = kListPageMax;
     if (offset < 0) offset = 0;
     const auto snapshot = s_catalog;
 
+    // Cheap "what does the phone need to fetch?" probe: no item payload, just the
+    // revision and the sizes.
+    if (std::strcmp(what, "meta") == 0) {
+        cJSON_AddNumberToObject(data, "rev", catalogRev());
+        cJSON_AddNumberToObject(data, "tracks", snapshot ? static_cast<double>(snapshot->tracks.size()) : 0);
+        cJSON_AddNumberToObject(data, "stories", snapshot ? static_cast<double>(snapshot->stories.size()) : 0);
+        cJSON_AddNumberToObject(data, "cats", snapshot ? static_cast<double>(snapshot->categories.size()) : 0);
+        return true;
+    }
     if (std::strcmp(what, "stories") == 0) {
         const int total = snapshot ? static_cast<int>(snapshot->stories.size()) : 0;
         if (offset > total) offset = total;
+        cJSON_AddNumberToObject(data, "rev", catalogRev());
         cJSON_AddNumberToObject(data, "total", total);
         cJSON_AddNumberToObject(data, "offset", offset);
         cJSON* items = cJSON_AddArrayToObject(data, "items");
@@ -295,6 +358,7 @@ bool bleListPage(void*, const char* what, const cJSON* request, cJSON* data) {
     if (std::strcmp(what, "music") == 0) {
         const int total = snapshot ? static_cast<int>(snapshot->tracks.size()) : 0;
         if (offset > total) offset = total;
+        cJSON_AddNumberToObject(data, "rev", catalogRev());
         cJSON_AddNumberToObject(data, "total", total);
         cJSON_AddNumberToObject(data, "offset", offset);
         cJSON* items = cJSON_AddArrayToObject(data, "items");
@@ -315,6 +379,7 @@ bool bleListPage(void*, const char* what, const cJSON* request, cJSON* data) {
         // Category 0 is "all songs" and is not a configurable entry.
         const int total = snapshot ? static_cast<int>(snapshot->categories.size()) : 0;
         if (offset > total) offset = total;
+        cJSON_AddNumberToObject(data, "rev", catalogRev());
         cJSON_AddNumberToObject(data, "total", total);
         cJSON_AddNumberToObject(data, "offset", offset);
         cJSON* items = cJSON_AddArrayToObject(data, "items");
@@ -368,6 +433,36 @@ bool bleToggleFavorite(void*, int32_t index, bool* now, int32_t* total) {
 #endif
 }
 
+const char* bleDeleteMusic(void*, int32_t index) {
+    if (!s_context.sd_mounted) return "NO_SD";
+    const auto snapshot = s_catalog;
+    if (!snapshot || index < 0 || index >= static_cast<int>(snapshot->tracks.size())) return "RANGE";
+    const auto& track = snapshot->tracks[static_cast<std::size_t>(index)];
+    // Release the audio/video pipeline first: the stream keeps a file lease for
+    // the whole track, so unlinking underneath it can fail on FAT.
+    Video::close();
+    setVideoActive(false);
+    setCurrentVideo(-1);
+    setNowPlaying("idle", "");
+    g_playback.stopAndWait(3000);
+    g_playback.allowPlayback();
+    if (!g_gate.acquire()) return "BUSY";
+    const std::string path = std::string(Storage::SdVolume::root) + track.path;
+    const int removed = std::remove(path.c_str());
+    g_gate.release();
+    if (removed != 0) {
+        ESP_LOGW(kTag, "delete %s failed", path.c_str());
+        return "IO";
+    }
+#if CONFIG_STORYBOX_FRAM_CONFIRMED
+    // Catalog indices shift after the rescan; keep the favourite bitmap aligned.
+    if (s_records_store) s_records_store->removeFavoriteAt(static_cast<unsigned>(index));
+#endif
+    if (!refreshCatalog()) return "RESCAN";
+    ESP_LOGI(kTag, "deleted %s", track.path.c_str());
+    return nullptr;
+}
+
 const char* bleBindCode(void*) {
 #if CONFIG_STORYBOX_FRAM_CONFIRMED
     return s_parental_store ? Persistence::parentalBindCode(s_parental_store->value()) : "";
@@ -391,6 +486,8 @@ Ble::Hooks makeBleHooks() {
     hooks.gate = bleGate;
     hooks.list = bleListPage;
     hooks.toggle_favorite = bleToggleFavorite;
+    hooks.delete_music = bleDeleteMusic;
+    hooks.catalog_rev = bleCatalogRev;
     return hooks;
 }
 
@@ -927,8 +1024,10 @@ void run() {
     }
 
     goHome();
+    restoreLastSession();
 
     uint32_t last_volume_save = nowMs();
+    uint32_t last_progress_save = last_volume_save;
     int last_saved_volume = s_context.volume;
     bool last_hall = Hall::detected();
     s_context.hall = last_hall;
@@ -1001,6 +1100,16 @@ void run() {
             s_ble_publish_at = now;
             publishBleState();
         }
+        // Per-folder resume: write the position every few seconds so a power cut
+        // loses at most that much. Writes are one 12-byte slot plus a header.
+        if (now - last_progress_save >= 5000) {
+            const auto state = g_playback.snapshot();
+            if (state.state == Audio::PlaybackState::Playing ||
+                state.state == Audio::PlaybackState::Paused) {
+                last_progress_save = now;
+                saveProgress();
+            }
+        }
 
 #if CONFIG_STORYBOX_USB_PROTOCOL
         // A host upload bumps the storage revision. Rescan once playback is
@@ -1032,7 +1141,10 @@ void run() {
         power_inputs.audio_playing = playing;
         // Close is asynchronous: keep awake until I2S/storage are released.
         power_inputs.video_playing = s_video_active || (Video::busy() && !Video::active());
-        power_inputs.host_active = Ble::connected();
+        // A phone that merely stays connected must not pin the panel on: only
+        // recent RX traffic (commands from the mini program) keeps it awake.
+        power_inputs.host_active = Ble::connected() &&
+                                   (now - Ble::lastActivityMs()) < 15000u;
         Power::Config power_config{};
         power_config.screen_off_min = s_context.settings.screen_off_min;
         power_config.sleep_min = s_context.settings.sleep_min;
@@ -1134,7 +1246,34 @@ bool refreshCatalog() {
     return true;
 }
 
-bool playCurrent(bool auto_start) {
+namespace {
+// FNV-1a of the folder name. The per-folder resume table is keyed by this so a
+// renamed category just stops matching instead of pointing at another folder.
+uint32_t folderHash(const char* text) {
+    if (!text || !*text) return 1;  // "all songs" bucket
+    uint32_t hash = 2166136261u;
+    for (const char* p = text; *p; ++p) {
+        hash ^= static_cast<uint8_t>(*p);
+        hash *= 16777619u;
+    }
+    return hash ? hash : 1;
+}
+const char* trackCategoryName(const Media::Track* track) {
+    if (!track || track->category <= 0 || !s_catalog) return "";
+    const auto index = static_cast<std::size_t>(track->category - 1);
+    return index < s_catalog->categories.size() ? s_catalog->categories[index].c_str() : "";
+}
+// Remembers "which track" for the boot session; the progress itself lives in the
+// per-folder table and is written by the periodic save in the main loop.
+void rememberSession(const Media::Track* track) {
+    if (!s_records_store || !track) return;
+    if (!s_records_store->savePosition(trackCategoryName(track), track->id)) {
+        ESP_LOGW(kTag, "session position write failed");
+    }
+}
+}  // namespace
+
+bool playCurrentAt(uint32_t offset_bytes, uint32_t seconds, bool auto_start) {
     const auto* track = g_playlist.current();
     if (!track) return false;
     if (!playbackAllowed()) {
@@ -1151,10 +1290,66 @@ bool playCurrent(bool auto_start) {
         setCurrentVideo(-1);
     }
     uint64_t request = 0;
-    const auto result = Video::playAudio(g_playback, track->path.c_str(), auto_start, request);
+    const auto result = Video::playAudio(g_playback, track->path.c_str(), auto_start, request,
+                                         offset_bytes, seconds);
     if (result != ESP_OK) ESP_LOGW(kTag, "play %s: %s", track->path.c_str(), esp_err_to_name(result));
-    else setNowPlaying("music", track->name.c_str());
+    else {
+        setNowPlaying("music", track->name.c_str());
+        rememberSession(track);
+    }
     return result == ESP_OK;
+}
+
+bool playCurrent(bool auto_start) { return playCurrentAt(0, 0, auto_start); }
+
+bool hasResume(const char* folder, uint32_t* track, uint32_t* seconds, uint32_t* offset_bytes) {
+    if (!s_records_store) return false;
+    Persistence::FolderResume entry{};
+    if (!s_records_store->resume(folderHash(folder), entry)) return false;
+    if (track) *track = entry.track;
+    if (seconds) *seconds = entry.seconds;
+    if (offset_bytes) *offset_bytes = uint32_t(entry.offset_kb) * 1024u;
+    return true;
+}
+
+void saveProgress() {
+    if (!s_records_store || !s_catalog) return;
+    const auto state = g_playback.snapshot();
+    const auto* track = g_playlist.current();
+    if (!track) return;
+    const uint32_t seconds = state.sample_rate
+                                 ? static_cast<uint32_t>(state.submitted_frames / state.sample_rate)
+                                 : 0;
+    if (!s_records_store->setResume(folderHash(trackCategoryName(track)), track->id, seconds,
+                                    state.offset_bytes)) {
+        ESP_LOGW(kTag, "resume record write failed");
+    }
+}
+
+// Boot: reopen the remembered track in the player page, paused at the saved
+// position. The Arduino firmware did this for music; the IDF port had lost it.
+void restoreLastSession() {
+    if (!s_records_store || !s_catalog || !s_context.catalog_ready) return;
+    const auto& session = s_records_store->session();
+    if (!session.track_id) return;
+    const Media::Track* found = nullptr;
+    for (const auto& track : s_catalog->tracks) {
+        if (track.id == session.track_id) { found = &track; break; }
+    }
+    if (!found) return;
+    if (!g_playlist.select(s_catalog, found->category)) return;
+    if (!g_playlist.seekId(session.track_id)) return;
+    uint32_t track_id = 0, seconds = 0, offset = 0;
+    if (hasResume(trackCategoryName(found), &track_id, &seconds, &offset) &&
+        track_id == session.track_id && seconds > 0) {
+        // keep the stored position
+    } else {
+        seconds = 0;
+        offset = 0;
+    }
+    if (!playCurrentAt(offset, seconds, false)) return;
+    pushPage(createPlayerPage());
+    ESP_LOGI(kTag, "resume session: %s at %us", found->name.c_str(), static_cast<unsigned>(seconds));
 }
 
 void setNowPlaying(const char* mode, const char* title) {

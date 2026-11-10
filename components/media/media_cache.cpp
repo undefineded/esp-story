@@ -9,7 +9,7 @@ struct CacheWriter {
     std::size_t read(uint8_t*,std::size_t) { return 0; }
     bool available() { return false; }
     std::size_t write(const uint8_t* bytes,std::size_t size) {
-        if (size>262144-offset) return 0;
+        if (size>524288-offset) return 0;
         if (transaction && size && transaction->append(offset,bytes,size)!=Storage::UploadResult::Ok) return 0;
         offset+=size; return size;
     }
@@ -18,7 +18,7 @@ bool writeCatalog(CacheWriter& stream,const Catalog& catalog) {
     IndexIO::Archive<CacheWriter> archive(stream,false);
     uint32_t magic=0x45535049,version=3,categories=catalog.categories.size(),tracks=catalog.tracks.size();
     uint32_t stories=catalog.stories.size();
-    if (categories>32 || tracks>kMaxTracks || stories>kMaxStories || !archive.number(magic) || !archive.number(version) ||
+    if (categories>kMaxCategories || tracks>kMaxTracks || stories>kMaxStories || !archive.number(magic) || !archive.number(version) ||
         !archive.number(categories) || !archive.number(tracks)) return false;
     for (auto name:catalog.categories) if (!archive.text(name)) return false;
     for (const auto& track:catalog.tracks) {
@@ -47,7 +47,7 @@ bool readCatalog(Storage::FileStream& file,Catalog& catalog) {
     uint32_t magic=0,version=0,categories=0,tracks=0,stories=0;
     if (!archive.number(magic) || magic!=0x45535049 || !archive.number(version) ||
         (version!=2 && version!=3) ||
-        !archive.number(categories) || categories>32 || !archive.number(tracks) || tracks>kMaxTracks) return false;
+        !archive.number(categories) || categories>kMaxCategories || !archive.number(tracks) || tracks>kMaxTracks) return false;
     // v2 wrote a 32-entry story limit; v3 allows the full catalog limit.
     const std::size_t story_limit=version==2?32:kMaxStories;
     for (unsigned i=0;i<categories;++i) {

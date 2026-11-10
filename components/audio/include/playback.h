@@ -13,6 +13,9 @@ struct PlaybackSnapshot {
     PlaybackState state = PlaybackState::Stopped;
     uint64_t request = 0, generation = 0, submitted_frames = 0;
     uint32_t sample_rate = 0, bitrate = 0, duration = 0;
+    // Byte position of the next frame to decode, plus the resume point the
+    // session was opened at. The UI derives "seconds" from submitted_frames.
+    uint32_t offset_bytes = 0;
     uint32_t decode_us = 0, write_us = 0, budget_yields = 0;
     esp_err_t error = ESP_OK;
     char path[512]{};
@@ -24,7 +27,8 @@ public:
     Playback(const Playback&) = delete;
     Playback& operator=(const Playback&) = delete;
     esp_err_t begin();
-    esp_err_t play(const char* path, bool auto_start, uint64_t& request);
+    esp_err_t play(const char* path, bool auto_start, uint64_t& request,
+                   uint32_t start_offset = 0, uint32_t start_seconds = 0);
     esp_err_t pause(bool paused, uint64_t& request);
     // Closes admission before submitting stop. Call allowPlayback after maintenance.
     esp_err_t stopAndWait(uint32_t timeout_ms);
@@ -34,7 +38,7 @@ public:
     PlaybackSnapshot snapshot();
 private:
     enum class Action { Play, Pause, Resume, Stop };
-    struct Command { Action action; uint64_t id; bool auto_start; char path[512]; };
+    struct Command { Action action; uint64_t id; bool auto_start; char path[512]; uint32_t start_offset, start_seconds; };
     esp_err_t submit(Command& command, uint64_t& id);
     void run();
     void execute(const Command& command);
@@ -52,6 +56,7 @@ private:
     Mp3Stream stream_;
     PcmOutput output_;
     std::size_t pending_frames_ = 0, pending_offset_ = 0;
+    bool output_started_ = false;
     int64_t drain_until_ = 0;
     int64_t last_output_progress_ = 0;
 };

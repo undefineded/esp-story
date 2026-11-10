@@ -51,6 +51,7 @@ struct Control {
     Audio::Playback* audio = nullptr;
     char path[512]{};
     bool start = true, drain = false;
+    uint32_t start_offset = 0, start_seconds = 0;
     uint32_t serial = 0;
     int64_t requested_at = 0;
 };
@@ -321,7 +322,8 @@ void controlTask(void*) {
                     ok = openSync(*command.gate, *command.audio, command.path);
                 else if (command.action == Action::Audio) {
                     uint64_t id = 0;
-                    ok = command.audio->play(command.path, command.start, id) == ESP_OK;
+                    ok = command.audio->play(command.path, command.start, id,
+                                             command.start_offset, command.start_seconds) == ESP_OK;
                     if (!ok) last_error = "音频启动失败";
                 } else if (command.audio) {
                     // A stop may overtake a queued audio handoff. Queue its stop
@@ -380,12 +382,15 @@ bool pause(bool paused) {
     xTaskNotifyGive(controller);
     return true;
 }
-esp_err_t playAudio(Audio::Playback& audio, const char* path, bool start, uint64_t& request) {
+esp_err_t playAudio(Audio::Playback& audio, const char* path, bool start, uint64_t& request,
+                    uint32_t start_offset, uint32_t start_seconds) {
     // Queue behind the control task while a video owns the audio path, or while a
     // failed teardown still holds the I2S channel: only that task can release it.
-    if (!busy() && !teardown_failed) return audio.play(path, start, request);
+    if (!busy() && !teardown_failed)
+        return audio.play(path, start, request, start_offset, start_seconds);
     if (!path || std::strlen(path) >= sizeof(Control::path)) return ESP_ERR_INVALID_ARG;
     Control c; c.action = Action::Audio; c.audio = &audio; c.start = start;
+    c.start_offset = start_offset; c.start_seconds = start_seconds;
     std::snprintf(c.path, sizeof(c.path), "%s", path);
     request = 0;
     return submit(c) ? ESP_OK : ESP_ERR_NO_MEM;

@@ -11,7 +11,7 @@
 namespace App {
 namespace {
 
-constexpr int kItemCount = 9;
+constexpr int kItemCount = 10;
 constexpr int kVisibleRows = 4;
 constexpr int kRowY = 34;
 constexpr int kRowHeight = 44;
@@ -30,6 +30,12 @@ const char* eqLabel(uint8_t preset) {
 
 const char* rotationLabel(uint8_t rotation) {
     return rotation == 1 ? "横屏 0°" : "横屏 180°";
+}
+
+// 0 keeps the decoded frame as-is (the letterboxed 320x240 picture), 1 zooms so
+// the picture touches the top and bottom edges and crops the sides.
+const char* videoFitLabel(uint8_t fit) {
+    return fit == 1 ? "高度铺满" : "宽度铺满";
 }
 
 void drawBandMeter(lgfx::LGFXBase& g, int y, uint8_t preset) {
@@ -143,18 +149,21 @@ public:
                     drawBandMeter(g, y, ctx().settings.eq);
                     break;
                 case 3:
-                    drawRow(g, y, "播放中熄屏", minutesLabel(ctx().settings.screen_off_min), is_selected, -1);
+                    drawRow(g, y, "视频画面", videoFitLabel(ctx().settings.video_fit), is_selected, -1);
                     break;
                 case 4:
-                    drawRow(g, y, "无播放休眠", minutesLabel(ctx().settings.sleep_min), is_selected, -1);
+                    drawRow(g, y, "播放中熄屏", minutesLabel(ctx().settings.screen_off_min), is_selected, -1);
                     break;
                 case 5:
-                    drawRow(g, y, "刷新列表", "单击OK", is_selected, -1);
+                    drawRow(g, y, "无播放休眠", minutesLabel(ctx().settings.sleep_min), is_selected, -1);
                     break;
                 case 6:
-                    drawRow(g, y, "蓝牙广播", ctx().settings.ble ? "开" : "关", is_selected, -1);
+                    drawRow(g, y, "刷新列表", "单击OK", is_selected, -1);
                     break;
                 case 7:
+                    drawRow(g, y, "蓝牙广播", ctx().settings.ble ? "开" : "关", is_selected, -1);
+                    break;
+                case 8:
                     drawRow(g, y, "家长设置", parentalReady() ? "单击进入" : "不可用", is_selected, -1);
                     break;
                 default:
@@ -209,20 +218,23 @@ private:
                 break;
             }
             case 3:
-                s.screen_off_min = cycleMinutes(s.screen_off_min, direction);
+                s.video_fit = s.video_fit ? 0 : 1;
                 break;
             case 4:
+                s.screen_off_min = cycleMinutes(s.screen_off_min, direction);
+                break;
+            case 5:
                 s.sleep_min = cycleMinutes(s.sleep_min, direction);
                 break;
             default:
-                return;  // items 5..7 are actions, not values
+                return;  // items 6..9 are actions, not values
         }
         if (!saveSettings() && ctx().fram_confirmed) notify("设置保存失败");
     }
 
     void activate() {
         switch (selected_) {
-            case 5: {
+            case 6: {
                 // Rebuild the catalog from the card. The stored index can be stale
                 // (external edits, or an older firmware that could not read long
                 // names); a rescan stops playback first because it needs every
@@ -236,13 +248,13 @@ private:
                 invalidate();
                 break;
             }
-            case 6:
+            case 7:
                 ctx().settings.ble = ctx().settings.ble ? 0 : 1;
                 Ble::setAdvertisingEnabled(ctx().settings.ble != 0);
                 notify(ctx().settings.ble ? "蓝牙广播已开启" : "蓝牙广播已关闭");
                 saveSettings();
                 break;
-            case 7: openParentalSettings(); break;
+            case 8: openParentalSettings(); break;
             default: openBindCode(); break;
         }
     }

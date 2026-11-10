@@ -25,6 +25,13 @@ bool s_screen_off = false;
 uint8_t s_saved_brightness = 100;
 uint32_t s_seen_input = 0;
 
+// One-line diagnostics for the idle policy: the windows as configured, and the
+// reason deep sleep did not happen once the window had elapsed. Both are silent
+// unless something changes, so they cost one log line per boot / per idle cycle.
+uint16_t s_logged_screen_min = 0xFFFF;
+uint16_t s_logged_sleep_min = 0xFFFF;
+bool s_blocked_logged = false;
+
 const int kWakePins[] = {ENC_A, ENC_B, ENC_SW};
 
 void screenOn() {
@@ -35,11 +42,11 @@ void screenOn() {
     ESP_LOGI(kTag, "screen on");
 }
 
-void screenOffNow() {
+void screenOffNow(bool playing) {
     if (s_screen_off) return;
     s_screen_off = true;
     Display::setBrightness(0);
-    ESP_LOGI(kTag, "screen off (idle)");
+    ESP_LOGI(kTag, "screen off (%s)", playing ? "playing, audio continues" : "idle");
 }
 
 #if CONFIG_STORYBOX_POWER_SLEEP
@@ -82,25 +89,54 @@ void begin() {
 bool loop(uint32_t now_ms, const Inputs& inputs, const Config& config) {
     (void)now_ms;
     s_saved_brightness = config.brightness;
+    // The policy header is shared with the host tests, so the build capability
+    // (deep sleep compiled in or not) is injected here rather than in Config.
+    Config effective_config = config;
+#if CONFIG_STORYBOX_POWER_SLEEP
+    effective_config.deep_sleep_supported = true;
+#else
+    effective_config.deep_sleep_supported = false;
+#endif
     const uint32_t activity = Input::lastActivityMs();
     if (activity != s_seen_input) {
         s_seen_input = activity;
+        s_blocked_logged = false;
         if (s_screen_off) screenOn();
+    }
+
+    if (config.screen_off_min != s_logged_screen_min || config.sleep_min != s_logged_sleep_min) {
+        s_logged_screen_min = config.screen_off_min;
+        s_logged_sleep_min = config.sleep_min;
+        ESP_LOGI(kTag, "idle policy: screen off %u min, deep sleep %u min (0 = off)",
+                 static_cast<unsigned>(config.screen_off_min),
+                 static_cast<unsigned>(config.sleep_min));
     }
 
     Inputs effective = inputs;
     effective.idle_ms = now_ms - activity;
-    const auto decision = evaluate(effective, config);
+    const auto decision = evaluate(effective, effective_config);
 
+    // The window elapsed but the device stayed awake: say which input blocked it.
+    // A build without deep sleep never sleeps by design, so it is not "blocked".
+    const uint64_t sleep_window_ms = uint64_t{effective_config.sleep_min} * 60000u;
+    if (effective_config.deep_sleep_supported && !decision.deep_sleep && sleep_window_ms &&
+        effective.idle_ms >= sleep_window_ms && !s_blocked_logged) {
+        s_blocked_logged = true;
+        ESP_LOGW(kTag, "deep sleep blocked: audio=%d video=%d host=%d idle=%u ms",
+                 static_cast<int>(effective.audio_playing),
+                 static_cast<int>(effective.video_playing),
+                 static_cast<int>(effective.host_active),
+                 static_cast<unsigned>(effective.idle_ms));
+    }
+
+    // Only a build with deep sleep can report this decision; without it the
+    // policy keeps using screen_off_min for idle blanking instead.
     if (decision.deep_sleep) {
 #if CONFIG_STORYBOX_POWER_SLEEP
         deepSleepNow();
-#else
-        if (!s_screen_off) screenOffNow();
 #endif
-    } else if (decision.screen_off) {
-        screenOffNow();
     }
+    if (decision.screen_off) screenOffNow(inputs.audio_playing);
     return s_screen_off;
 }
 

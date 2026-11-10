@@ -5,9 +5,12 @@
 #include <cerrno>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <utility>
 
 namespace Video {
 namespace {
+
+const std::string kFillDirectory = "/video/.fill";
 
 bool isAvi(const std::string& name) {
     if (name.size() < 4) return false;
@@ -21,6 +24,48 @@ std::string withoutExtension(const std::string& name) {
     return dot == std::string::npos || dot == 0 ? name : name.substr(0, dot);
 }
 
+constexpr unsigned kMaxDepth = 3;
+
+// Walks /video (skipping the .fill mirror) and appends one entry per AVI.
+void collect(const std::string& root, const std::string& relative, unsigned depth,
+             std::vector<Entry>& entries, std::size_t limit, bool& ok) {
+    if (entries.size() >= limit) return;
+    const std::string directory_path =
+        relative.empty() ? std::string("/video") : "/video/" + relative;
+    DIR* directory = opendir((root + directory_path).c_str());
+    if (!directory) {
+        if (depth == 0) ok = false;  // unreadable subfolders are skipped, not fatal
+        return;
+    }
+    while (entries.size() < limit) {
+        errno = 0;
+        const auto* item = readdir(directory);
+        if (!item) { if (errno) ok = false; break; }
+        const std::string name = item->d_name;
+        if (name == "." || name == "..") continue;
+        if (relative.empty() && name == ".fill") continue;
+        const std::string child = relative.empty() ? name : relative + "/" + name;
+        struct stat status {};
+        if (stat((root + "/video/" + child).c_str(), &status) != 0) { ok = false; break; }
+        if (S_ISDIR(status.st_mode)) {
+            if (depth + 1 < kMaxDepth) collect(root, child, depth + 1, entries, limit, ok);
+            continue;
+        }
+        if (!S_ISREG(status.st_mode) || !isAvi(name)) continue;
+        // Pre-cropped "height fill" copies mirror the relative path under
+        // /video/.fill, so equal names in different folders never collide.
+        std::string fill;
+        if (stat((root + kFillDirectory + "/" + child).c_str(), &status) == 0 &&
+            S_ISREG(status.st_mode)) {
+            fill = kFillDirectory + "/" + child;
+        }
+        const std::string group =
+            relative.empty() ? std::string() : relative.substr(0, relative.find('/'));
+        entries.push_back({"/video/" + child, fill, name, withoutExtension(name), group});
+    }
+    if (closedir(directory) != 0) ok = false;
+}
+
 }  // namespace
 
 std::vector<Entry> scanLibrary(const std::string& root, std::size_t limit) {
@@ -30,27 +75,15 @@ std::vector<Entry> scanLibrary(const std::string& root, std::size_t limit) {
 }
 
 bool scanLibraryChecked(const std::string& root, std::vector<Entry>& output, std::size_t limit) {
-    std::vector<Entry> entries;
-    DIR* directory = opendir((root + "/video").c_str());
-    if (!directory) return false;
     bool ok = true;
-    while (entries.size() < limit) {
-        errno = 0;
-        const auto* item = readdir(directory);
-        if (!item) { ok = errno == 0; break; }
-        const std::string name = item->d_name;
-        if (name == "." || name == ".." || !isAvi(name)) continue;
-        struct stat status {};
-        const std::string full = "/video/" + name;
-        if (stat((root + full).c_str(), &status) != 0) { ok = false; break; }
-        if (!S_ISREG(status.st_mode)) continue;
-        entries.push_back({full, name, withoutExtension(name)});
-        if (entries.size() >= limit) break;
-    }
-    if (closedir(directory) != 0) ok = false;
+    std::vector<Entry> entries;
+    collect(root, "", 0, entries, limit, ok);
     if (!ok) return false;
-    std::sort(entries.begin(), entries.end(),
-              [](const auto& a, const auto& b) { return a.name < b.name; });
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+        if (a.group != b.group) return a.group < b.group;
+        return a.title < b.title;
+    });
+    if (entries.size() > limit) entries.resize(limit);
     output = std::move(entries);
     return true;
 }

@@ -19,12 +19,18 @@ int main() {
     using namespace Persistence;
     Settings settings;
     settings.brightness=60; settings.screen_off_min=0; settings.sleep_min=0; settings.eq=3;
+    settings.video_fit=1;
     auto record=encodeSettings(settings);
     Settings decoded;
     assert(decodeSettings(record,decoded)==LoadResult::Loaded);
     assert(decoded.brightness==60 && decoded.screen_off_min==0 && decoded.sleep_min==0 && decoded.eq==3);
+    assert(decoded.video_fit==1);
     record[4]^=1;
     assert(decodeSettings(record,decoded)==LoadResult::Invalid && decoded.brightness==60);
+    // MPL4 (14 bytes, no video_fit) still loads and is rewritten as MPL5.
+    record=encodeSettings(settings); record[3]='4'; record[13]=checksum(record.data(),13);
+    assert(decodeSettings(record,decoded)==LoadResult::Migrated);
+    assert(decoded.video_fit==0 && decoded.screen_off_min==0 && decoded.sleep_min==0);
     record=encodeSettings(settings); record[3]='3'; record[11]=checksum(record.data(),11);
     assert(decodeSettings(record,decoded)==LoadResult::Migrated);
     assert(decoded.screen_off_min==5 && decoded.sleep_min==1);
@@ -34,7 +40,8 @@ int main() {
     device.fail_write=true; assert(!store.save() && store.dirty());
     device.fail_write=false; device.drop_write=true; assert(!store.save() && store.dirty());
     device.drop_write=false; assert(store.save() && !store.dirty());
-    assert(device.data[3]=='4');
+    assert(device.data[3]=='5');
+    assert(device.data[13]==0);  // v3 record had no video_fit, default stays 0
     device.fail_read=true; const auto writes=device.writes;
     assert(store.load()==LoadResult::IoError && device.writes==writes);
     assert(store.value().brightness==60);

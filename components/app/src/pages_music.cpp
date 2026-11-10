@@ -211,7 +211,14 @@ private:
                 notify("该分类没有曲目");
                 return;
             }
-            if (!App::playCurrent(true)) {
+            /* 每个目录记住上次播到哪首、播到第几秒: 进目录直接续播 */
+            const char* folder = "";
+            if (selected_ > 0 && static_cast<std::size_t>(selected_ - 1) < catalog_->categories.size())
+                folder = catalog_->categories[static_cast<std::size_t>(selected_ - 1)].c_str();
+            uint32_t resume_track = 0, resume_seconds = 0, resume_offset = 0;
+            const bool resumed = hasResume(folder, &resume_track, &resume_seconds, &resume_offset) &&
+                                 resume_seconds > 0 && playlist().seekId(resume_track);
+            if (!playCurrentAt(resumed ? resume_offset : 0, resumed ? resume_seconds : 0, true)) {
                 notify("播放器加载失败");
                 return;
             }

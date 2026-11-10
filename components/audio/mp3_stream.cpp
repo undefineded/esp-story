@@ -12,6 +12,9 @@ constexpr uint32_t kSampleRates[3][3] = {
     {22050, 24000, 16000},
     {11025, 12000, 8000},
 };
+// Layer III bitrate table in kbps, indexed by the 4-bit field (1..14).
+constexpr uint16_t kBitrateV1[15] = {0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320};
+constexpr uint16_t kBitrateV2[15] = {0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160};
 }
 
 esp_err_t ensureMp3Decoder() {
@@ -19,7 +22,7 @@ esp_err_t ensureMp3Decoder() {
     return registered == ESP_AUDIO_ERR_OK ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
-esp_err_t Mp3Stream::open(const std::string& root, const std::string& path) {
+esp_err_t Mp3Stream::open(const std::string& root, const std::string& path, uint32_t start_offset) {
     if (!close()) return error_ = ESP_FAIL;
     if (ensureMp3Decoder() != ESP_OK) return error_ = ESP_ERR_NO_MEM;
     if (!file_.open(root, path, "rb")) return error_ = ESP_FAIL;
@@ -33,6 +36,7 @@ esp_err_t Mp3Stream::open(const std::string& root, const std::string& path) {
     remaining_ = position_ = frames_ = 0;
     rate_ = bitrate_ = duration_ = 0;
     eof_ = produced_ = false;
+    start_offset_ = consumed_ = 0;
 
     // Remember the file size for the CBR fallback, then let the optional
     // Xing/Info header provide an exact frame count.
@@ -44,7 +48,22 @@ esp_err_t Mp3Stream::open(const std::string& root, const std::string& path) {
     parseDuration();
     file_.seek(0, SEEK_SET);
     remaining_ = position_ = 0;
+    if (start_offset && start_offset < file_size_ && !seekTo(start_offset)) {
+        start_offset_ = consumed_ = 0;
+        file_.seek(0, SEEK_SET);
+    }
     return error_ = ESP_OK;
+}
+bool Mp3Stream::seekTo(uint32_t byte_offset) {
+    if (!decoder_ || !file_size_ || byte_offset >= file_size_) return false;
+    if (!file_.seek(static_cast<long>(byte_offset))) return false;
+    if (esp_audio_simple_dec_reset(decoder_) != ESP_AUDIO_ERR_OK) return false;
+    start_offset_ = byte_offset;
+    consumed_ = 0;
+    remaining_ = position_ = 0;
+    eof_ = produced_ = false;
+    error_ = ESP_OK;
+    return true;
 }
 bool Mp3Stream::close() {
     if (decoder_) esp_audio_simple_dec_close(decoder_);
@@ -75,22 +94,33 @@ void Mp3Stream::parseDuration() {
         const int layer = (frame[i + 1] >> 1) & 0x03;
         if (version == 1 || layer != 1) continue;  // only Layer III is supported
         const int rate_index = (frame[i + 2] >> 2) & 0x03;
+        const int bitrate_index = (frame[i + 2] >> 4) & 0x0F;
         if (rate_index == 3) continue;
         const int row = version == 3 ? 0 : (version == 2 ? 1 : 2);
         const uint32_t rate = kSampleRates[row][rate_index];
+        // The UI shows the bitrate before playback starts (a restored session
+        // opens paused), so it has to come from the frame header instead of the
+        // decoder info, which only exists after the first decoded frame.
+        if (bitrate_index > 0 && bitrate_index < 15) {
+            const uint16_t kbps = (version == 3 ? kBitrateV1 : kBitrateV2)[bitrate_index];
+            bitrate_ = uint32_t(kbps) * 1000u;
+        }
+        rate_ = rate;
         const int mode = (frame[i + 3] >> 6) & 0x03;
         const std::size_t side = version == 3 ? (mode == 3 ? 17 : 32) : (mode == 3 ? 9 : 17);
         const std::size_t xing = i + 4 + side;
-        if (xing + 12 > available) continue;
-        if (std::memcmp(frame + xing, "Xing", 4) != 0 && std::memcmp(frame + xing, "Info", 4) != 0) continue;
-        const uint32_t flags = (uint32_t(frame[xing + 4]) << 24) | (uint32_t(frame[xing + 5]) << 16) |
-                               (uint32_t(frame[xing + 6]) << 8) | uint32_t(frame[xing + 7]);
-        if ((flags & 1u) == 0) continue;  // frame count not present
-        const uint32_t frames = (uint32_t(frame[xing + 8]) << 24) | (uint32_t(frame[xing + 9]) << 16) |
-                                (uint32_t(frame[xing + 10]) << 8) | uint32_t(frame[xing + 11]);
-        const uint32_t samples_per_frame = version == 3 ? 1152 : 576;
-        if (frames && rate) {
-            duration_ = static_cast<uint32_t>((uint64_t(frames) * samples_per_frame) / rate);
+        if (xing + 12 <= available &&
+            (std::memcmp(frame + xing, "Xing", 4) == 0 || std::memcmp(frame + xing, "Info", 4) == 0)) {
+            const uint32_t flags = (uint32_t(frame[xing + 4]) << 24) | (uint32_t(frame[xing + 5]) << 16) |
+                                   (uint32_t(frame[xing + 6]) << 8) | uint32_t(frame[xing + 7]);
+            if (flags & 1u) {
+                const uint32_t frames = (uint32_t(frame[xing + 8]) << 24) | (uint32_t(frame[xing + 9]) << 16) |
+                                        (uint32_t(frame[xing + 10]) << 8) | uint32_t(frame[xing + 11]);
+                const uint32_t samples_per_frame = version == 3 ? 1152 : 576;
+                if (frames && rate) {
+                    duration_ = static_cast<uint32_t>((uint64_t(frames) * samples_per_frame) / rate);
+                }
+            }
         }
         return;
     }
@@ -119,6 +149,7 @@ DecodeStep Mp3Stream::next() {
         return fail(ESP_ERR_INVALID_RESPONSE);
     remaining_ -= raw.consumed;
     position_ += raw.consumed;
+    consumed_ += raw.consumed;
     if (!output.decoded_size) {
         if (eof_ && !remaining_) return produced_ ? DecodeStep::End : fail(ESP_ERR_INVALID_RESPONSE);
         if (!raw.consumed) return fail(ESP_ERR_INVALID_RESPONSE); // no infinite parser loop
@@ -135,7 +166,9 @@ DecodeStep Mp3Stream::next() {
         for (std::size_t i = frames_; i-- > 0;) pcm_[2*i] = pcm_[2*i+1] = pcm_[i];
     }
     rate_ = info.sample_rate;
-    bitrate_ = info.bitrate;
+    // Keep the header-derived value unless the decoder reports a plausible
+    // bits-per-second figure (some builds report kbps or nothing at all).
+    if (info.bitrate >= 8000 && info.bitrate <= 640000) bitrate_ = info.bitrate;
     // No Xing header: estimate from the byte size and the first frame's bitrate.
     if (!duration_ && file_size_ && bitrate_) {
         duration_ = static_cast<uint32_t>((uint64_t(file_size_) * 8) / bitrate_);
