@@ -8,10 +8,17 @@
 
 #include <cstdio>
 
+#include "esp_flash.h"
+#include "esp_heap_caps.h"
+#include "esp_image_format.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+
 namespace App {
 namespace {
 
-constexpr int kItemCount = 10;
+// 11 = 显示绑定码, 12 = 资源占用.
+constexpr int kItemCount = 12;
 constexpr int kVisibleRows = 4;
 constexpr int kRowY = 34;
 constexpr int kRowHeight = 44;
@@ -164,10 +171,16 @@ public:
                     drawRow(g, y, "蓝牙广播", ctx().settings.ble ? "开" : "关", is_selected, -1);
                     break;
                 case 8:
+                    drawRow(g, y, "NFC 功能", ctx().settings.nfc ? "开" : "关", is_selected, -1);
+                    break;
+                case 9:
                     drawRow(g, y, "家长设置", parentalReady() ? "单击进入" : "不可用", is_selected, -1);
                     break;
-                default:
+                case 10:
                     drawRow(g, y, "显示绑定码", "单击查看", is_selected, -1);
+                    break;
+                default:
+                    drawRow(g, y, "资源占用", "RAM PSRAM Flash", is_selected, -1);
                     break;
             }
         }
@@ -227,7 +240,7 @@ private:
                 s.sleep_min = cycleMinutes(s.sleep_min, direction);
                 break;
             default:
-                return;  // items 6..9 are actions, not values
+                return;  // items 6..10 are actions or toggles, not values
         }
         if (!saveSettings() && ctx().fram_confirmed) notify("设置保存失败");
     }
@@ -254,8 +267,20 @@ private:
                 notify(ctx().settings.ble ? "蓝牙广播已开启" : "蓝牙广播已关闭");
                 saveSettings();
                 break;
-            case 8: openParentalSettings(); break;
-            default: openBindCode(); break;
+            case 8: {
+                const bool next = ctx().settings.nfc == 0;
+                if (!applyNfcEnabled(next)) {
+                    notify("正在写卡，稍后再关闭 NFC");
+                    break;
+                }
+                notify(next ? "NFC 功能已开启" : "NFC 功能已关闭");
+                saveSettings();
+                break;
+            }
+            case 9: openParentalSettings(); break;
+            case 10: openBindCode(); break;
+            case 11: pushPage(createResourcePage()); break;
+            default: break;
         }
     }
 
@@ -344,6 +369,169 @@ public:
     }
 };
 
+// ---- resource page -------------------------------------------------------
+//
+// Read-only readout of the three memory pools this product actually fights
+// over: internal RAM (I2S DMA + driver buffers), PSRAM (canvas, frame mailboxes,
+// media catalog) and the app partition in flash. Everything here comes from
+// O(1) heap counters plus one image-metadata read on entry, so the page itself
+// costs a static object and no heap. The per-second refresh only redraws.
+
+constexpr int kResCardY = 36;
+constexpr int kResCardH = 58;
+constexpr int kResCardGap = 64;
+
+void formatKb(char* out, std::size_t size, uint32_t bytes) {
+    std::snprintf(out, size, "%u KB", static_cast<unsigned>(bytes / 1024));
+}
+
+void formatMb(char* out, std::size_t size, uint64_t bytes) {
+    const uint64_t tenths = bytes * 10 / (1024 * 1024);
+    std::snprintf(out, size, "%u.%u MB", static_cast<unsigned>(tenths / 10),
+                  static_cast<unsigned>(tenths % 10));
+}
+
+unsigned usedPercent(uint64_t total, uint64_t free) {
+    if (!total || free >= total) return 0;
+    return static_cast<unsigned>((total - free) * 100 / total);
+}
+
+void drawResourceCard(lgfx::LGFXBase& g, int y, const char* label, const char* value,
+                      const char* detail, unsigned percent) {
+    const auto& c = Theme::colors();
+    g.fillRoundRect(10, y, 300, kResCardH, 6, TFT_WHITE);
+    g.drawRoundRect(10, y, 300, kResCardH, 6, c.track_border);
+    g.setFont(Fonts::body());
+    g.setTextColor(c.text, TFT_WHITE);
+    g.drawString(label, 22, y + 6);
+    g.drawRightString(value, 296, y + 6);
+
+    constexpr int bar_x = 22, bar_y = 26, bar_w = 274, bar_h = 8;
+    g.fillRoundRect(bar_x, y + bar_y, bar_w, bar_h, 2, c.track);
+    g.drawRoundRect(bar_x, y + bar_y, bar_w, bar_h, 2, c.track_border);
+    int width = static_cast<int>(bar_w * (percent > 100 ? 100 : percent) / 100);
+    if (width > 1) {
+        g.fillRect(bar_x + 1, y + bar_y + 1, width - 2, bar_h - 2, c.blue);
+        if (width > 6) g.fillRect(bar_x + 1 + width - 6, y + bar_y + 1, 4, bar_h - 2, c.yellow);
+    }
+
+    g.setFont(Fonts::small());
+    g.setTextColor(Theme::rgb(0x647b79), TFT_WHITE);
+    g.drawString(detail, 22, y + 40);
+}
+
+class ResourcePage final : public Page {
+public:
+    const char* id() const override { return "resources"; }
+
+    void enter() override {
+        readRom();
+        last_ms_ = 0;
+        invalidate();
+    }
+
+    void handle(const Event& event) override {
+        switch (event.key) {
+            case Key::Ok:
+            case Key::Next:
+            case Key::Prev:
+                last_ms_ = 0;  // force a fresh read on the next tick
+                break;
+            case Key::OkLong:
+            case Key::OkDouble:
+                popPage();
+                break;
+            case Key::SetLong:
+                goHome();
+                break;
+            default:
+                break;
+        }
+    }
+
+    void tick(uint32_t now) override {
+        if (last_ms_ && now - last_ms_ < 1000) return;
+        last_ms_ = now;
+        invalidate();
+    }
+
+    void draw() override {
+        auto& g = Display::canvas();
+        const auto& c = Theme::colors();
+        Theme::setTopBarColor(c.coral);
+        g.fillScreen(c.paper);
+        g.fillRect(0, 0, 320, 30, c.coral);
+        g.fillRect(0, 30, 320, 2, c.coral_dark);
+        Theme::drawSmileFace(g, 19, 15, 10);
+        g.setFont(Fonts::body());
+        g.setTextColor(TFT_WHITE, c.coral);
+        g.drawString("小小故事盒", 36, 7);
+        g.drawRightString("资源占用", 310, 7);
+
+        const uint32_t ram_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        const uint32_t ram_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        const uint32_t ram_low = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        const uint32_t ram_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        const uint32_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+        const uint32_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        const uint32_t psram_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+
+        char value[48], detail[96], a[20], b[20], c2[20];
+        int y = kResCardY;
+
+        // Internal RAM: the pool the I2S DMA ring and every driver buffer share.
+        formatKb(a, sizeof(a), ram_total - ram_free);
+        formatKb(b, sizeof(b), ram_total);
+        std::snprintf(value, sizeof(value), "%s / %s", a, b);
+        formatKb(a, sizeof(a), ram_free);
+        formatKb(b, sizeof(b), ram_block);
+        formatKb(c2, sizeof(c2), ram_low);
+        std::snprintf(detail, sizeof(detail), "余 %s · 最大块 %s · 最低 %s", a, b, c2);
+        drawResourceCard(g, y, "内部 RAM", value, detail, usedPercent(ram_total, ram_free));
+        y += kResCardGap;
+
+        // PSRAM: canvas, frame mailboxes, media catalog and video buffers.
+        formatMb(a, sizeof(a), psram_total - psram_free);
+        formatMb(b, sizeof(b), psram_total);
+        std::snprintf(value, sizeof(value), "%s / %s", a, b);
+        formatMb(a, sizeof(a), psram_free);
+        formatMb(b, sizeof(b), psram_block);
+        std::snprintf(detail, sizeof(detail), "余 %s · 最大块 %s", a, b);
+        drawResourceCard(g, y, "PSRAM", value, detail, usedPercent(psram_total, psram_free));
+        y += kResCardGap;
+
+        // Flash app partition: image bytes vs partition size.
+        formatMb(a, sizeof(a), rom_image_);
+        formatMb(b, sizeof(b), rom_total_);
+        std::snprintf(value, sizeof(value), "%s / %s", a, b);
+        formatKb(a, sizeof(a), rom_total_ > rom_image_ ? rom_total_ - rom_image_ : 0);
+        std::snprintf(detail, sizeof(detail), "分区 %s · 余 %s", rom_label_ ? rom_label_ : "app", a);
+        drawResourceCard(g, y, "Flash 固件", value, detail, usedPercent(rom_total_, rom_image_));
+
+        g.setFont(Fonts::small());
+        g.setTextColor(Theme::rgb(0x647b79), c.paper);
+        g.drawCenterString("每秒刷新  长按 OK 返回", 160, 226);
+    }
+
+private:
+    // Image length never changes at runtime; one metadata read per entry is
+    // enough and keeps the 1 Hz refresh free of flash access.
+    void readRom() {
+        const esp_partition_t* running = esp_ota_get_running_partition();
+        if (!running) running = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, nullptr);
+        if (!running) return;
+        rom_label_ = running->label;
+        rom_total_ = running->size;
+        const esp_partition_pos_t position{running->address, running->size};
+        esp_image_metadata_t metadata{};
+        if (esp_image_get_metadata(&position, &metadata) == ESP_OK) rom_image_ = metadata.image_len;
+    }
+
+    const char* rom_label_ = nullptr;
+    uint32_t rom_image_ = 0, rom_total_ = 0;
+    uint32_t last_ms_ = 0;
+};
+
 SettingsPage& settingsInstance() {
     static SettingsPage instance;
     return instance;
@@ -354,9 +542,15 @@ BindCodePage& bindCodeInstance() {
     return instance;
 }
 
+ResourcePage& resourceInstance() {
+    static ResourcePage instance;
+    return instance;
+}
+
 }  // namespace
 
 Page* createSettingsPage() { return &settingsInstance(); }
 Page* createBindCodePage() { return &bindCodeInstance(); }
+Page* createResourcePage() { return &resourceInstance(); }
 
 }  // namespace App

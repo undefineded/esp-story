@@ -37,6 +37,7 @@ Page* createStoryPlayerPage();
 Page* createVideoListPage();
 Page* createVideoPlayerPage();
 Page* createBindCodePage();
+Page* createResourcePage();
 Page* createParentalPage();
 Page* createPinEntryPage();
 
