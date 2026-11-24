@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -19,10 +20,11 @@ namespace Host {
 namespace {
 constexpr std::size_t JsonCapacity=4096;
 struct Packet { std::size_t size; uint8_t* data; };
-struct Command { std::size_t size,raw_size; uint8_t json[1024],raw[4096]; };
+struct Command { std::size_t size,raw_size; uint8_t json[2048],raw[4096]; };
 QueueHandle_t tx_queue=nullptr,command_queue=nullptr;
 TaskHandle_t tx_task=nullptr,rx_task=nullptr,worker_task=nullptr;
 std::atomic<Storage::FileReader*> file_reader{nullptr};
+std::atomic<uint32_t> last_command_ms{0};
 TransferFrame::Decoder decoder;
 void enqueue(Packet packet) {
     if (xQueueSend(tx_queue,&packet,0)!=pdTRUE) std::free(packet.data);
@@ -60,6 +62,7 @@ void work(void*) {
         const uint64_t now=esp_timer_get_time()/1000;
         if (files) files->expire(now);
         if (!received) continue;
+        last_command_ms.store(static_cast<uint32_t>(now),std::memory_order_relaxed);
         Packet response{0,static_cast<uint8_t*>(std::malloc(TransferFrame::Header+JsonCapacity+4096))};
         if (!response.data) continue;
         auto* raw=response.data+TransferFrame::Header+JsonCapacity;
@@ -129,5 +132,22 @@ esp_err_t attachFiles(Storage::FileReader& files) {
     Storage::FileReader* expected=nullptr;
     return file_reader.compare_exchange_strong(expected,&files,std::memory_order_release)
         ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+esp_err_t publishJson(const char* json, std::size_t length) {
+    if (!tx_queue || !json || !length) return ESP_ERR_INVALID_STATE;
+    if (length>TransferFrame::MaxJson) return ESP_ERR_INVALID_SIZE;
+    Packet packet{TransferFrame::Header+length,nullptr};
+    packet.data=static_cast<uint8_t*>(std::malloc(packet.size));
+    if (!packet.data) return ESP_ERR_NO_MEM;
+    std::memcpy(packet.data+TransferFrame::Header,json,length);
+    TransferFrame::header(packet.data,length,0);
+    enqueue(packet);
+    return ESP_OK;
+}
+bool recentlyActive(uint32_t within_ms) {
+    const uint32_t last=last_command_ms.load(std::memory_order_relaxed);
+    if (!last) return false;
+    const uint32_t now=static_cast<uint32_t>(esp_timer_get_time()/1000);
+    return now-last<within_ms;
 }
 }

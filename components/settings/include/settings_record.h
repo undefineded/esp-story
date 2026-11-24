@@ -9,8 +9,11 @@ struct Settings {
     // Video framing on the 320x240 panel: 0 = fit width (letterbox, the frame is
     // used as decoded), 1 = fill height (zoom in and crop the sides).
     uint8_t video_fit=0;
+    // Device-level NFC switch. When 0 the NFC service does not poll or touch
+    // the PN532 at all; the host cannot start polling until it is re-enabled.
+    uint8_t nfc=1;
 };
-using SettingsRecord = std::array<uint8_t,15>;
+using SettingsRecord = std::array<uint8_t,16>;
 enum class LoadResult { Loaded, Migrated, Invalid, IoError };
 inline uint8_t checksum(const uint8_t* data,unsigned size) {
     uint8_t result=0; for (unsigned i=0;i<size;++i) result+=data[i]; return result;
@@ -28,26 +31,34 @@ inline Settings sanitize(Settings value) {
     if (!validMinutes(value.screen_off_min)) value.screen_off_min=5;
     if (!validMinutes(value.sleep_min)) value.sleep_min=1;
     if (value.video_fit>1) value.video_fit=0;
+    if (value.nfc>1) value.nfc=1;
     return value;
 }
 inline LoadResult decodeSettings(const SettingsRecord& record,Settings& settings) {
+    const bool v6=std::memcmp(record.data(),"MPL6",4)==0 && checksum(record.data(),15)==record[15];
     const bool v5=std::memcmp(record.data(),"MPL5",4)==0 && checksum(record.data(),14)==record[14];
     const bool v4=std::memcmp(record.data(),"MPL4",4)==0 && checksum(record.data(),13)==record[13];
     const bool v3=std::memcmp(record.data(),"MPL3",4)==0 && checksum(record.data(),11)==record[11];
-    if (!v5 && !v4 && !v3) return LoadResult::Invalid;
+    if (!v6 && !v5 && !v4 && !v3) return LoadResult::Invalid;
     Settings value;
     value.brightness=record[4]; value.rotation=record[5]; value.eq=record[6]; value.reserved=record[7];
     value.ble=record[8]; value.wifi=record[9]; value.ap=record[10];
-    if (v5) { value.screen_off_min=record[11]; value.sleep_min=record[12]; value.video_fit=record[13]; }
-    else if (v4) { value.screen_off_min=record[11]; value.sleep_min=record[12]; }
+    if (v6) {
+        value.screen_off_min=record[11]; value.sleep_min=record[12];
+        value.video_fit=record[13]; value.nfc=record[14];
+    } else if (v5) {
+        value.screen_off_min=record[11]; value.sleep_min=record[12]; value.video_fit=record[13];
+    } else if (v4) {
+        value.screen_off_min=record[11]; value.sleep_min=record[12];
+    }
     settings=sanitize(value);
-    return v5?LoadResult::Loaded:LoadResult::Migrated;
+    return v6?LoadResult::Loaded:LoadResult::Migrated;
 }
 inline SettingsRecord encodeSettings(Settings value) {
     value=sanitize(value);
-    SettingsRecord result={'M','P','L','5',value.brightness,value.rotation,value.eq,value.reserved,
-        value.ble,value.wifi,value.ap,value.screen_off_min,value.sleep_min,value.video_fit,0};
-    result[14]=checksum(result.data(),14); return result;
+    SettingsRecord result={'M','P','L','6',value.brightness,value.rotation,value.eq,value.reserved,
+        value.ble,value.wifi,value.ap,value.screen_off_min,value.sleep_min,value.video_fit,value.nfc,0};
+    result[15]=checksum(result.data(),15); return result;
 }
 // Owner-task API. Device exposes read/write(offset, bytes, size), returning 0 on
 // success. Read failure never triggers an implicit factory-reset write.

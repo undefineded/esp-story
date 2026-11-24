@@ -14,6 +14,10 @@ import type {
   FsReadStart,
   FsWriteStart,
   LogEntry,
+  MediaBridge,
+  MediaCatalogInfo,
+  MediaStoryPage,
+  MediaTrackPage,
   NfcBridge,
   NfcStatus,
   PortInfo,
@@ -65,6 +69,14 @@ const files: FileBridge = {
     }>
 }
 
+const media: MediaBridge = {
+  info: () => ipcRenderer.invoke('media:info') as Promise<MediaCatalogInfo>,
+  tracks: (offset = 0, limit = 12) =>
+    ipcRenderer.invoke('media:tracks', { offset, limit }) as Promise<MediaTrackPage>,
+  stories: (offset = 0, limit = 8) =>
+    ipcRenderer.invoke('media:stories', { offset, limit }) as Promise<MediaStoryPage>
+}
+
 const bridge: NfcBridge = {
   isDemo: demo,
   platform: process.platform,
@@ -91,6 +103,7 @@ const bridge: NfcBridge = {
   setSystemConfig: (patch: DeviceConfigPatch) =>
     ipcRenderer.invoke('device:set-system-config', patch) as Promise<DeviceSystemStats>,
   files,
+  media,
   onFsProgress: (cb) => on<FsProgress>('fs:progress', cb),
   windowControls: {
     minimize: () => ipcRenderer.send('win:minimize'),

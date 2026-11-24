@@ -13,6 +13,10 @@ import type {
   FsReadStart,
   FsWriteStart,
   LogEntry,
+  MediaBridge,
+  MediaCatalogInfo,
+  MediaStoryPage,
+  MediaTrackPage,
   NfcBridge,
   NfcStatus,
   PortInfo,
@@ -78,6 +82,7 @@ const PORTS: PortInfo[] = [
 
 function emptyNfc(): NfcStatus {
   return {
+    enabled: true,
     present: false,
     chip: 'PN532',
     fw: '--',
@@ -121,6 +126,34 @@ export class MockBridge implements NfcBridge {
   private fsWrites = new Map<number, MockWrite>()
   private fsSeq = 100
   private fsProgressListeners = new Set<(progress: FsProgress) => void>()
+
+  media: MediaBridge = {
+    info: async (): Promise<MediaCatalogInfo> => ({
+      ready: true,
+      trackTotal: 3,
+      storyTotal: 1,
+      categories: ['全部歌曲', '儿歌', '小熊的冬天']
+    }),
+    tracks: async (offset = 0, limit = 24): Promise<MediaTrackPage> => {
+      const rows = [
+        ['/music/月亮邮递员 · 第 03 集.mp3', '月亮邮递员 · 第 03 集.mp3', 101, 0],
+        ['/music/小星星 · 童谣合辑.mp3', '小星星 · 童谣合辑.mp3', 102, 0],
+        ['/music/晚安，小兔子.mp3', '晚安，小兔子.mp3', 103, 0]
+      ] as MediaTrackPage['tracks']
+      return { total: rows.length, offset, limit, tracks: rows.slice(offset, offset + limit) }
+    },
+    stories: async (offset = 0, limit = 12): Promise<MediaStoryPage> => {
+      const rows = [
+        [
+          '/story/小熊的冬天/01.mp3',
+          '/story/小熊的冬天/01.lrc',
+          '/story/小熊的冬天',
+          '小熊的冬天'
+        ]
+      ] as MediaStoryPage['stories']
+      return { total: rows.length, offset, limit, stories: rows.slice(offset, offset + limit) }
+    }
+  }
 
   files: FileBridge = {
     sessionBegin: async () => {},

@@ -1,53 +1,60 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowRight,
   BadgeCheck,
+  BookOpen,
   Braces,
+  Check,
   ChevronDown,
-  ChevronUp,
-  ClipboardPenLine,
-  Link2,
+  ChevronRight,
+  DownloadCloud,
+  Folder,
+  FolderOpen,
+  Music2,
   Nfc,
   PenLine,
   RefreshCw,
+  Search,
   ShieldAlert,
-  Sparkles,
-  Type,
-  Wifi
+  Sparkles
 } from 'lucide-react'
 import type { NdefParse, NdefRecord } from '@shared/types'
 import { PageHeader } from '../components/PageHeader'
 import { CardVisual } from '../components/CardVisual'
-import { Button, InfoBanner, Pill, Segmented, Toggle } from '../components/ui'
+import { Button, InfoBanner, Pill, Toggle } from '../components/ui'
 import { useAppStore } from '../store/useAppStore'
 import { capacityLabel, kindAccent } from '../lib/card'
+import { buildNdefMessage, bytesToHex, estimateTlvSize, parseNdefMessage } from '../lib/ndef'
 import {
-  buildNdefMessage,
-  bytesToHex,
-  estimateTlvSize,
-  hexToBytes,
-  parseNdefMessage
-} from '../lib/ndef'
+  buildResourceUri,
+  parseResourceUri,
+  resourceFolderLabel,
+  type StoryboxResource,
+  type ResourceKind
+} from '../lib/resources'
 
-type Mode = 'text' | 'uri' | 'custom'
+function formatSize(bytes: number): string {
+  if (!bytes) return '—'
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${bytes} B`
+}
 
-const TEMPLATES = [
-  { id: 'story', label: '故事卡片', icon: <Type size={12} /> },
-  { id: 'music', label: '音乐链接', icon: <Link2 size={12} /> },
-  { id: 'url', label: '网址', icon: <Wifi size={12} /> }
-]
+function kindLabel(kind: ResourceKind): string {
+  return kind === 'music' ? '音乐' : '故事'
+}
 
-function applyTemplate(id: string): { mode: Mode; text: string; uri: string } | null {
-  switch (id) {
-    case 'story':
-      return { mode: 'text', text: '月亮邮递员 · 第 03 集\n今晚的故事，送给你。', uri: '' }
-    case 'music':
-      return { mode: 'uri', text: '', uri: 'https://storybox.local/album/nursery' }
-    case 'url':
-      return { mode: 'uri', text: '', uri: 'https://example.com/story' }
-    default:
-      return null
-  }
+interface ResourceFolderGroup {
+  key: string
+  label: string
+  items: StoryboxResource[]
+}
+
+interface ResourceCategoryGroup {
+  key: string
+  kind: ResourceKind
+  category: string
+  folders: ResourceFolderGroup[]
 }
 
 export function WriterPage() {
@@ -55,60 +62,123 @@ export function WriterPage() {
   const write = useAppStore((s) => s.write)
   const demo = useAppStore((s) => s.demo)
   const setView = useAppStore((s) => s.setView)
-  const writeText = useAppStore((s) => s.writeText)
-  const writeUri = useAppStore((s) => s.writeUri)
-  const writeCustom = useAppStore((s) => s.writeCustom)
-  const writeRaw = useAppStore((s) => s.writeRaw)
+  const showToast = useAppStore((s) => s.showToast)
   const refresh = useAppStore((s) => s.refresh)
   const demoPlace = useAppStore((s) => s.demoPlaceCard)
+  const connection = useAppStore((s) => s.connection)
+  const resources = useAppStore((s) => s.resources)
+  const resourcesSyncedAt = useAppStore((s) => s.resourcesSyncedAt)
+  const resourcesSyncing = useAppStore((s) => s.resourcesSyncing)
+  const resourcesError = useAppStore((s) => s.resourcesError)
+  const syncResources = useAppStore((s) => s.syncResources)
+  const writeResource = useAppStore((s) => s.writeResource)
 
-  const [mode, setMode] = useState<Mode>('text')
-  const [text, setText] = useState('月亮邮递员 · 第 03 集\n今晚的故事，送给你。')
-  const [language, setLanguage] = useState('zh')
-  const [uri, setUri] = useState('https://storybox.local/album/nursery')
-  const [customHex, setCustomHex] = useState('')
+  const [selectedId, setSelectedId] = useState<string>()
+  const [query, setQuery] = useState('')
   const [verify, setVerify] = useState(true)
-  const [showRaw, setShowRaw] = useState(false)
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const autoSyncAttempted = useRef(false)
 
-  const [rawKind, setRawKind] = useState<'page' | 'block'>('page')
-  const [rawStart, setRawStart] = useState('4')
-  const [rawData, setRawData] = useState('00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F')
-  const [rawKey, setRawKey] = useState('FFFFFFFFFFFF')
+  const connected = connection.state === 'connected'
 
   useEffect(() => {
-    const template = localStorage.getItem('nfc-studio.writer-template')
-    if (!template) return
-    localStorage.removeItem('nfc-studio.writer-template')
-    const applied = applyTemplate(template)
-    if (applied) {
-      setMode(applied.mode)
-      setText(applied.text)
-      setUri(applied.uri)
+    if (!connected) {
+      autoSyncAttempted.current = false
+      return
     }
-  }, [])
+    // Auto-sync once per connection when there is no cache. An empty result must
+    // not retrigger this effect, or a slow/empty card would rescan in a loop.
+    if (autoSyncAttempted.current) return
+    if (resources.length === 0 && !resourcesSyncing && !resourcesSyncedAt) {
+      autoSyncAttempted.current = true
+      void syncResources()
+    }
+  }, [connected, resources.length, resourcesSyncing, resourcesSyncedAt, syncResources])
 
   useEffect(() => {
-    if (!card) return
-    setRawKind(card.type2 ? 'page' : 'block')
-    setRawStart(card.type2 ? '4' : '1')
-  }, [card?.type2])
+    if (selectedId && !resources.some((item) => item.id === selectedId)) setSelectedId(undefined)
+  }, [resources, selectedId])
+
+  // 放上的卡片如果已经是一张资源卡，自动选中对应资源（不覆盖用户当前选择）。
+  useEffect(() => {
+    if (selectedId || !card || resources.length === 0) return
+    const uri = card.ndef.records.find((record) => record.kind === 'uri')?.uri
+    const path = uri ? parseResourceUri(uri) : null
+    const match = path ? resources.find((item) => item.path === path) : undefined
+    if (match) setSelectedId(match.id)
+  }, [card?.ndef.messageHex, resources, selectedId])
+
+  const selected = useMemo(
+    () => resources.find((item) => item.id === selectedId),
+    [resources, selectedId]
+  )
+
+  const filtered = useMemo(() => {
+    const keyword = query.trim().toLowerCase()
+    if (!keyword) return resources
+    return resources.filter(
+      (item) =>
+        item.title.toLowerCase().includes(keyword) ||
+        item.category.toLowerCase().includes(keyword) ||
+        item.path.toLowerCase().includes(keyword)
+    )
+  }, [resources, query])
+
+  const groups = useMemo<ResourceCategoryGroup[]>(() => {
+    const categories = new Map<string, { group: ResourceCategoryGroup; folders: Map<string, ResourceFolderGroup> }>()
+    for (const item of filtered) {
+      const categoryKey = `${item.kind}:${item.category}`
+      let category = categories.get(categoryKey)
+      if (!category) {
+        category = {
+          group: { key: categoryKey, kind: item.kind, category: item.category, folders: [] },
+          folders: new Map()
+        }
+        categories.set(categoryKey, category)
+      }
+      const label = resourceFolderLabel(item)
+      const folderKey = `${categoryKey}:${item.directory || label}`
+      let folder = category.folders.get(folderKey)
+      if (!folder) {
+        folder = { key: folderKey, label, items: [] }
+        category.folders.set(folderKey, folder)
+      }
+      folder.items.push(item)
+    }
+
+    const result = [...categories.values()].map(({ group, folders }) => ({
+      ...group,
+      folders: [...folders.values()].sort((a, b) => {
+        if (a.label === '直属文件' || a.label === '本目录') return -1
+        if (b.label === '直属文件' || b.label === '本目录') return 1
+        return a.label.localeCompare(b.label, 'zh-CN')
+      })
+    }))
+    return result.sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === 'music' ? -1 : 1
+      return a.category.localeCompare(b.category, 'zh-CN')
+    })
+  }, [filtered])
+
+  const forceOpen = query.trim().length > 0
+
+  function toggleGroup(key: string): void {
+    setCollapsed((previous) => {
+      const next = new Set(previous)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   const message = useMemo<Uint8Array | null>(() => {
+    if (!selected) return null
     try {
-      if (mode === 'text') {
-        if (!text.trim()) return null
-        return buildNdefMessage([{ kind: 'text', text, language }])
-      }
-      if (mode === 'uri') {
-        if (!uri.trim()) return null
-        return buildNdefMessage([{ kind: 'uri', uri }])
-      }
-      if (!customHex.trim()) return null
-      return hexToBytes(customHex)
+      return buildNdefMessage([{ kind: 'uri', uri: buildResourceUri(selected.path) }])
     } catch {
       return null
     }
-  }, [mode, text, language, uri, customHex])
+  }, [selected])
 
   const parse: NdefParse | null = useMemo(() => {
     if (!message) return null
@@ -126,59 +196,49 @@ export function WriterPage() {
   const needed = message ? estimateTlvSize(message.length) : 0
   const capacity = card?.type2 ? card.cap : 0
   const over = capacity > 0 && needed > capacity
+  const writing = ['start', 'writing', 'verifying'].includes(write.phase)
+  const writeDone = write.phase === 'done'
+  const writeError = write.phase === 'error'
   const canWrite =
     Boolean(card) &&
     card?.type2 === true &&
     card?.writable === true &&
+    Boolean(selected) &&
     Boolean(message) &&
     !over &&
-    !['start', 'writing', 'verifying'].includes(write.phase)
+    !writing
 
-  const writing = ['start', 'writing', 'verifying'].includes(write.phase)
-  const writeDone = write.phase === 'done'
-  const writeError = write.phase === 'error'
+  const syncedLabel = resourcesSyncedAt
+    ? new Date(resourcesSyncedAt).toLocaleString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+    : '尚未同步'
 
-  useEffect(() => {
-    if (mode === 'custom' && customHex === '' && card?.ndef.ok && card.ndef.messageHex) {
-      setCustomHex(card.ndef.messageHex)
+  function readCardResource(): void {
+    if (!card?.ndef.ok) {
+      showToast('info', '卡片没有可读的 NDEF', '请先放一张已写入的资源卡')
+      return
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode])
-
-  function applyTemplateById(id: string): void {
-    const applied = applyTemplate(id)
-    if (!applied) return
-    setMode(applied.mode)
-    setText(applied.text)
-    setUri(applied.uri)
-  }
-
-  function copyFromCard(): void {
-    if (!card) return
-    const record = card.ndef.records[0]
-    if (!record) return
-    if (record.kind === 'text') {
-      setMode('text')
-      setText(record.value)
-      setLanguage(record.language || 'zh')
-    } else if (record.kind === 'uri') {
-      setMode('uri')
-      setUri(record.uri || record.value)
-    } else {
-      setMode('custom')
-      setCustomHex(card.ndef.messageHex)
+    const uri = card.ndef.records.find((record) => record.kind === 'uri')?.uri
+    const path = uri ? parseResourceUri(uri) : null
+    if (!path) {
+      showToast('info', '这张卡不是故事机资源卡', '当前写入流程只支持 TF 卡资源卡片')
+      return
     }
+    const match = resources.find((item) => item.path === path)
+    if (!match) {
+      showToast('info', '资源不在当前内容库', `卡片指向 ${path}，请先同步 TF 卡内容`)
+      return
+    }
+    setSelectedId(match.id)
+    showToast('success', '已选中卡片资源', match.title)
   }
 
   async function submit(): Promise<void> {
-    if (mode === 'text') await writeText(text, language, verify)
-    else if (mode === 'uri') await writeUri(uri, verify)
-    else await writeCustom(customHex, verify)
-  }
-
-  async function submitRaw(): Promise<void> {
-    if (!card) return
-    await writeRaw(rawKind, Number(rawStart) || 0, rawData.replace(/[^0-9a-fA-F]/g, ''), rawKind === 'block' ? rawKey : undefined)
+    if (selected) await writeResource(selected, verify)
   }
 
   return (
@@ -189,11 +249,20 @@ export function WriterPage() {
           <>
             <Button
               variant="secondary"
-              icon={<ClipboardPenLine size={14} />}
-              onClick={copyFromCard}
+              icon={<DownloadCloud size={14} />}
+              onClick={() => void syncResources()}
+              disabled={!connected || resourcesSyncing}
+              loading={resourcesSyncing}
+            >
+              同步内容库
+            </Button>
+            <Button
+              variant="secondary"
+              icon={<BookOpen size={14} />}
+              onClick={readCardResource}
               disabled={!card?.ndef.ok}
             >
-              复制当前卡片
+              读取卡片资源
             </Button>
             <Button variant="secondary" icon={<RefreshCw size={14} />} onClick={() => void refresh()} disabled={!card}>
               刷新卡片
@@ -201,6 +270,14 @@ export function WriterPage() {
           </>
         }
       />
+
+      {!connected && (
+        <div style={{ marginBottom: 16 }}>
+          <InfoBanner tone="info" icon={<DownloadCloud size={16} />}>
+            设备未连接，当前显示的是上次同步的内容库缓存。连接故事机后点“同步内容库”可刷新 TF 卡资源。
+          </InfoBanner>
+        </div>
+      )}
 
       {!card && (
         <div style={{ marginBottom: 16 }}>
@@ -212,7 +289,12 @@ export function WriterPage() {
               </button>
             )}
             {!demo && (
-              <button type="button" className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }} onClick={() => setView('reader')}>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                style={{ marginLeft: 10 }}
+                onClick={() => setView('reader')}
+              >
                 打开读卡器 <ArrowRight size={12} />
               </button>
             )}
@@ -223,7 +305,7 @@ export function WriterPage() {
       {card && !card.type2 && (
         <div style={{ marginBottom: 16 }}>
           <InfoBanner tone="warn" icon={<ShieldAlert size={16} />}>
-            {card.type} 不支持标准 NDEF 写入。下方仍可以用高级原始块写入，默认密钥 FFFFFFFFFFFF。
+            {card.type} 不支持标准 NDEF。资源卡片需要 NTAG / Type 2 标签。
           </InfoBanner>
         </div>
       )}
@@ -233,151 +315,153 @@ export function WriterPage() {
           <div className="panel writer-form-panel">
             <div className="panel-head">
               <div className="panel-title-row">
-                <div className="panel-title">写入内容</div>
-                <div className="panel-sub">内容会编码成标准 NDEF，手机与设备都能读取</div>
+                <div className="panel-title">写入资源卡片</div>
+                <div className="panel-sub">只写入 TF 卡上已有的音乐 / 故事，不能自定义文本或链接</div>
               </div>
-              {card && <Pill tone={kindAccent(card.kind) as 'aqua'} dot>{card.type}</Pill>}
+              {card && (
+                <Pill tone={kindAccent(card.kind) as 'aqua'} dot>
+                  {card.type}
+                </Pill>
+              )}
             </div>
 
             <div className="panel-body">
               <section>
                 <div className="form-section-title">
                   <span className="step-num">01</span>
-                  <h3>选择内容类型</h3>
-                  <span className="form-section-sub">TNF 1 · Well Known</span>
+                  <h3>选择故事机资源</h3>
+                  <span className="form-section-sub">来源：设备 /music 与 /story</span>
                 </div>
 
-                <Segmented
-                  value={mode}
-                  onChange={(next) => setMode(next)}
-                  options={[
-                    { value: 'text', label: '文本', icon: <Type size={12} /> },
-                    { value: 'uri', label: '链接', icon: <Link2 size={12} /> },
-                    { value: 'custom', label: '自定义 NDEF', icon: <Braces size={12} /> }
-                  ]}
-                />
-
-                <div className="template-row">
-                  {TEMPLATES.map((template) => (
-                    <button
-                      key={template.id}
-                      type="button"
-                      className="template-chip"
-                      onClick={() => applyTemplateById(template.id)}
-                    >
-                      {template.icon}
-                      {template.label}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="form-grid" style={{ marginTop: 18 }}>
-                  {mode === 'text' && (
-                    <>
-                      <div className="field span-2">
-                        <label className="field-label" htmlFor="write-text">
-                          <span>
-                            文本内容 <span className="req">*</span>
-                          </span>
-                          <span className={`char-count ${over ? 'over' : ''}`}>{text.length} 字符</span>
-                        </label>
-                        <textarea
-                          id="write-text"
-                          className="textarea"
-                          value={text}
-                          onChange={(event) => setText(event.target.value)}
-                          placeholder="输入要写入卡片的文字…"
-                          maxLength={500}
-                        />
-                        <div className="field-hint">UTF-8 编码，支持中文、emoji 与换行。</div>
-                      </div>
-                      <div className="field">
-                        <label className="field-label" htmlFor="write-lang">
-                          语言代码
-                        </label>
-                        <select
-                          id="write-lang"
-                          className="select"
-                          value={language}
-                          onChange={(event) => setLanguage(event.target.value)}
-                        >
-                          <option value="zh">zh · 中文</option>
-                          <option value="en">en · English</option>
-                          <option value="ja">ja · 日本語</option>
-                          <option value="ko">ko · 한국어</option>
-                        </select>
-                        <div className="field-hint">NDEF Text 记录的语言标识</div>
-                      </div>
-                    </>
-                  )}
-
-                  {mode === 'uri' && (
-                    <>
-                      <div className="field span-2">
-                        <label className="field-label" htmlFor="write-uri">
-                          <span>
-                            链接地址 <span className="req">*</span>
-                          </span>
-                        </label>
-                        <input
-                          id="write-uri"
-                          className="input mono"
-                          value={uri}
-                          onChange={(event) => setUri(event.target.value)}
-                          placeholder="https://example.com/story"
-                        />
-                        <div className="field-hint">
-                          会自动选择最短的 URI 前缀编码（http、https、tel、mailto 等）。
-                        </div>
-                      </div>
-                    </>
-                  )}
-
-                  {mode === 'custom' && (
-                    <>
-                      <div className="field span-2">
-                        <label className="field-label" htmlFor="write-custom">
-                          <span>
-                            NDEF 消息 HEX <span className="req">*</span>
-                          </span>
-                          <span className="char-count">{message?.length ?? 0} B</span>
-                        </label>
-                        <textarea
-                          id="write-custom"
-                          className="textarea mono"
-                          value={customHex}
-                          onChange={(event) => setCustomHex(event.target.value)}
-                          placeholder="D1010E5502..."
-                          style={{ minHeight: 110, fontSize: 11 }}
-                        />
-                        <div className="field-hint">
-                          直接填写完整的 NDEF 消息字节；适合写入 MIME、外部类型等高级记录。
-                        </div>
-                      </div>
-                    </>
-                  )}
-
-                  <div className="span-2">
-                    <div className="capacity-card">
-                      <div className="capacity-head">
-                        <span>标签容量</span>
-                        <span className={over ? 'over' : ''}>
-                          {needed} / {capacity || '—'} B
-                        </span>
-                      </div>
-                      <div className="capacity-track">
-                        <div
-                          className={`capacity-fill ${over ? 'over' : needed / Math.max(capacity, 1) > 0.8 ? 'warn' : ''}`}
-                          style={{ width: `${Math.min(100, capacity ? (needed / capacity) * 100 : 0)}%` }}
-                        />
-                      </div>
-                      <div className="capacity-foot">
-                        <span>NDEF TLV + 终止符</span>
-                        <span>{over ? '超出容量，请缩短内容' : capacity ? `${Math.max(0, capacity - needed)} B 可用` : '等待卡片'}</span>
-                      </div>
-                    </div>
+                <div className="resource-toolbar">
+                  <div className="resource-search">
+                    <Search size={14} />
+                    <input
+                      className="resource-search-input"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="搜索标题、分类或路径"
+                    />
                   </div>
+                  <Pill tone={resources.length > 0 ? 'aqua' : 'muted'}>{resources.length} 项</Pill>
+                  <span className="sync-status">
+                    {resourcesSyncing ? '正在同步…' : `上次同步 ${syncedLabel}`}
+                  </span>
                 </div>
+
+                {resourcesError && (
+                  <div style={{ marginBottom: 10 }}>
+                    <InfoBanner tone="warn" icon={<ShieldAlert size={15} />}>
+                      {resourcesError}
+                    </InfoBanner>
+                  </div>
+                )}
+
+                {resources.length === 0 ? (
+                  <div className="resource-empty">
+                    <DownloadCloud size={22} />
+                    <span>
+                      {connected
+                        ? resourcesSyncing
+                          ? '正在读取 TF 卡内容…'
+                          : '还没有同步内容库'
+                        : '连接故事机后同步 TF 卡内容'}
+                    </span>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void syncResources()}
+                      disabled={!connected || resourcesSyncing}
+                      loading={resourcesSyncing}
+                    >
+                      同步内容库
+                    </Button>
+                  </div>
+                ) : filtered.length === 0 ? (
+                  <div className="resource-empty">
+                    <Search size={20} />
+                    <span>没有匹配“{query.trim()}”的资源</span>
+                  </div>
+                ) : (
+                  <div className="resource-list">
+                    {groups.map((group) => {
+                      const open = forceOpen || !collapsed.has(group.key)
+                      const count = group.folders.reduce((sum, folder) => sum + folder.items.length, 0)
+                      return (
+                        <div className="resource-group" key={group.key}>
+                          <button
+                            type="button"
+                            className="resource-group-head"
+                            onClick={() => toggleGroup(group.key)}
+                            aria-expanded={open}
+                          >
+                            {group.kind === 'music' ? <Music2 size={12} /> : <BookOpen size={12} />}
+                            <span>
+                              {kindLabel(group.kind)} · {group.category}
+                            </span>
+                            <span className="resource-count">{count}</span>
+                            {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                          </button>
+                          {open &&
+                            group.folders.map((folder) => {
+                              const folderOpen = forceOpen || !collapsed.has(folder.key)
+                              return (
+                                <div className="resource-folder" key={folder.key}>
+                                  <button
+                                    type="button"
+                                    className="resource-folder-head"
+                                    onClick={() => toggleGroup(folder.key)}
+                                    aria-expanded={folderOpen}
+                                  >
+                                    {folderOpen ? <FolderOpen size={12} /> : <Folder size={12} />}
+                                    <span>{folder.label}</span>
+                                    <span className="resource-count">{folder.items.length}</span>
+                                    {folderOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                  </button>
+                                  {folderOpen &&
+                                    folder.items.map((item) => (
+                                      <button
+                                        type="button"
+                                        key={item.id}
+                                        className={`resource-item ${item.id === selectedId ? 'selected' : ''}`}
+                                        onClick={() => setSelectedId(item.id)}
+                                      >
+                                        <span className="resource-icon">
+                                          {item.kind === 'music' ? <Music2 size={14} /> : <BookOpen size={14} />}
+                                        </span>
+                                        <span className="resource-text">
+                                          <span className="resource-title">{item.title}</span>
+                                          <span className="resource-meta">
+                                            {item.illustrated
+                                              ? '图文故事'
+                                              : item.kind === 'music'
+                                                ? '音乐'
+                                                : '音频故事'}{' '}
+                                            · {formatSize(item.size)} · {item.path}
+                                          </span>
+                                        </span>
+                                        {item.id === selectedId && <Check size={15} />}
+                                      </button>
+                                    ))}
+                                </div>
+                              )
+                            })}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
+                {selected && (
+                  <div className="selected-resource">
+                    <div className="row gap-8">
+                      <span className="tiny faint">写入资源</span>
+                      <Pill tone="aqua">{kindLabel(selected.kind)}</Pill>
+                    </div>
+                    <div className="strong">{selected.title}</div>
+                    <div className="mono tiny faint">{selected.path}</div>
+                  </div>
+                )}
               </section>
 
               <hr className="divider" />
@@ -386,7 +470,7 @@ export function WriterPage() {
                 <div className="form-section-title">
                   <span className="step-num">02</span>
                   <h3>写入选项</h3>
-                  <span className="form-section-sub">写入前自动格式化未初始化的标签</span>
+                  <span className="form-section-sub">卡片只记录资源路径，不复制媒体文件</span>
                 </div>
                 <div className="row wrap gap-16">
                   <Toggle
@@ -400,107 +484,26 @@ export function WriterPage() {
                     {card ? (card.writable ? '标签可写' : '标签只读') : '未放置卡片'}
                   </Pill>
                 </div>
-              </section>
-
-              <hr className="divider" />
-
-              <section>
-                <button
-                  type="button"
-                  className="row gap-10"
-                  style={{ border: 0, background: 'transparent', padding: 0, width: '100%', textAlign: 'left' }}
-                  onClick={() => setShowRaw(!showRaw)}
-                >
-                  <span className="step-num" style={{ background: 'var(--surface-3)', color: 'var(--ink-2)' }}>
-                    03
-                  </span>
-                  <span className="flex-1">
-                    <span style={{ display: 'block', fontSize: 13, fontWeight: 750 }}>高级 · 原始页 / 块写入</span>
-                    <span style={{ display: 'block', marginTop: 2, fontSize: 10.5, color: 'var(--ink-3)' }}>
-                      绕过 NDEF，直接操作存储区。写错可能让标签不可读。
-                    </span>
-                  </span>
-                  {showRaw ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                </button>
-
-                {showRaw && (
-                  <div style={{ marginTop: 16 }}>
-                    <div className="raw-grid">
-                      <div className="field">
-                        <span className="field-label">单位</span>
-                        <select
-                          className="select"
-                          value={rawKind}
-                          onChange={(event) => setRawKind(event.target.value as 'page' | 'block')}
-                        >
-                          <option value="page">Page</option>
-                          <option value="block">Block</option>
-                        </select>
-                      </div>
-                      <div className="field">
-                        <span className="field-label">起始地址</span>
-                        <input
-                          className="input mono"
-                          type="number"
-                          value={rawStart}
-                          onChange={(event) => setRawStart(event.target.value)}
-                          min={0}
-                        />
-                      </div>
-                      <div className="field">
-                        <span className="field-label">{rawKind === 'page' ? '4 字节页数据' : '16 字节块数据'}</span>
-                        <textarea
-                          className="textarea mono"
-                          value={rawData}
-                          onChange={(event) => setRawData(event.target.value)}
-                          style={{ minHeight: 64, fontSize: 11 }}
-                        />
-                      </div>
-                      {rawKind === 'block' && (
-                        <div className="field" style={{ gridColumn: 'span 2' }}>
-                          <span className="field-label">Classic 密钥 (Key A, 12 位 HEX)</span>
-                          <input
-                            className="input mono"
-                            value={rawKey}
-                            onChange={(event) => setRawKey(event.target.value)}
-                            maxLength={12}
-                          />
-                        </div>
-                      )}
-                      <div className="field">
-                        <Button
-                          variant="danger"
-                          size="sm"
-                          type="button"
-                          onClick={() => void submitRaw()}
-                          disabled={!card || !card.writable || writing}
-                          icon={<ShieldAlert size={13} />}
-                        >
-                          执行原始写入
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="field-hint" style={{ marginTop: 8 }}>
-                      {rawKind === 'page'
-                        ? 'Type 2：从 Page 4 开始是用户区，Page 3 是 CC，请勿覆盖配置页。'
-                        : 'MIFARE Classic：每 4 块一个扇区，扇区尾块（Block 3 / 7 / …）是密钥区，固件会拒绝写入。'}
-                    </div>
-                  </div>
-                )}
+                <div className="field-hint" style={{ marginTop: 10 }}>
+                  写入一条 NDEF URI：<span className="mono">storybox://media?path=…</span>。资源被删除或改名后，
+                  这张卡会失效，需要重新同步并写卡。
+                </div>
               </section>
             </div>
 
             <div className="write-actions">
               <div className="write-hint">
-                {!card
-                  ? '放置卡片后即可写入。'
-                  : !card.type2
-                    ? '当前卡片不支持 NDEF 写入，请使用高级原始块写入。'
-                    : !card.writable
-                      ? '当前标签只读，无法写入。'
-                      : over
-                        ? '内容超过标签容量，请缩短后重试。'
-                        : `将写入 ${needed} B，剩余 ${Math.max(0, capacity - needed)} B。写入过程请保持卡片不动。`}
+                {!selected
+                  ? '先同步内容库并选择一个资源。'
+                  : !card
+                    ? '放置卡片后即可写入。'
+                    : !card.type2
+                      ? '当前卡片不支持 NDEF 资源写入。'
+                      : !card.writable
+                        ? '当前标签只读，无法写入。'
+                        : over
+                          ? '路径超过标签容量，请换 NTAG215/216 或缩短文件名。'
+                          : `将写入 ${needed} B 资源卡片，剩余 ${Math.max(0, capacity - needed)} B。写入过程请保持卡片不动。`}
               </div>
               <Button
                 variant="primary"
@@ -525,9 +528,19 @@ export function WriterPage() {
             </div>
             <div className="panel-body">
               {!message ? (
-                <div className="empty-mini">填写内容后这里会显示编码结果</div>
+                <div className="empty-mini">选择一个资源后这里会显示编码结果</div>
               ) : (
                 <>
+                  {selected && (
+                    <div className="selected-resource" style={{ marginTop: 0, marginBottom: 12 }}>
+                      <div className="row gap-8">
+                        <span className="tiny faint">资源</span>
+                        <Pill tone="aqua">{kindLabel(selected.kind)}</Pill>
+                      </div>
+                      <div className="strong">{selected.title}</div>
+                      <div className="mono tiny faint">{buildResourceUri(selected.path)}</div>
+                    </div>
+                  )}
                   <div className="ndef-list">
                     {parse?.records.map((record) => (
                       <PreviewRecord key={record.id} record={record} />
@@ -588,7 +601,15 @@ export function WriterPage() {
             <div className="panel-body">
               <div className="write-progress">
                 <div className="write-progress-head">
-                  <span>{write.phase === 'verifying' ? '回读校验' : write.phase === 'done' ? '写入完成' : write.phase === 'error' ? '写入中止' : '写入进度'}</span>
+                  <span>
+                    {write.phase === 'verifying'
+                      ? '回读校验'
+                      : write.phase === 'done'
+                        ? '写入完成'
+                        : write.phase === 'error'
+                          ? '写入中止'
+                          : '写入进度'}
+                  </span>
                   <span className="mono">{write.pct}%</span>
                 </div>
                 <div className="write-progress-track">
@@ -626,12 +647,12 @@ export function WriterPage() {
             <div className="panel-body" style={{ padding: 18 }}>
               <div className="row gap-8" style={{ marginBottom: 8 }}>
                 <ShieldAlert size={15} style={{ color: 'var(--yellow-strong)' }} />
-                <span className="strong small">写卡小贴士</span>
+                <span className="strong small">资源卡小贴士</span>
               </div>
               <div className="stack gap-6 tiny muted" style={{ lineHeight: 1.7 }}>
-                <span>· NTAG213 可用约 144 B；写 URL 会使用前缀压缩。</span>
-                <span>· 已锁定的标签会显示为只读，写入前请确认。</span>
-                <span>· 写入标准 NDEF 后，手机贴近即可读取。</span>
+                <span>· 卡片只保存资源路径，不复制音乐/故事文件。</span>
+                <span>· 资源改名或删除后，旧卡片会失效，需要重新同步并写卡。</span>
+                <span>· NTAG213 可用约 144 B；路径较长时请用 NTAG215/216。</span>
               </div>
             </div>
           </div>

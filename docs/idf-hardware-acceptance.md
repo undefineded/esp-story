@@ -106,11 +106,18 @@ JPEG 解码失败 → `Display::drawStoryImage` 返回 false，控制台会打 �
 
 **失败信号**：桌面端页面不开 → features 不含 `fs*`；上传失败 → 看 `FileReader` 返回的 `err` 码。
 
-## 7. NFC 状态
+## 7. NFC 状态与读写
 
-1. 桌面端或 `sys` 调试口发 `{"cmd":"nfc","act":"status"}`。
-2. 无卡与放卡时检查返回的模块、卡片状态；原始读写和 NDEF 写入尚未接入 USB 路由。
-3. 拔掉 PN532：应返回 `NFC_UNAVAILABLE`，设备其余功能不受影响。
+1. 桌面端或 `sys` 调试口发 `{"cmd":"nfc","act":"status"}`，确认 `present/chip/fw/i2c/polling` 字段。
+2. `{"cmd":"nfc","act":"poll","on":true}` 后放卡：应收到 `evt:"nfc",type:"card"`，`card.uid/type/cap/writable/formatted` 合理；移卡后收 `type:"removed"`。
+3. `{"cmd":"nfc","act":"refresh"}`：重新读取当前卡并再推 `card` 事件。
+4. `{"cmd":"nfc","act":"read","kind":"page","start":4,"count":8}`：`data.hex` 长度应为 32 个十六进制字符；Classic 卡用 `kind:"block"` 并带 `key`。
+5. `{"cmd":"nfc","act":"write_ndef","ndef":"<hex>","verify":true}`：先回 `accepted`，随后 `type:"write"` 事件从 `start` 推进到 `done`；写入后 `refresh` 应能读回新内容。
+6. 写入过程中移卡：应收到 `type:"write",phase:"error"`（`code` 为 `WRITE`/`READ` 等），模块仍应在线；移卡后 `status` 的 `card` 消失需要等下一次轮询或 `refresh`。
+7. 拔掉 PN532：`status` 应返回 `NFC_UNAVAILABLE` 或 `present:false`，设备其余功能不受影响；重新插上后 `refresh` 或重启应恢复。
+8. 设置 → **NFC 功能 → 关**：`status` 的 `enabled=false`，`nfc.poll` 返回 `NFC_DISABLED`，串口不再出现寻卡/模块探测日志；重新打开后服务重新探测 PN532，`nfc.poll` 恢复正常。设置重启后保持。
+
+**失败信号**：`NFC_UNAVAILABLE` 但 I2C 扫描有 `0x24` 说明命令握手失败；扫描不到 `0x24` 先查供电、共地、I2C 模式和 SDA/SCL。`TOO_LARGE` 是 NDEF 超出标签容量，`READ_ONLY` 是锁字节/CC 只读。`NFC_DISABLED` 表示设置页总开关关闭，不是模块故障。
 
 ## 8. 家长控制
 

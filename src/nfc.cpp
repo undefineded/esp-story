@@ -2,12 +2,31 @@
 #include <cstring>
 #ifndef ARDUINO
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 namespace { uint32_t millis() { return esp_timer_get_time()/1000; } }
+#endif
+
+#ifndef NFC_POLL_INTERVAL_MS
+#define NFC_POLL_INTERVAL_MS 1000
 #endif
 
 namespace {
 
-constexpr uint32_t POLL_INTERVAL_MS  = 260;
+// The event ring has one producer (the Nfc owner task) and one consumer, but
+// the overflow rule moves the tail from the producer too. Protect both ends
+// with one short critical section (a no-op on the single-threaded Arduino
+// build) instead of pretending this is an SPSC ring.
+#ifdef ARDUINO
+struct EventLock { EventLock() {} ~EventLock() {} };
+#else
+portMUX_TYPE s_eventLock = portMUX_INITIALIZER_UNLOCKED;
+struct EventLock {
+  EventLock() { taskENTER_CRITICAL(&s_eventLock); }
+  ~EventLock() { taskEXIT_CRITICAL(&s_eventLock); }
+};
+#endif
+
+constexpr uint32_t POLL_INTERVAL_MS  = NFC_POLL_INTERVAL_MS;
 constexpr uint32_t PROBE_INTERVAL_MS = 3500;
 constexpr uint8_t  MISS_LIMIT        = 2;
 constexpr uint8_t  FAIL_LIMIT        = 3;
@@ -28,8 +47,8 @@ uint32_t    s_lastProbe = 0;
 bool        s_forceRead = false;
 
 Nfc::Event  s_events[EVENT_QUEUE_LEN];
-uint8_t     s_evHead = 0;
-uint8_t     s_evTail = 0;
+uint8_t     s_evHead = 0;   // guarded by EventLock
+uint8_t     s_evTail = 0;   // guarded by EventLock
 
 struct WriteJob {
   bool     active = false;
@@ -51,9 +70,11 @@ struct WriteJob {
 WriteJob s_write;
 
 void emit(const Nfc::Event& ev) {
-  uint8_t next = (uint8_t)((s_evHead + 1) % EVENT_QUEUE_LEN);
+  EventLock lock;
+  const uint8_t next = (uint8_t)((s_evHead + 1) % EVENT_QUEUE_LEN);
   if (next == s_evTail) {
-    s_evTail = (uint8_t)((s_evTail + 1) % EVENT_QUEUE_LEN);  // 队列满时丢最旧事件
+    // Queue full: drop the oldest event so a missing host cannot wedge writes.
+    s_evTail = (uint8_t)((s_evTail + 1) % EVENT_QUEUE_LEN);
   }
   s_events[s_evHead] = ev;
   s_evHead = next;
@@ -329,7 +350,9 @@ void stepVerify() {
   if (s_write.block) {
     uint16_t block = (uint16_t)(s_write.start + s_write.verifyOffset / 16);
     uint8_t buf[16] = {0};
-    if (!Pn532::authenticate((uint8_t)block, s_write.hasKey, s_write.key, s_target) &&
+    // Writes use key A; the old code passed hasKey as the keyB flag, which
+    // only worked because raw block writes currently force verify=false.
+    if (!Pn532::authenticate((uint8_t)block, false, s_write.key, s_target) &&
         !Pn532::authenticate((uint8_t)block, false, kDefaultKey, s_target)) {
       failWrite("AUTH", "校验时认证失败");
       return;
@@ -428,7 +451,7 @@ bool isTrailerBlock(uint16_t block) {
 namespace Nfc {
 
 bool begin() {
-  s_evHead = s_evTail = 0;
+  { EventLock lock; s_evHead = 0; s_evTail = 0; }
   s_card = Card{};
   s_target = Pn532::Target{};
   s_write.active = false;
@@ -481,6 +504,10 @@ void setPolling(bool on) {
   s_polling = on;
   if (on) {
     s_lastPoll = 0;
+    // A host re-enabling polling usually wants a fresh card snapshot (for
+    // example after reconnecting while the tag stayed on the antenna). Force
+    // one re-read so it emits a card event even when the UID is unchanged.
+    s_forceRead = true;
     if (!s_module) s_lastProbe = 0;
   }
 }
@@ -600,7 +627,9 @@ bool startWriteNdef(const uint8_t* ndef, uint16_t len, bool verify,
   if (s_card.userTotal == 0) { if (error) *error = "NO_CAPACITY"; return false; }
   if (len > 888) { if (error) *error = "TOO_LARGE"; return false; }
 
-  uint32_t overhead = (len < 255) ? 3u : 4u;    // TLV 头 + 终止符
+  // Short TLV: 03 LEN + terminator = 3 bytes. Long TLV: 03 FF HI LO + terminator
+  // = 5 bytes; the old 4 under-counted and dropped the 0xFE when len%4==0.
+  uint32_t overhead = (len < 255) ? 3u : 5u;
   uint32_t needed = (uint32_t)len + overhead;
   uint16_t limit = s_card.userTotal;
   if (s_card.formatted && s_card.ccValid) {
@@ -707,10 +736,85 @@ bool startWriteRaw(bool block, uint16_t start, const uint8_t* data, uint16_t len
 bool writeBusy() { return s_write.active; }
 
 bool takeEvent(Event& out) {
+  EventLock lock;
   if (s_evTail == s_evHead) return false;
   out = s_events[s_evTail];
   s_evTail = (uint8_t)((s_evTail + 1) % EVENT_QUEUE_LEN);
   return true;
+}
+
+bool ndefUri(const Card& card, char* out, std::size_t capacity) {
+  if (!card.valid || !card.type2 || !card.formatted || !out || capacity < 2 ||
+      card.userBytes < 2) return false;
+
+  const uint8_t* p = card.user;
+  const uint8_t* end = p + card.userBytes;
+  auto copy = [&](const uint8_t* data, std::size_t length) -> bool {
+    if (length + 1 > capacity) return false;
+    std::memcpy(out, data, length);
+    out[length] = 0;
+    return true;
+  };
+
+  while (p < end) {
+    const uint8_t type = *p++;
+    if (type == 0x00) continue;   // NULL TLV
+    if (type == 0xFE) return false;  // terminator before a message
+    if (p >= end) return false;
+    uint32_t length = *p++;
+    if (length == 0xFF) {
+      if (end - p < 2) return false;
+      length = (uint32_t(p[0]) << 8) | p[1];
+      p += 2;
+    }
+    if (length > std::size_t(end - p)) return false;
+    if (type != 0x03) {  // not an NDEF message TLV
+      p += length;
+      continue;
+    }
+
+    const uint8_t* message = p;
+    const uint8_t* message_end = p + length;
+    while (message < message_end) {
+      const uint8_t header = *message++;
+      const bool short_record = (header & 0x10) != 0;
+      const bool has_id = (header & 0x08) != 0;
+      const uint8_t tnf = header & 0x07;
+      if (message >= message_end) return false;
+      const uint8_t type_length = *message++;
+      uint32_t payload_length = 0;
+      if (short_record) {
+        if (message >= message_end) return false;
+        payload_length = *message++;
+      } else {
+        if (message_end - message < 4) return false;
+        payload_length = (uint32_t(message[0]) << 24) | (uint32_t(message[1]) << 16) |
+                         (uint32_t(message[2]) << 8) | message[3];
+        message += 4;
+      }
+      uint8_t id_length = 0;
+      if (has_id) {
+        if (message >= message_end) return false;
+        id_length = *message++;
+      }
+      if (std::size_t(message_end - message) <
+          std::size_t(type_length) + id_length + payload_length) return false;
+      const uint8_t* record_type = message;
+      message += type_length + id_length;
+      const uint8_t* payload = message;
+      message += payload_length;
+
+      // TNF 1 = well-known; type "U" = URI. The writer uses prefix code 0 so
+      // the full `storybox://…` string follows the prefix byte.
+      if (tnf == 0x01 && type_length == 1 && record_type[0] == 'U' && payload_length >= 1) {
+        if (payload[0] != 0x00) return false;
+        return copy(payload + 1, payload_length - 1);
+      }
+      if (header & 0x40) break;  // ME: last record
+    }
+    return false;
+  }
+  return false;
 }
 
 } // namespace Nfc

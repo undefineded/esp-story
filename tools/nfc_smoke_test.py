@@ -180,16 +180,16 @@ def main() -> int:
         if existing_card:
             print_card(existing_card)
 
-        # 2. 模块状态
-        status = device.request("nfc", "status")
+        # 2. 先开启轮询：NFC 服务在模块缺席时按 5 分钟退避，poll 会立即触发一次探测；
+        #    返回的 data 就是最新状态，热插拔模块时不必等退避窗口。
+        status = device.request("nfc", "poll", on=True)
         nfc = status.get("data", {})
         print(f"[status] present={nfc.get('present')}  chip={nfc.get('chip')}  fw={nfc.get('fw')}  polling={nfc.get('polling')}")
         if not nfc.get("present"):
-            print("未检测到 PN532。检查 3.3V、SDA/SCL、I2C 拨码，然后重试。", file=sys.stderr)
+            print("未检测到 PN532。检查 3.3V、SDA/SCL、RSTPD、I2C 拨码，然后重试。", file=sys.stderr)
             return 2
 
-        # 3. 开始轮询并等卡
-        device.request("nfc", "poll", on=True)
+        # 3. 等卡（poll 已开启）
         print(f"请把卡片放到 PN532 上，等待 {args.timeout:.0f}s ...")
         card_event = device.wait_event("card", args.timeout)
         if card_event is None:
@@ -214,7 +214,18 @@ def main() -> int:
                 "nfc", "write_ndef", ndef=message.hex().upper(), verify=True, timeout=6.0
             )
             print(f"[write] accepted, len={response.get('len')}")
-            result = device.wait_event("write", args.timeout)
+            # The first "write" event is phase=start; the job then advances in
+            # the NFC task. Wait for the terminal phase before refreshing, or
+            # the refresh races the still-running page writes.
+            result = None
+            deadline = time.monotonic() + args.timeout
+            while time.monotonic() < deadline:
+                event = device.wait_event("write", max(0.5, deadline - time.monotonic()))
+                if event is None:
+                    break
+                if event.get("phase") in ("done", "error"):
+                    result = event
+                    break
             if result is None:
                 print("等待写入结果超时。", file=sys.stderr)
                 return 5

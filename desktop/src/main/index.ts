@@ -363,6 +363,17 @@ function registerIpc(): void {
   ipcMain.handle('fs:write-end', (_event, xid: number) => session.fsWriteEnd(xid))
   ipcMain.handle('fs:cancel', (_event, xid: number) => session.fsCancel(xid))
   ipcMain.handle('fs:rescan', () => session.fsRescan())
+  ipcMain.handle('media:info', () => session.mediaInfo())
+  ipcMain.handle(
+    'media:tracks',
+    (_event, req: { offset?: number; limit?: number }) =>
+      session.mediaTracks(req.offset ?? 0, req.limit ?? 12)
+  )
+  ipcMain.handle(
+    'media:stories',
+    (_event, req: { offset?: number; limit?: number }) =>
+      session.mediaStories(req.offset ?? 0, req.limit ?? 8)
+  )
   ipcMain.handle('fs:clipboard-paths', () => readClipboardPaths())
   ipcMain.handle(
     'fs:upload-paths',

@@ -11,7 +11,10 @@ Host::Route route_handler = nullptr;
 void* route_context = nullptr;
 const char* route_feature = nullptr;
 bool bounded(const uint8_t* input,std::size_t size) {
-    if (!size || size>1024) return false;
+    // 2048 leaves room for an 888-byte NDEF (1776 hex chars plus the JSON
+    // envelope); the previous 1024 limit silently rejected long write_ndef
+    // requests as BAD_JSON before the NFC layer could report TOO_LARGE.
+    if (!size || size>2048) return false;
     bool quoted=false,escape=false; int depth=0;
     for (std::size_t i=0;i<size;++i) {
         const auto c=input[i];
@@ -41,6 +44,24 @@ bool unsignedNumber(cJSON* request,const char* name,uint32_t& value) {
         item->valuedouble<0 || item->valuedouble>UINT32_MAX ||
         std::floor(item->valuedouble)!=item->valuedouble) return false;
     value=static_cast<uint32_t>(item->valuedouble); return true;
+}
+// The route owner registers one comma-separated capability list so one router
+// can advertise several feature names (for example nfc,nfc.ndef,nfc.raw).
+void addFeatures(cJSON* features,const char* list) {
+    if (!features || !list) return;
+    const char* start=list;
+    while (*start) {
+        const char* end=std::strchr(start,',');
+        const auto length=end?static_cast<std::size_t>(end-start):std::strlen(start);
+        if (length && length<32) {
+            char name[32];
+            std::memcpy(name,start,length);
+            name[length]='\0';
+            if (auto* item=cJSON_CreateString(name)) cJSON_AddItemToArray(features,item);
+        }
+        if (!end) break;
+        start=end+1;
+    }
 }
 const char* fileRequest(cJSON* request,cJSON* response,Storage::FileReader& files,
                        uint8_t* raw,std::size_t capacity,std::size_t& length,uint64_t now,
@@ -210,7 +231,7 @@ std::size_t respond(const uint8_t* input,std::size_t size,uint32_t uptime,uint32
             cJSON_AddStringToObject(response,"role","storybox");
             auto* features=cJSON_AddArrayToObject(response,"features");
             if (files) cJSON_AddItemToArray(features,cJSON_CreateString(files->writable()?"fs_transfer":"fs_readonly"));
-            if (route_feature) cJSON_AddItemToArray(features,cJSON_CreateString(route_feature));
+            addFeatures(features,route_feature);
         } else if (std::strcmp(cmd,"sys")==0 && std::strcmp(action,"ping")==0) {
             cJSON_AddStringToObject(response,"evt","pong");
             cJSON_AddNumberToObject(response,"uptime",uptime);

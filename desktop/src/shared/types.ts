@@ -39,6 +39,7 @@ export interface RawCard {
 }
 
 export interface NfcStatus {
+  enabled: boolean;
   present: boolean;
   chip: string;
   fw: string;
@@ -284,6 +285,38 @@ export interface FsListing {
   free: number;
 }
 
+export interface MediaCatalogInfo {
+  ready: boolean
+  trackTotal: number
+  storyTotal: number
+  categories: string[]
+}
+
+/** Compact row from the firmware catalog: [path, name, id, category]. */
+export type MediaTrackRow = [string, string, number, number]
+/** Compact row: [audio, timeline, directory, category]. */
+export type MediaStoryRow = [string, string, string, string]
+
+export interface MediaTrackPage {
+  total: number
+  offset: number
+  limit: number
+  tracks: MediaTrackRow[]
+}
+
+export interface MediaStoryPage {
+  total: number
+  offset: number
+  limit: number
+  stories: MediaStoryRow[]
+}
+
+export interface MediaBridge {
+  info(): Promise<MediaCatalogInfo>
+  tracks(offset?: number, limit?: number): Promise<MediaTrackPage>
+  stories(offset?: number, limit?: number): Promise<MediaStoryPage>
+}
+
 export interface FsReadStart {
   xid: number;
   path: string;
@@ -377,6 +410,7 @@ export interface NfcBridge {
   systemStats(): Promise<DeviceSystemStats>;
   setSystemConfig(patch: DeviceConfigPatch): Promise<DeviceSystemStats>;
   files: FileBridge;
+  media: MediaBridge;
   onFsProgress(cb: (progress: FsProgress) => void): () => void;
   windowControls: WindowControls;
   getSettings(): Promise<AppSettings>;

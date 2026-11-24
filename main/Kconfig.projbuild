@@ -22,9 +22,33 @@ menu "StoryBox migration"
         default y
         help
             Starts the native NFC polling task and advertises the "nfc" feature
-            on the USB protocol. Status only: raw card reads and writes are not
-            exposed yet. A missing or unresponsive PN532 degrades to
+            on the USB protocol. The USB route exposes status, polling,
+            refresh, raw page/block reads and NDEF/raw writes, plus card and
+            write-progress events. A missing or unresponsive PN532 degrades to
             NFC_UNAVAILABLE instead of failing startup.
+    config STORYBOX_NFC_POLL_MS
+        int "NFC card polling interval (ms)"
+        depends on STORYBOX_NFC
+        default 1000
+        range 100 5000
+        help
+            Delay between InListPassiveTarget attempts while card polling is
+            enabled. 1000 ms is the product default; lower values detect a card
+            sooner at the cost of more RF/I2C activity and power. The device
+            settings page also has a master NFC switch that stops polling
+            completely.
+    config STORYBOX_NFC_RESET_GPIO
+        int "PN532 RSTPD GPIO (-1: not wired)"
+        depends on STORYBOX_NFC
+        default -1
+        range -1 48
+        help
+            Optional RSTPD line driven before probing. Leave at -1 when RSTPD is
+            tied high on the board. Do not use 48 on the legacy/V1 board: there
+            IO48 is the NEXT key, and the driver would hold the key line high.
+            On the 2026-10-28 V2 schematic RSTPD is IO48 and the keys moved to
+            the TCA8418 expander; confirm the actual board before enabling.
+            The driver leaves the pin as an output high after the reset pulse.
     config STORYBOX_USB_FILE_WRITES
         bool "Enable diagnostic USB file uploads (not full desktop FS support)"
         depends on STORYBOX_USB_PROTOCOL && STORYBOX_AUDIO_DIAGNOSTICS

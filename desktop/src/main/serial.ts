@@ -13,6 +13,11 @@ import type {
   FsReadStart,
   FsWriteStart,
   LogEntry,
+  MediaCatalogInfo,
+  MediaStoryPage,
+  MediaStoryRow,
+  MediaTrackPage,
+  MediaTrackRow,
   NfcStatus,
   PortInfo,
   RawCard,
@@ -37,6 +42,7 @@ type SessionEvents = {
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 const emptyNfc = (): NfcStatus => ({
+  enabled: true,
   present: false,
   chip: 'PN532',
   fw: '--',
@@ -50,6 +56,7 @@ const emptyNfc = (): NfcStatus => ({
 function normalizeNfc(input: unknown): NfcStatus {
   const raw = (input ?? {}) as Partial<NfcStatus>
   return {
+    enabled: raw.enabled !== false,
     present: Boolean(raw.present),
     chip: typeof raw.chip === 'string' ? raw.chip : 'PN532',
     fw: typeof raw.fw === 'string' ? raw.fw : '--',
@@ -422,11 +429,26 @@ export class NfcSession extends EventEmitter<SessionEvents> {
 
     if (!this.pollSent) {
       this.pollSent = true
-      try {
-        const res = await this.request('nfc', { act: 'poll', on: true }, 2500, true)
-        this.applyNfc(normalizeNfc((res.data as Record<string, unknown>) ?? {}))
-      } catch (err) {
-        this.log('error', `启动 NFC 轮询失败: ${err instanceof Error ? err.message : String(err)}`)
+      // The firmware answers hello before the app task has registered the NFC
+      // route. Retry instead of leaving the workbench stuck on "PN532 offline"
+      // when it connects during the boot window.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          const res = await this.request('nfc', { act: 'poll', on: true }, 2500, true)
+          this.applyNfc(normalizeNfc((res.data as Record<string, unknown>) ?? {}))
+          break
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          if (message.includes('NFC_DISABLED')) {
+            this.log('sys', '设备已关闭 NFC 功能，未启动轮询')
+            break
+          }
+          if (attempt === 3) {
+            this.log('error', `启动 NFC 轮询失败: ${message}`)
+            break
+          }
+          await delay(500)
+        }
       }
     }
   }
@@ -834,6 +856,63 @@ export class NfcSession extends EventEmitter<SessionEvents> {
     return {
       tracks: Number(data.tracks) || 0,
       categories: Number(data.categories) || 0
+    }
+  }
+
+  async mediaInfo(): Promise<MediaCatalogInfo> {
+    const doc = await this.request('media', { act: 'info' }, 4000)
+    const data = (doc.data ?? {}) as Record<string, unknown>
+    return {
+      ready: Boolean(data.ready),
+      trackTotal: Number(data.trackTotal) || 0,
+      storyTotal: Number(data.storyTotal) || 0,
+      categories: Array.isArray(data.categories)
+        ? data.categories.filter((item): item is string => typeof item === 'string')
+        : []
+    }
+  }
+
+  async mediaTracks(offset = 0, limit = 12): Promise<MediaTrackPage> {
+    const doc = await this.request('media', { act: 'tracks', offset, limit }, 5000)
+    const data = (doc.data ?? {}) as Record<string, unknown>
+    const rows = Array.isArray(data.tracks) ? data.tracks : []
+    const tracks: MediaTrackRow[] = []
+    for (const value of rows) {
+      if (!Array.isArray(value) || value.length < 4) continue
+      tracks.push([
+        typeof value[0] === 'string' ? value[0] : '',
+        typeof value[1] === 'string' ? value[1] : '',
+        Number(value[2]) || 0,
+        Number(value[3]) || 0
+      ])
+    }
+    return {
+      total: Number(data.total) || 0,
+      offset: Number(data.offset) || offset,
+      limit: Number(data.limit) || limit,
+      tracks
+    }
+  }
+
+  async mediaStories(offset = 0, limit = 8): Promise<MediaStoryPage> {
+    const doc = await this.request('media', { act: 'stories', offset, limit }, 5000)
+    const data = (doc.data ?? {}) as Record<string, unknown>
+    const rows = Array.isArray(data.stories) ? data.stories : []
+    const stories: MediaStoryRow[] = []
+    for (const value of rows) {
+      if (!Array.isArray(value) || value.length < 4) continue
+      stories.push([
+        typeof value[0] === 'string' ? value[0] : '',
+        typeof value[1] === 'string' ? value[1] : '',
+        typeof value[2] === 'string' ? value[2] : '',
+        typeof value[3] === 'string' ? value[3] : ''
+      ])
+    }
+    return {
+      total: Number(data.total) || 0,
+      offset: Number(data.offset) || offset,
+      limit: Number(data.limit) || limit,
+      stories
     }
   }
 

@@ -64,9 +64,10 @@ Pn532::Error s_error = Pn532::NoDevice;
 
 uint8_t i2cAddr() { return (uint8_t)PN532_I2C_ADDR; }
 
-/* I2C 总线和 FRAM 共用 (见 config.h)。向"不存在的 0x24"发事务失败后, ESP-IDF 的
-   i2c 驱动会停在错误态, 之后同一总线上的 FRAM 读写会一直报 INVALID_STATE (263) ——
-   表现为开机卡死。所以探测失败后必须复位一次驱动, 把总线还给 FRAM。 */
+/* I2C 总线和 FRAM 共用 (见 config.h)。Arduino 版在探测失败后会 end()/begin()
+   重整 Wire；ESP-IDF 5.5 的 i2c_master 驱动会在每次事务开始自行做 FSM reset /
+   bus clear，所以原生路径不销毁共享总线——真正需要恢复时由总线 owner 在确认
+   所有设备静默后调用 Board::I2cBus::recover()。 */
 void busRecover() {
 #ifdef ARDUINO
   Wire.end();
@@ -76,18 +77,24 @@ void busRecover() {
   Wire.setTimeOut(300);            // PN532 会拉伸时钟, 默认 50ms 太短
   delay(2);
 #else
-  // Native devices must never destroy the shared bus. The application may
-  // ask Board::I2cBus to recover after all device users have quiesced.
+  // Deliberately empty: see the comment above. PN532 must not tear down a bus
+  // that FRAM and the rest of the board are using.
 #endif
 }
 
 bool i2cPing() {
+  // PN532 may not ACK its address immediately after the previous exchange
+  // (UM0701 §6.2.1.3), so one probe is not enough evidence of absence.
+  for (int attempt = 0; attempt < 3; ++attempt) {
 #ifdef ARDUINO
-  Wire.beginTransmission(i2cAddr());
-  return Wire.endTransmission(true) == 0;
+    Wire.beginTransmission(i2cAddr());
+    if (Wire.endTransmission(true) == 0) return true;
 #else
-  return s_bus && i2c_master_probe(s_bus,i2cAddr(),100)==ESP_OK;
+    if (s_bus && i2c_master_probe(s_bus, i2cAddr(), 100) == ESP_OK) return true;
 #endif
+    if (attempt < 2) delay(10);
+  }
+  return false;
 }
 
 const char* errorName(Pn532::Error e) {
@@ -104,7 +111,7 @@ const char* errorName(Pn532::Error e) {
 
 /* 探测失败时打一条 I2C 总线清单: 只出现 0x50(FRAM) 说明模块根本没应答
    (没供电 / 没共地 / 拨码不是 I2C / SDA-SCL 没接上), 出现 0x24 则是模块在
-   但命令握手失败。扫描会向不存在的地址发事务, 结束后必须恢复总线给 FRAM。 */
+   但命令握手失败。IDF 下探测失败由 i2c_master 在下次事务自行清理。 */
 void logBusScan() {
   char line[96];
   int n = snprintf(line, sizeof(line), "[NFC] I2C scan:");
@@ -140,7 +147,7 @@ bool readRaw(uint8_t* out, uint8_t len) {
   return rdy == 0x01;
 #else
   uint8_t data[256];
-  if (!s_device || i2c_master_receive(s_device,data,std::size_t(len)+1,100)!=ESP_OK || data[0]!=1) return false;
+  if (!s_device || i2c_master_receive(s_device,data,std::size_t(len)+1,200)!=ESP_OK || data[0]!=1) return false;
   std::memcpy(out,data+1,len);
   return true;
 #endif
@@ -159,7 +166,9 @@ bool waitReady(uint32_t timeoutMs) {
     }
 #else
     uint8_t status=0;
-    if (s_device && i2c_master_receive(s_device,&status,1,20)==ESP_OK && status==1) return true;
+    // PN532 stretches SCL while it processes a command; 20 ms is shorter than
+    // the Arduino path's 300 ms and caused spurious status-read failures.
+    if (s_device && i2c_master_receive(s_device,&status,1,100)==ESP_OK && status==1) return true;
 #endif
     if (millis() - start >= timeoutMs) return false;
     delay(2);
@@ -266,6 +275,18 @@ bool applyRfConfig() {
   return command(cmd, sizeof(cmd), RESP_RF_CONFIG, out, n, sizeof(out));
 }
 
+/* PN532 的 MxRtyPassiveActivation 默认是 0xFF (无限重试): 若这条配置没写进去,
+   无卡时 InListPassiveTarget 会一直挂到超时, 上层会误判模块掉线。重试几次再
+   放弃, 并把失败留在日志里, 而不是静默继续。 */
+bool applyRfConfigWithRetry() {
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    if (applyRfConfig()) return true;
+    delay(20);
+  }
+  SB_PN532_LOG("[NFC] RFConfiguration failed; passive-target retries keep the PN532 default\n");
+  return false;
+}
+
 bool hardwareReset() {
 #if PN532_RST_PIN >= 0
 #ifdef ARDUINO
@@ -338,7 +359,7 @@ bool begin() {
   if (!ok) {
     SB_PN532_LOG("[NFC] PN532 probe failed: %s (ping=%d)\n",
                  errorName(s_error), i2cPing() ? 1 : 0);
-    busRecover();                 // 把总线恢复给 FRAM, 再扫描
+    busRecover();                 // Arduino: 重建 Wire; IDF: 驱动自行清总线
     logBusScan();
   }
   return ok;
@@ -355,7 +376,7 @@ bool probe() {
   if (!ping) {
     s_present = false;
     s_error = NoDevice;
-    busRecover();                 // 失败事务会让驱动停在错误态, 复位后 FRAM 才能继续用
+    busRecover();
     return false;
   }
 
@@ -363,7 +384,7 @@ bool probe() {
   if (getFirmwareInternal()) {
     s_present = true;
     samConfig();
-    applyRfConfig();
+    applyRfConfigWithRetry();
     return true;
   }
 
@@ -371,7 +392,7 @@ bool probe() {
     delay(20);
     if (getFirmwareInternal()) {
       s_present = true;
-      applyRfConfig();
+      applyRfConfigWithRetry();
       return true;
     }
   }

@@ -678,3 +678,103 @@ SET 短按重新载入。文件路径可在 menuconfig 修改。新板功放使�
 `tools/test_mp3_stream.sh` 使用实际组件头文件和生产适配源码，替换 codec C API
 注入无进展、越界消费和非法通道数，验证输入保留、单声道转换及许可释放。
 该测试不执行真实解码算法。8 组通用主机测试及该适配测试通过；真机验证待执行。
+
+## 后续（2026-11-19）：NFC 命令路由、读写与事件
+
+此前 NFC 只有状态快照，USB 路由对其它动作回 `NOT_SUPPORTED`；卡片和写卡完成事件也
+没有上报通道。本轮补齐：
+
+- `NativeNfc::Service` 仍是 Pn532/Nfc 静态状态的唯一 owner，并新增同步请求：
+  `poll/refresh/read/write_ndef/write_raw` 由 USB worker 封送到 NFC 任务执行，
+  请求完成后才刷新快照并唤醒调用方，避免协议 worker 与轮询/分步写入竞争。
+- USB 路由动作、字段与错误码对齐 Arduino `src/hostlink.cpp`；`status` 改为
+  `present/chip/fw/i2c/polling/busy/uptime/heap/card`，卡片字段沿用旧协议
+  （`uid/uidLen/atqa/sak/kind/type/std/type2/writable/formatted/cap/userStart/.../data/version/cc/lock/block0`）。
+- 事件环形队列用 portMUX 临界区保护（满时丢最旧；此前的原子索引方案在溢出时会让
+  生产者和消费者同时写 tail）。应用主循环把 module/card/removed/write 转成
+  `evt:"nfc"` 的 SBX4 帧，`Host::publishJson()` 负责异步入队。
+- USB 请求 JSON 上限从 1 KB 提到 2 KB，可容纳 888 字节 NDEF 的 1776 个十六进制字符；
+  之前约 477 字节以上的 `write_ndef` 会在解析前被回 `BAD_JSON`。
+- `hello` 的 features 支持逗号分隔；产品 NFC 配置声明
+  `nfc,nfc.ndef,nfc.raw,nfc.write-verify`。
+- 与旧固件一致，启动不再自动开启轮询；桌面连接后发 `nfc.poll` 才开始寻卡，
+  无上位机时不在共享 I2C 上做 RF 轮询。`read/write` 在 NFC 任务内同步执行，
+  分页写入仍在后台推进并由 `write` 事件报告。
+- `poll` 在模块缺席时会立即触发一次探测（不再被 5 分钟退避吞掉）；`setPolling(true)`
+  强制重读卡片，桌面重连时即使卡一直在天线上也会补发 `card` 事件。
+- 驱动侧修正：长 NDEF TLV 的 overhead 少算 1 字节、Classic 校验把 `hasKey` 误当
+  `keyB`、`RFConfiguration` 失败未重试、I2C 地址探测单次即判缺席、IDF 状态读
+  20 ms 过短；`PN532_RST_PIN` 默认仍为 -1，Kconfig 帮助明确 legacy/V1 的 IO48
+  是 NEXT，禁止启用。
+- `tools/nfc_smoke_test.py` 等 `phase=done|error` 后再 `refresh`（原先拿到
+  `phase=start` 就刷新会撞上写卡忙）；桌面端首次 `nfc.poll` 失败改为 4 次退避重试，
+  覆盖设备启动窗口。桌面 `npm run typecheck` 通过。
+
+构建验证：默认产品配置与 USB 产品配置（`sdkconfig.defaults` + `sdkconfig.usb-product`）
+均用 IDF 5.5.3 完整链接通过。默认镜像 `storybox.bin` = `0x290370` 字节；
+USB 产品镜像 `build-usb-nfc/storybox.bin` = `0x2AA110` 字节（分区剩余 66%）。
+本机 xtensa GCC 14.2 在默认 `-Og` 下对 IDF 的 `esp_lcd_panel_rgb.c` 触发编译器
+internal compiler error，因此 USB NFC 镜像改用 O3（等价 `sdkconfig.performance`）
+构建；CI 使用其自带工具链时可照常使用默认优化。未在真实 PN532 上验证：模块探测、
+实卡读写、Classic 认证、NDEF 校验和移卡中止仍需按验收清单第 7 组上板确认。
+
+## 后续（2026-11-20）：资源卡片写入与内容同步
+
+按产品要求，桌面写卡页不再允许自由文本、URL 或自定义 NDEF，只允许选择故事机 TF 卡
+上已存在的音乐/故事。为避免遍历 SD 大目录（实测部分 `/music` 分类目录在固件
+`fs.list` 上会超时），固件新增媒体索引分页接口，桌面直接同步设备已经建好的目录：
+
+- 固件 `cmd:"media"`：`info` 返回 `ready/trackTotal/storyTotal/categories`；
+  `tracks` 返回 `[path,name,id,categoryIndex]`，`stories` 返回
+  `[audio,timeline,directory,category]`。页大小默认 12/8，保证响应小于 USB worker
+  的 4 KiB JSON 缓冲。
+- `s_catalog` 增加互斥量，USB worker 读取前复制 shared_ptr；应用任务重扫后发布新
+  目录不会与协议读取竞争。
+- 真机实测：`media.info` 返回 285 首音乐、656 个故事、6 个分类；
+  `media.tracks/stories` 分页正常，路径与分类正确。
+- 桌面新增 `resources.ts`：媒体目录分页扫描、资源模型、`storybox://media?path=…`
+  URI 编解码；`storage.ts` 缓存上次同步结果；`useAppStore` 增加 `syncResources` 和
+  `writeResource`，写入前再次校验资源仍在当前内容库。
+- 写卡页改为“同步内容库 → 搜索/选择资源 → 写入”，移除了文本/URL/自定义 NDEF 与
+  原始块写入入口；卡片 URI 指向 SD 绝对路径，资源改名/删除后卡片失效。`hello`
+  features 增加 `media`。
+- 验证：桌面 `npm run typecheck` 通过，`npm test` 35 项通过（新增媒体目录扫描、
+  资源 URI 测试）；桌面安装包与 `win-unpacked` 已重建。固件默认/USB 配置均链接通过，
+  USB NFC 镜像已烧录到 COM5 并验证媒体分页与 NFC 读卡。桌面 UI 的像素级/交互验收
+  仍需人工在 `dist/win-unpacked` 里完成。
+
+## 后续（2026-11-20）：轮询周期配置与 NFC 总开关
+
+- 寻卡周期从写死的 260 ms 改为 `CONFIG_STORYBOX_NFC_POLL_MS`（100–5000 ms），
+  产品默认 **1000 ms**；`src/nfc.cpp` 保留 `NFC_POLL_INTERVAL_MS` 宏，Arduino
+  单构建也使用 1000 ms 默认值。
+- 设置记录升级为 **MPL6**（16 字节），新增 `nfc` 字节；MPL5/4/3 旧记录自动
+  迁移并把 NFC 默认设为开。设置页新增“NFC 功能”开关，状态即时生效并持久化。
+- `NativeNfc::Service` 新增 `setEnabled()`：关闭时不再调用 `Nfc::loop()`，
+  既停止 1 s 寻卡，也停止模块探测和所有 PN532/I2C 访问；USB 侧 `status` 返回
+  `enabled:false`，其余 NFC 动作返回 `NFC_DISABLED`。重新打开时服务重新执行
+  `Nfc::begin()`。
+- 桌面 `NfcStatus` 增加 `enabled`，首次 `nfc.poll` 收到 `NFC_DISABLED` 时只记
+  一条系统日志、不再做 4 次重试。
+- 构建：默认 `0x2911C0`，USB NFC `0x2AD390`（含 `CONFIG_STORYBOX_POWER_SLEEP=y`）；USB 镜像已烧录到 COM5，
+  `nfc.poll` 返回 `enabled/present/polling=true`、PN532 fw 1.6，媒体索引仍为
+  285 首音乐/656 个故事。`sys.set {"nfc":false}` 实测立即返回
+  `enabled=false`，`nfc.poll` 回 `NFC_DISABLED`；重启后仍保持关闭，再打开后
+  服务重新探测到 PN532（fw 1.6）。设置页开关的目视/按键操作仍待人工确认。
+- 独立自动播放：设备启动时在 NFC 开关允许的情况下直接开始 1 s 轮询；读到
+  `storybox://media?path=…` 资源卡后按路径在媒体目录里查找，音乐走
+  `Playlist::seekPath` + `playCurrent`，故事走 `openStory`。若最近 10 秒内有
+  上位机命令（桌面心跳/操作），则不抢播放，保持工作台控制。
+- 真机验证：写一张指向 `/music/儿歌多多原创/一根小手指.mp3` 的资源卡并重启，
+  10 秒内不发送上位机命令，随后 `sys stats` 返回
+  `player.playing=true, title=一根小手指.mp3, curSec≈12`，说明 NDEF 解析、
+  目录匹配和独立播放都已生效。当前音量设置为 0，因此自动播放是静音的；音量
+  不是 NFC 触发条件。
+- 无播放休眠：之前那版 USB NFC 镜像没有包含 `sdkconfig.power`，启动日志是
+  `deep sleep 0 min (0 = off)`，所以设置页的“无播放休眠 3 分钟”只是保存了值、
+  不会真正深睡。重新构建并烧录的 `0x2AD390` 镜像已打开
+  `CONFIG_STORYBOX_POWER_SLEEP=y`，启动日志为 `deep sleep 3 min`；空闲 3 分钟后
+  进入深睡（USB 串口会断开），靠编码器 GPIO14/15/21 唤醒。USB 上位机运行时
+  每 5 s 的心跳会让设备保持唤醒，关闭上位机后才重新开始空闲计时。
+- 注意：本次启动日志里 PN532 探测又变成 `present:false`（I2C 扫描不到 0x24 的
+  PN532），与休眠无关；需要检查模块供电/接线后再验证卡片自动播放。

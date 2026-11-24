@@ -7,6 +7,7 @@ import type {
   DeviceInfo,
   DeviceSystemStats,
   LogEntry,
+  MediaCatalogInfo,
   NfcCard,
   NfcStatus,
   PortInfo,
@@ -17,14 +18,22 @@ import type {
 } from '@shared/types'
 import { bridge, isDemo, mockBridge } from '../lib/bridge'
 import { toNfcCard } from '../lib/card'
-import { buildNdefMessage, bytesToHex, describeNdef, estimateTlvSize, hexToBytes } from '../lib/ndef'
+import { buildNdefMessage, bytesToHex, describeNdef, estimateTlvSize } from '../lib/ndef'
+import {
+  buildResourceUri,
+  scanMediaCatalog,
+  scanResources,
+  type StoryboxResource
+} from '../lib/resources'
 import { demoHistoryCards } from '../lib/demo-data'
 import {
   hasStoredHistory,
   loadHistory,
+  loadResources,
   loadTheme,
   loadUiSettings,
   saveHistory,
+  saveResources,
   saveTheme,
   saveUiSettings,
   setDemoPreferred,
@@ -48,6 +57,7 @@ export interface SessionStats {
 }
 
 const emptyNfc = (): NfcStatus => ({
+  enabled: true,
   present: false,
   chip: 'PN532',
   fw: '--',
@@ -59,6 +69,7 @@ const emptyNfc = (): NfcStatus => ({
 })
 
 const idleWrite = (): WriteStatus => ({ phase: 'idle', pct: 0, written: 0, ok: true })
+const cachedResources = loadResources()
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let activitySeq = 0
@@ -84,6 +95,10 @@ interface AppStore {
   nfc: NfcStatus
   card?: NfcCard
   history: NfcCard[]
+  resources: StoryboxResource[]
+  resourcesSyncedAt?: number
+  resourcesSyncing: boolean
+  resourcesError?: string
   activities: ActivityEntry[]
   logs: LogEntry[]
   write: WriteStatus
@@ -108,9 +123,8 @@ interface AppStore {
   setPolling: (on: boolean) => Promise<void>
   refresh: () => Promise<void>
   readRaw: (req: RawReadRequest) => Promise<RawReadResult | null>
-  writeText: (text: string, language: string, verify: boolean) => Promise<boolean>
-  writeUri: (uri: string, verify: boolean) => Promise<boolean>
-  writeCustom: (hex: string, verify: boolean) => Promise<boolean>
+  syncResources: () => Promise<void>
+  writeResource: (resource: StoryboxResource, verify: boolean) => Promise<boolean>
   writeRaw: (kind: 'page' | 'block', start: number, data: string, key?: string) => Promise<boolean>
   clearHistory: () => void
   demoPlaceCard: () => void
@@ -296,7 +310,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       return false
     }
     if (!state.card.type2) {
-      get().showToast('error', '这张卡片不支持 NDEF', 'MIFARE Classic 请使用高级原始块写入')
+      get().showToast('error', '这张卡片不支持 NDEF', '资源卡片需要 Type 2 标签')
       return false
     }
     set({ write: { phase: 'start', pct: 0, written: 0, ok: true } })
@@ -335,6 +349,10 @@ export const useAppStore = create<AppStore>((set, get) => {
     nfc: emptyNfc(),
     card: undefined,
     history: [],
+    resources: cachedResources.items,
+    resourcesSyncedAt: cachedResources.syncedAt,
+    resourcesSyncing: false,
+    resourcesError: undefined,
     activities: [],
     logs: [],
     write: idleWrite(),
@@ -531,65 +549,95 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     },
 
-    writeText: async (text, language, verify) => {
-      if (!text.trim()) {
-        get().showToast('error', '内容为空', '请输入要写入卡片的文字')
-        return false
+    syncResources: async () => {
+      const state = get()
+      if (state.resourcesSyncing) return
+      if (state.connection.state !== 'connected') {
+        get().showToast('error', '设备未连接', '连接故事机后才能同步 TF 卡内容')
+        return
       }
-      const card = get().card
-      if (!card) {
-        get().showToast('error', '还没有卡片', '请先把卡片放到 PN532 天线上')
-        return false
+      const features = state.device?.features ?? []
+      const mediaSupported = features.includes('media')
+      const fsSupported = features.some(
+        (feature) => feature === 'fs_transfer' || feature === 'fs_readonly' || feature === 'fs'
+      )
+      if (!mediaSupported && !fsSupported) {
+        get().showToast('error', '固件不支持内容同步', '请升级到带内容索引的固件')
+        return
       }
-      if (!card.type2) {
-        get().showToast('error', '这张卡片不支持 NDEF', 'MIFARE Classic 请使用高级原始块写入')
-        return false
-      }
-      const message = buildNdefMessage([{ kind: 'text', text, language }])
-      const needed = estimateTlvSize(message.length)
-      if (needed > card.cap) {
-        get().showToast('error', '内容太长', `需要 ${needed}B, 当前标签可用 ${card.cap}B`)
-        return false
-      }
-      return startWrite(bytesToHex(message), verify)
-    },
-
-    writeUri: async (uri, verify) => {
-      if (!uri.trim()) {
-        get().showToast('error', '链接为空', '请输入要写入的 URL')
-        return false
-      }
-      const card = get().card
-      if (!card) {
-        get().showToast('error', '还没有卡片', '请先把卡片放到 PN532 天线上')
-        return false
-      }
-      if (!card.type2) {
-        get().showToast('error', '这张卡片不支持 NDEF', 'MIFARE Classic 请使用高级原始块写入')
-        return false
-      }
-      const message = buildNdefMessage([{ kind: 'uri', uri }])
-      const needed = estimateTlvSize(message.length)
-      if (needed > card.cap) {
-        get().showToast('error', '内容太长', `需要 ${needed}B, 当前标签可用 ${card.cap}B`)
-        return false
-      }
-      return startWrite(bytesToHex(message), verify)
-    },
-
-    writeCustom: async (hex, verify) => {
+      set({ resourcesSyncing: true, resourcesError: undefined })
       try {
-        const message = hexToBytes(hex)
-        if (message.length === 0) throw new Error('NDEF 消息不能为空')
-        const card = get().card
-        if (!card) throw new Error('NO_CARD')
-        if (!card.type2) throw new Error('这张卡片不支持 NDEF')
-        if (estimateTlvSize(message.length) > card.cap) throw new Error('内容超过标签容量')
-        return startWrite(bytesToHex(message), verify)
+        let items: StoryboxResource[] = []
+        let mediaInfo: MediaCatalogInfo | undefined
+        let note: string | undefined
+        let source = 'fs'
+        if (mediaSupported) {
+          try {
+            mediaInfo = await bridge.media.info()
+            items = await scanMediaCatalog(bridge.media, mediaInfo)
+            source = 'media'
+            if (!mediaInfo.ready) note = '设备尚未建立媒体索引，请先在设备上打开一次音乐/故事列表'
+          } catch {
+            note = '设备媒体索引不可用，已回退到文件列表'
+            items = await scanResources(bridge.files)
+          }
+        } else {
+          items = await scanResources(bridge.files)
+        }
+        const syncedAt = Date.now()
+        set({
+          resources: items,
+          resourcesSyncedAt: syncedAt,
+          resourcesSyncing: false,
+          resourcesError: items.length === 0 ? note : undefined
+        })
+        saveResources(items, syncedAt)
+        const music = items.filter((item) => item.kind === 'music').length
+        const stories = items.length - music
+        if (items.length === 0) {
+          get().showToast('info', '内容库为空', note ?? 'TF 卡 /music 与 /story 下没有可用资源')
+        } else {
+          get().showToast('success', '内容库已同步', `${music} 首音乐 · ${stories} 个故事`)
+        }
+        addLog(
+          'sys',
+          `同步内容库(${source}): ${items.length} 项（音乐 ${music} / 故事 ${stories}）${note ? `; ${note}` : ''}`
+        )
       } catch (err) {
-        get().showToast('error', 'NDEF 格式错误', err instanceof Error ? err.message : String(err))
+        const message = err instanceof Error ? err.message : String(err)
+        set({ resourcesSyncing: false, resourcesError: message })
+        get().showToast('error', '同步内容库失败', message)
+        addLog('error', `同步内容库失败: ${message}`)
+      }
+    },
+
+    writeResource: async (resource, verify) => {
+      const state = get()
+      if (!state.resources.some((item) => item.id === resource.id)) {
+        get().showToast('error', '资源已失效', '请先重新同步 TF 卡内容库')
         return false
       }
+      const card = state.card
+      if (!card) {
+        get().showToast('error', '还没有卡片', '请先把卡片放到 PN532 天线上')
+        return false
+      }
+      if (!card.type2) {
+        get().showToast('error', '这张卡片不支持 NDEF', '资源卡片需要 Type 2 标签')
+        return false
+      }
+      if (!card.writable) {
+        get().showToast('error', '卡片不可写', '标签可能已锁定或为只读')
+        return false
+      }
+      const message = buildNdefMessage([{ kind: 'uri', uri: buildResourceUri(resource.path) }])
+      const needed = estimateTlvSize(message.length)
+      if (needed > card.cap) {
+        get().showToast('error', '内容太长', `需要 ${needed}B, 当前标签可用 ${card.cap}B`)
+        return false
+      }
+      addLog('sys', `写入资源卡: ${resource.kind} · ${resource.path}`)
+      return startWrite(bytesToHex(message), verify)
     },
 
     writeRaw: async (kind, start, data, key) => {

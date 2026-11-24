@@ -1,0 +1,4 @@
+# USB NFC workbench image: product UI + SBX4 USB protocol + NFC route.
+# The optimization line also works around a local xtensa GCC 14.2 internal
+# compiler error in esp_lcd_panel_rgb.c at the default -Og; CI can drop it.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y

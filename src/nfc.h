@@ -8,6 +8,7 @@
  * 写入按页/块分步执行, 每次 loop 只做一小步, 因此不会长时间卡住 UI。
  */
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include "pn532.h"
 
@@ -103,6 +104,11 @@ const Card* card();
 const char* kindName(Kind k);      // 显示名, 如 NTAG213
 const char* kindId(Kind k);        // 协议 id, 如 ntag213
 const char* standardName(Kind k);
+
+// Extract the first URI record from the cached Type 2 NDEF message. The URI is
+// copied as UTF-8 (NUL-terminated); false when the card has no URI record or the
+// message is larger than the cached 256-byte user window.
+bool ndefUri(const Card& card, char* out, std::size_t capacity);
 
 void refreshCard();                // 重新读取当前卡
 bool readRaw(bool block, uint16_t start, uint16_t count,

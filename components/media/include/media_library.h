@@ -63,6 +63,7 @@ public:
     const Track* current() const;
     bool move(int delta);
     bool seekId(uint32_t id);
+    bool seekPath(const std::string& path);
     std::size_t size() const { return indices_.size(); }
     std::size_t position() const { return position_; }
     int category() const { return category_; }

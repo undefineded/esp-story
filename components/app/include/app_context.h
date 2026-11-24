@@ -29,6 +29,11 @@ void stepVolume(int steps);
 // Apply an equalizer preset (0..3) to the running playback service.
 void applyEq(uint8_t preset);
 
+// Apply the persisted master NFC switch immediately. Disabling stops polling
+// and suspends all PN532/I2C access in the NFC service. Returns false while a
+// tag write is in flight, so the caller can keep the switch on.
+bool applyNfcEnabled(bool enabled);
+
 // Favorites are indexed by position in the full catalog track list (FAV v1
 // bitmap layout). Returns false when the FRAM record is unavailable.
 bool favorite(std::size_t index);
