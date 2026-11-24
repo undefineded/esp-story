@@ -39,6 +39,84 @@
 
 ## 历史会话
 
+### 2026-11-25 会话（视频打开失败 / 列表卡顿）
+
+- 板型 / 硬件改动：ESP32-S3（`legacy` 配置），PN532 未接。
+- 镜像：`fd59da0-dirty` + 本次改动，`build-usb-nfc`，`0x2AF830`。
+- 串口：COM5（USB-Serial-JTAG）；供电：USB。
+- 结果汇总：
+
+| 组 | 结论 | 关键观察 |
+|---|---|---|
+| 4 视频 | **pass（列表 / 播放 / 退出 / 再开）** | 修复前打开视频直接 `音频输出初始化失败`；修复后管线启动，`videoFirstBackendFrameMs=504`，`videoBackendFrames` 正常累加，退出走 `QUIT in state: PLAYING` |
+| 2 音乐 | pass | 音频任务搬到 PSRAM 后播放正常，无断言、无断音 |
+
+- 现象与根因（真实日志）：
+
+```
+E (41869) i2s_common: i2s_alloc_dma_desc(541): allocate DMA buffer failed
+E (41869) pcm: i2s setup: ESP_ERR_NO_MEM
+E (41869) video: i2s begin: ESP_ERR_NO_MEM
+E (41869) video: audio output failed: internal=10443 largest=10240 dma=10439 psram=7034440
+```
+
+  内部 RAM 只剩 10 KB，而视频 I2S 环要 12×1920 B=23 KB 连续块；PSRAM 还有 7 MB。
+  分阶段测量定位到：BLE 一项 76 KB（`after ble: 156267 -> 80527`），媒体索引 39 KB。
+  只改 BLE 主机堆到 PSRAM 后，视频往后退了一步、卡在`esp_gmf_task_init:482 内存耗尽`
+  （连信号量都建不出来），再把 audio/usb-tx/usb-rx/video-control 四个任务栈搬 PSRAM 才通过。
+
+- 关键内存曲线（`build-usb-nfc`，开机各阶段 `internal free`）：
+
+```
+before media index   58.7 KB -> 105.5 KB
+after media index    19.8 KB ->  66.4 KB
+video: after i2s     10.4 KB ->  41.9 KB
+播放中最低点          失败     ->  25.6 KB
+```
+
+- 踩到的坑：
+  - `app` 任务栈放 PSRAM 会在 BLE 初始化写 NVS 时 panic：
+    `assert failed: spi_flash_disable_interrupts_caches_and_other_cpu (esp_task_stack_is_sane_cache_disabled())`。
+    `app` 与 `usb-files`（写 OTA 分区）必须留在内部 RAM。
+  - 修改 `build-*/sdkconfig` 会触发 CMake 重配置，进而调用组件管理器访问 registry/git，离线环境下
+    300 s 超时失败；此时可直接改 `build-*/config/sdkconfig.h` 并把 sdkconfig 的 mtime 回拨，
+    用 `ninja -C build-…` 增量编译绕过。
+  - 视频列表 400+ 集时逐文件 `f_stat` 是 O(n²)（FATFS 每次从目录首项线性查找），
+    这是「点进视频 tab 卡顿」的真正原因，与内存无关。
+
+- 未测：连续播放 10 分钟音画同步、12/15/20 fps 三档、USB+BLE+省电组合下的功耗。
+- 完整过程与回归溯源见 [视频打不开与内部 RAM 排查记录](video-ram-bugfix-log.md)。
+
+### 2026-11-20 会话（NFC 实卡，USB 产品镜像）
+
+- 板型 / 硬件改动：ESP32-S3（`legacy` 配置），外接 PN532 模块；NTAG215 卡放在线圈上。
+- 镜像：commit `fd59da0-dirty`，`build-usb-nfc`，`0x2A9AC0`，SHA256 `F38477C2BEB50FE6`。
+- 串口：COM5（USB-Serial-JTAG）；供电：USB。
+- 结果汇总：
+
+| 组 | 结论 | 关键观察 |
+|---|---|---|
+| 7 NFC | **pass（模块/读/写/校验/原始读）** | PN532 fw 1.6；NTAG215 UID `04F9BD32E32A81`，cap 496B，formatted；36B 文本 NDEF 写入并 verify done；near-capacity 488B 写入并 verify done；page 4+12 原始读与写入 TLV 一致 |
+
+- 启动日志关键行：
+
+```
+I (1315) app: NFC service ready
+SBX4...{"v":4,"evt":"nfc","type":"module","present":false,...}
+```
+
+  接上模块后未重新上电，`nfc.poll` 立即探测成功（`present=true, fw=1.6`），验证了缺席退避不会被 host poll 吞掉。
+
+- 实测记录：
+  - `tools/nfc_smoke_test.py --port COM5`：`features=['fs_transfer','nfc','nfc.ndef','nfc.raw','nfc.write-verify']`，status `present=True chip=PN532 fw=1.6 polling=True`。
+  - 36B 文本 `"月亮邮递员 · 第 03 集"`：`write_ndef` accepted → 分页进度 → verifying → done；`refresh` 回读 `03 24 D1 01 20 54 02 7A 68 … FE`。
+  - 470 个 ASCII 字符（总写入 488B，请求 JSON 超过旧的 1 KB 上限）：写入/校验通过，覆盖 2 KB 请求上限修复。
+  - `--read-pages 4,12`：48B 原始数据与 NDEF TLV 一致。
+  - `media.info`：`ready=true`，285 首音乐、656 个故事、6 个分类；`media.tracks/stories` 分页路径正确（用于桌面资源卡片选择，替代可能超时的 `fs.list` 目录遍历）。
+  - NFC 总开关：`sys.set {"nfc":false}` 后 `enabled=false`、`present=false`，`nfc.poll` 回 `NFC_DISABLED`；`sys.reboot` 后仍保持关闭；`sys.set {"nfc":true}` 后服务重新探测到 PN532 fw 1.6 并可正常 `poll`。
+  - 独立自动播放：写入指向 `/music/儿歌多多原创/一根小手指.mp3` 的资源卡后重启，10 秒内不发送上位机命令，`sys stats` 返回 `player.playing=true`、`title=一根小手指.mp3`、`curSec≈12`；卡内 URI 为 `storybox://media?path=…`。当时音量为 0，播放是静音的。
+- 未测：MIFARE Classic、监听中的移卡 `removed` 事件、桌面端资源卡片 UI 的人工操作、1 s 轮询周期的示波器/日志实测。会话结束时卡内为指向“一根小手指”的资源卡，NFC 开关为开；设备正在播放该曲目（音量 0）。
+
 ### 2026-11-04 会话 1（凌晨，第一块板）
 
 - 板型 / 硬件改动：`legacy`（未确认），PN532 未见应答；TF 卡已插。COM5 = 板载 USB-Serial-JTAG。

@@ -39,6 +39,10 @@ SPI 满屏 320×240 RGB565 的理论传输时间约 30.72 ms（尚未计入指�
 - 整段播放持有 SD 访问租约，存储维护不能在文件还打开时卸载或更换卡。
 - 退出、错误、结束时先销毁官方播放器和渲染任务，再释放缓冲、I2S、SD 租约，最后恢复旧音频入口。
   即使 I2S 释放失败也先恢复入口并保留下一次关闭重试，避免音频准入被永久关闭；未释放的频道会让下一次打开正常报错。
+  `PcmOutput::stop()` 把 `i2s_channel_disable` 的 `ESP_ERR_INVALID_STATE`（已经停了）当作可继续删除，
+  `begin()` 遇到残留通道先重试一次收尾；否则一次释放异常就会让当次开机的所有视频/音乐都拿不到 I2S 口。
+- 打开失败按阶段区分：`渲染管线创建失败`（GMF 池/元素）、`音频输出初始化失败`（I2S 通道），
+  串口同时打印 `esp_err_to_name` 与 `internal/largest/dma/psram`，便于判断是端口被占还是内存不足。
 - 播放中计入家长使用时长并保持屏幕点亮；暂停/结束不计时。BLE 暂停、恢复、音量、停止和状态进度接入新路径。
 - 播放完成留在当前页，OK 重播；Next/Prev 切换；长按 OK 返回。
 
@@ -47,9 +51,56 @@ SPI 满屏 320×240 RGB565 的理论传输时间约 30.72 ms（尚未计入指�
 连续选择会合并为最后一个请求，旧请求完成后的状态不会覆盖新请求；列表路径快照用于播放和切换，
 返回列表仅在存储版本变化后重新扫描。外部直接改卡而没有更新版本时，需要重启以重建列表。
 扫描持有存储租约；USB 维护期间不更新缓存，读取失败保留旧列表，重新进入时重试。
+
+视频列表**没有落盘索引**：`/.esp-story-index.bin` 只存音乐和故事，视频清单是运行时扫描 + 内存缓存，
+掉电即失效，所以开机后第一次进视频页必须扫一遍卡（之后同一次开机内直接命中缓存）。
+扫描本身不再逐文件 `stat`：FATFS 的 `d_type` 已给出目录/普通文件，`/video/.fill` 镜像改为**一次 readdir 遍历**
+后在内存里二分匹配——`f_stat` 每次都会从目录首项线性查找，400 集素材会退化成 O(n²)。
+需要扫描时页面先画「正在读取视频」再阻塞，避免旧画面停在原地像卡死。
+
 EOF/错误在页面 tick 中提交关闭，不依赖绘制；保留最后已绘制的画布，关闭完成前不进入深睡。
 视频到音乐/故事的切换也交给同一任务处理，避免旧 I2S 尚未释放便启动新音频。
 取消可立即返回界面；若官方 API 正在阻塞，资源清理须等待该调用返回，不能安全地强杀任务。
+
+## 内部 RAM 预算（16 MB flash / 8 MB PSRAM 板）
+
+视频栈是整机最大的内部 RAM 消费者，PSRAM 再空也没用——I2S DMA 环必须落在内部 RAM。
+2026-11-25 实测（`build-usb-nfc`，开机后各阶段 `internal free`）：
+
+| 阶段 | 修复前 | 只搬 BLE/任务栈 | 再把目录搬进 PSRAM |
+|---|---|---|---|
+| `app_main` 打印 | 180 KB | 180 KB | 190 KB |
+| BLE 初始化后 | 80.5 KB | 108.8 KB | 119.1 KB |
+| 载入媒体索引前 | 58.7 KB | 105.5 KB | 105.5 KB |
+| 载入 285 曲 / 656 故事后 | 19.8 KB | 66.4 KB | **105.4 KB** |
+| **视频打开、I2S 之前** | **10.4 KB** | **41.9 KB** | **≈60 KB（播放中实测）** |
+| 播放中最低点 | 失败 | 25.6 KB | **57.3 KB** |
+
+三条规则：
+
+- **NimBLE 主机堆放 PSRAM**（`CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL`）。它是单项最大占用，
+  实测 76 KB；宿主内存不需要 DMA，控制器自己的缓冲仍在内部。改完内部 RAM +28 KB。
+- **只把不写 flash 的任务栈放 PSRAM**（`xTaskCreateWithCaps(..., MALLOC_CAP_SPIRAM)`）：
+  `audio`、`usb-tx`、`usb-rx`、`video-control` 共 26 KB。
+  **`app` 任务必须留在内部 RAM**——它初始化 BLE 时会写 NVS，
+  `spi_flash_disable_interrupts_caches_and_other_cpu` 会断言 `esp_task_stack_is_sane_cache_disabled()` 直接 panic；
+  **`usb-files` 也必须留在内部 RAM**，它是写 OTA 分区的那个任务。
+- **媒体目录是批量数据，必须落在 PSRAM**（`components/media/include/catalog_extmem.h`）。
+  656 个故事 = 3280 个 `std::string`，40~60 字节一块，按 `SPIRAM_MALLOC_ALWAYSINTERNAL=8192`
+  全进内部 DRAM，实测 39 KB——这就是 11-10 那次把故事上限从 128 提到 1024 之后视频打不开的原因
+  （之前 656 > 128 让整个索引被拒，内存里 0 条故事，等于用“列表不可用”换来的内存）。
+  现在构建目录期间把 malloc 的 PSRAM 阈值临时降到 16 字节（`std::string` 的 SSO 边界），
+  目录内部占用从 39 KB 变成 **88 字节**，290 KB 数据进 PSRAM；
+  窗口只覆盖读索引/扫目录，全程只用文件与字符串，不分配 DMA 缓冲。
+- 官方的 5 个 GMF 任务（extractor/aud_dec/aud_render/vid_dec/vid_render）本来就用 PSRAM 栈
+  （`player_defaults_cfg.h` 的 `stack_in_ext=1`），不占内部 RAM。
+
+现场数据、回归溯源（哪次提交压垮的）和可复用的排查方法见
+[视频打不开与内部 RAM 排查记录](video-ram-bugfix-log.md)。
+
+排障入口：开机日志的 `app: <阶段>: internal=… largest=… psram=…` 与视频打开时的
+`video: after decoders/pools/i2s/…`。失败信息也分阶段：`音频输出初始化失败` 是 I2S 拿不到连续块，
+`渲染管线创建失败` 是 GMF 池；两者都不再笼统报「渲染资源不足」。
 
 ## 性能配置与统计
 

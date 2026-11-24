@@ -11,8 +11,8 @@
 - 音乐：扫描 `/music` 下的 MP3，按分类浏览、播放和调节音量/EQ。
 - 故事：扫描 `/story` 下的音频故事和带 LRC 时间轴的图文故事，按进度显示 JPEG 插画。
 - 视频：乐鑫 `esp_player` 播放 `/video` 下 320×240 MJPEG AVI，音频使用同一 AVI 内嵌 MP3。支持暂停、切换、返回和播放结束后重播。旧 QOI AVI、外挂音轨与 MP4/H.264 不可直接使用。
-- 设备：NimBLE 控制、家长限制、设置、FRAM 持久化、Wi-Fi 和省电功能按编译配置和硬件条件启用。
-- USB 与桌面端：产品 USB 配置使用 SBX4 协议，提供文件列表、会话、上传和下载等能力；不要假定旧版桌面端的全部文件操作均已迁移。PN532 原生服务支持状态查询，USB 原始读写与 NDEF 写入尚未接入。
+- 设备：NimBLE 控制、家长限制、设置、FRAM 持久化、Wi-Fi 和省电功能按编译配置和硬件条件启用。设置内的「资源占用」页只读显示内部 RAM / PSRAM / Flash 的已用量、余量、最大连续块与历史最低点，口径与 USB `sys stats` 一致。
+- USB 与桌面端：产品 USB 配置使用 SBX4 协议，提供文件列表、会话、上传和下载等能力；不要假定旧版桌面端的全部文件操作均已迁移。PN532 原生服务提供状态、轮询、原始页/块读取、NDEF/原始写入及卡片与写卡进度事件，物理接线和实卡兼容性仍需上板确认。
 
 编译通过不代表设备已验收；真实视频帧率、音画同步、SD/I2S/SPI 时序、USB/NFC 互操作和 OTA 回滚需要实机测试。CPU 负载目前未测量，USB 状态中的 `loadValid` 为 `false`。
 
@@ -111,6 +111,7 @@ bash tools/test_video_conversion.sh
 ## 文档导航
 
 - [视频播放与性能指标](docs/idf-video-player.md)、[性能待办](docs/PERFORMANCE-TODO.md)
+- [视频打不开与内部 RAM 排查记录](docs/video-ram-bugfix-log.md)：列表卡顿、`渲染资源不足` 的内存根因、回归溯源与可复用的排查方法
 - [显示刷新](docs/display-refresh.md)、[主页与插画资源](docs/home-design.md)、[媒体索引](docs/media-index.md)
 - [USB 文件传输](docs/file-transfer-refactor.md)、[PN532 与桌面端](docs/pn532-i2c.md)
 - [真机验收清单](docs/idf-hardware-acceptance.md)、[验收记录](docs/idf-acceptance-log.md)
