@@ -4,6 +4,7 @@
 
 #include "config.h"
 #include "display.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
@@ -31,15 +32,21 @@ uint32_t s_seen_input = 0;
 uint16_t s_logged_screen_min = 0xFFFF;
 uint16_t s_logged_sleep_min = 0xFFFF;
 bool s_blocked_logged = false;
+// Set when the wake pins could not be armed: sleeping without a wake source
+// would need a power cycle to recover, so this boot stays awake instead.
+bool s_sleep_unavailable = false;
 
 const int kWakePins[] = {ENC_A, ENC_B, ENC_SW};
 
-void screenOn() {
+// `swallow` belongs to a wake caused by the user: the press that turned the panel
+// back on must not also act on the page. A panel that comes back because
+// playback ended is not a key press and must not eat the next one.
+void screenOn(bool swallow) {
     if (!s_screen_off) return;
     s_screen_off = false;
     Display::setBrightness(s_saved_brightness);
-    Input::swallowFor(600);  // do not let the wake press trigger a page action
-    ESP_LOGI(kTag, "screen on");
+    if (swallow) Input::swallowFor(600);
+    ESP_LOGI(kTag, "%s", swallow ? "screen on" : "screen on (playback ended)");
 }
 
 void screenOffNow(bool playing) {
@@ -50,8 +57,9 @@ void screenOffNow(bool playing) {
 }
 
 #if CONFIG_STORYBOX_POWER_SLEEP
-[[noreturn]] void deepSleepNow() {
-    ESP_LOGI(kTag, "deep sleep (no playback, idle window elapsed)");
+// Returns false when the wake pins could not be armed. Entering deep sleep then
+// would leave a board that only a power cycle can wake, so stay awake instead.
+bool deepSleepNow() {
     Display::setBrightness(0);
     vTaskDelay(pdMS_TO_TICKS(50));
 
@@ -67,8 +75,15 @@ void screenOffNow(bool playing) {
         rtc_gpio_pulldown_dis(gpio);
         mask |= (uint64_t{1} << static_cast<uint32_t>(pin));
     }
-    esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
+    const esp_err_t armed = esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
+    if (armed != ESP_OK) {
+        ESP_LOGE(kTag, "wake pins cannot arm ext1 (%s); staying awake", esp_err_to_name(armed));
+        Display::setBrightness(s_saved_brightness);
+        return false;
+    }
+    ESP_LOGI(kTag, "deep sleep (no playback, idle window elapsed)");
     esp_deep_sleep_start();
+    return false;  // esp_deep_sleep_start() does not return
 }
 #endif
 
@@ -101,7 +116,7 @@ bool loop(uint32_t now_ms, const Inputs& inputs, const Config& config) {
     if (activity != s_seen_input) {
         s_seen_input = activity;
         s_blocked_logged = false;
-        if (s_screen_off) screenOn();
+        if (s_screen_off) screenOn(true);
     }
 
     if (config.screen_off_min != s_logged_screen_min || config.sleep_min != s_logged_sleep_min) {
@@ -133,9 +148,15 @@ bool loop(uint32_t now_ms, const Inputs& inputs, const Config& config) {
     // policy keeps using screen_off_min for idle blanking instead.
     if (decision.deep_sleep) {
 #if CONFIG_STORYBOX_POWER_SLEEP
-        deepSleepNow();
+        if (!s_sleep_unavailable && !deepSleepNow()) s_sleep_unavailable = true;
 #endif
     }
+    // The panel blanks only while audio keeps playing. When playback ends on its
+    // own (track finished) or a parent stops it over BLE, the policy stops asking
+    // for a dark panel and the screen has to come back by itself - the user is
+    // not going to press a key to find out why everything went black. A build
+    // that enters deep sleep instead never reaches this branch.
+    if (s_screen_off && !decision.screen_off && !decision.deep_sleep) screenOn(false);
     if (decision.screen_off) screenOffNow(inputs.audio_playing);
     return s_screen_off;
 }
@@ -144,7 +165,7 @@ bool screenOff() { return s_screen_off; }
 
 void wake(uint8_t brightness) {
     s_saved_brightness = brightness;
-    screenOn();
+    screenOn(false);
 }
 
 }
