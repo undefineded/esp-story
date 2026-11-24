@@ -10,8 +10,9 @@ esp_err_t Playback::begin() {
     if (queue_) return ESP_ERR_INVALID_STATE;
     queue_ = xQueueCreate(8, sizeof(Command));
     if (!queue_) return ESP_ERR_NO_MEM;
-    if (xTaskCreate([](void* self) { static_cast<Playback*>(self)->run(); },
-                    "audio", 8192, this, 4, nullptr) != pdPASS) {
+    if (xTaskCreateWithCaps([](void* self) { static_cast<Playback*>(self)->run(); },
+                            "audio", 8192, this, 4, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         vQueueDelete(queue_); queue_ = nullptr;
         return ESP_ERR_NO_MEM;
     }

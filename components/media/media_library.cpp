@@ -1,4 +1,5 @@
-﻿#include "media_library.h"
+#include "media_library.h"
+#include "catalog_extmem.h"
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -157,6 +158,9 @@ ScanResult Library::scan(const std::string& root) {
     struct Lease { Storage::AccessGate& gate; ~Lease(){gate.release();} } lease{gate_};
     struct stat root_stat{};
     if (stat(root.c_str(), &root_stat)!=0 || !S_ISDIR(root_stat.st_mode)) return ScanResult::IoError;
+    // Catalog strings are bulk data; keep them out of the internal heap that the
+    // video pipeline needs (see catalog_extmem.h).
+    ExtmemWindow extmem;
     auto next=std::make_shared<Catalog>();
     Scanner scanner{root,*next};
     scanner.visit("/music",[&](const auto& path,const auto& name,bool dir,bool regular) {
@@ -205,6 +209,13 @@ bool Playlist::seekId(uint32_t id) {
     if (!id || !catalog_) return false;
     for (std::size_t i=0;i<indices_.size();++i) {
         if (catalog_->tracks[indices_[i]].id==id) { position_=i; return true; }
+    }
+    return false;
+}
+bool Playlist::seekPath(const std::string& path) {
+    if (!catalog_ || path.empty()) return false;
+    for (std::size_t i=0;i<indices_.size();++i) {
+        if (catalog_->tracks[indices_[i]].path==path) { position_=i; return true; }
     }
     return false;
 }

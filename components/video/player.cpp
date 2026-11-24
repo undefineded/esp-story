@@ -7,6 +7,7 @@
 #include <mutex>
 #include <cstdio>
 #include "esp_timer.h"
+#include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "media_lib_adapter.h"
@@ -73,7 +74,10 @@ Status statusSync();
 void controlTask(void*);
 bool ensureController() {
     if (controller) return true;
-    return xTaskCreatePinnedToCore(controlTask, "video-control", 8192, nullptr, 3, &controller, 0) == pdPASS;
+    // The controller stack lives in PSRAM: it allocates the video pipeline's
+    // internal buffers, so its own 8 KiB must not compete with them.
+    return xTaskCreatePinnedToCoreWithCaps(controlTask, "video-control", 8192, nullptr, 3, &controller,
+                                           0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS;
 }
 bool submit(Control command) {
     if (!ensureController()) return false;
@@ -147,7 +151,10 @@ int writeAudio(uint8_t* pcm, uint32_t size, void*) {
 }
 
 bool pools() {
-    if (esp_gmf_pool_init(&audio_pool) || esp_gmf_pool_init(&video_pool)) return false;
+    if (esp_gmf_pool_init(&audio_pool) || esp_gmf_pool_init(&video_pool)) {
+        ESP_LOGE("video", "gmf pool init failed");
+        return false;
+    }
     esp_gmf_element_handle_t el = nullptr;
     auto add = [](esp_gmf_pool_handle_t pool, esp_gmf_element_handle_t element) {
         if (esp_gmf_pool_register_element(pool, element, nullptr) == ESP_GMF_ERR_OK) return true;
@@ -169,6 +176,24 @@ bool pools() {
     if (esp_gmf_video_scale_init(&scale, &el) || !add(video_pool, el)) return false;
     if (esp_gmf_video_crop_init(&crop, &el) || !add(video_pool, el)) return false;
     return true;
+}
+// Every allocation the player needs comes from a different pool (internal for
+// I2S DMA and task stacks, PSRAM for GMF and the frame mailboxes), so a bring-up
+// failure has to say which pool ran out instead of one generic "no resources".
+void logHeaps(const char* step) {
+    ESP_LOGE("video", "%s: internal=%u largest=%u dma=%u psram=%u", step,
+             unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+             unsigned(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+             unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+}
+// Normal-path trace: the video stack is the biggest internal-RAM consumer in the
+// product, so an open that later fails with a bare "Memory exhausted" from a
+// vendor component still shows which stage ate the room.
+void logStep(const char* step) {
+    ESP_LOGI("video", "%s: internal=%u largest=%u", step,
+             unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
 }
 bool fail(const char* message) {
     last_error = message;
@@ -210,16 +235,29 @@ bool openSync(Storage::AccessGate& gate, Audio::Playback& audio, const std::stri
             esp_avi_extractor_register()) return fail("解码器注册失败");
         defaults_registered = true;
     }
-    if (!pools() || output.begin(SampleRate, Audio::PcmOutput::kVideoCapacity) != ESP_OK)
-        return fail("渲染资源不足");
+    logStep("after decoders");
+    if (!pools()) {
+        logHeaps("gmf pools failed");
+        return fail("渲染管线创建失败");
+    }
+    logStep("after pools");
+    const auto i2s = output.begin(SampleRate, Audio::PcmOutput::kVideoCapacity);
+    if (i2s != ESP_OK) {
+        ESP_LOGE("video", "i2s begin: %s", esp_err_to_name(i2s));
+        logHeaps("audio output failed");
+        return fail("音频输出初始化失败");
+    }
+    logStep("after i2s");
     equalizer.reset();
     esp_audio_render_cfg_t ac{};
     ac.max_stream_num = 1; ac.out_writer = writeAudio;
     ac.out_sample_info = {SampleRate, 16, 2}; ac.pool = audio_pool;
     if (esp_audio_render_create(&ac, &audio_render)) return fail("音频渲染初始化失败");
+    logStep("after audio render");
     esp_video_render_cfg_t vc{};
     vc.pool = video_pool; vc.fps = 30;
     if (esp_video_render_create(&vc, &video_render)) return fail("视频渲染初始化失败");
+    logStep("after video render");
     esp_video_render_backend_cfg_t bc{};
     bc.ops = &backend;
     if (esp_video_render_set_display(video_render, &bc)) return fail("屏幕适配初始化失败");
@@ -228,6 +266,7 @@ bool openSync(Storage::AccessGate& gate, Audio::Playback& audio, const std::stri
     esp_player_config_t cfg = ESP_PLAYER_CONFIG_DEFAULT();
     cfg.audio_render_hd = stream; cfg.video_render_hd = video_render;
     if (esp_player_init(&cfg, &player)) return fail("播放器初始化失败");
+    logStep("after player init");
     // Task placement stays on the library defaults (player_defaults_cfg.h):
     // extractor/audio-render/video-decoder on core 0, audio-decoder/video-render
     // on core 1. The vendor example runs the same layout; an earlier override that
@@ -340,10 +379,11 @@ void controlTask(void*) {
                 std::snprintf(value.error, sizeof(value.error), "%s", last_error);
             }
             control.complete(processed, value);
-            ESP_LOGI("video-perf", "request=%lu stop=%lums setup=%lums run=%lums heap=%u",
+            ESP_LOGI("video-perf", "request=%lu stop=%lums setup=%lums run=%lums heap=%u err=%s",
                      (unsigned long)processed, (unsigned long)value.stop_audio_ms,
                      (unsigned long)value.setup_ms, (unsigned long)value.run_ms,
-                     unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+                     unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                     value.error[0] ? value.error : "-");
         }
         if (player && processed == control.serial()) {
             Status value = statusSync();

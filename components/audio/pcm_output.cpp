@@ -1,10 +1,24 @@
 #include "pcm_output.h"
 #include <algorithm>
 #include <limits>
+#include "esp_log.h"
 namespace Audio {
+namespace {
+constexpr const char* kTag = "pcm";
+}
 PcmOutput::~PcmOutput() { stop(); }
 esp_err_t PcmOutput::begin(uint32_t sample_rate, uint32_t total_frames) {
-    if (channel_) return ESP_ERR_INVALID_STATE;
+    if (channel_) {
+        // A channel left behind by a stop() the driver refused would make every
+        // later request fail with INVALID_STATE for the rest of the boot, so try
+        // the teardown once more before reporting the port as busy.
+        ESP_LOGW(kTag, "begin: channel still open, retrying stop");
+        stop();
+        if (channel_) {
+            ESP_LOGE(kTag, "begin: I2S port still owned; playback needs a reboot");
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
     if (sample_rate < 8000 || sample_rate > 48000) return ESP_ERR_INVALID_ARG;
     if (total_frames < kChunkFrames || total_frames % kChunkFrames) return ESP_ERR_INVALID_ARG;
     i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -12,7 +26,12 @@ esp_err_t PcmOutput::begin(uint32_t sample_rate, uint32_t total_frames) {
     channel.dma_desc_num = total_frames / kChunkFrames;
     channel.dma_frame_num = kChunkFrames;
     auto result = i2s_new_channel(&channel, &channel_, nullptr);
-    if (result != ESP_OK) return result;
+    if (result != ESP_OK) {
+        ESP_LOGE(kTag, "i2s_new_channel: %s (desc=%u frames=%u)",
+                 esp_err_to_name(result), (unsigned)channel.dma_desc_num,
+                 (unsigned)channel.dma_frame_num);
+        return result;
+    }
     i2s_std_config_t config{};
     config.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
     config.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
@@ -23,7 +42,12 @@ esp_err_t PcmOutput::begin(uint32_t sample_rate, uint32_t total_frames) {
     config.gpio_cfg.din = I2S_GPIO_UNUSED;
     result = i2s_channel_init_std_mode(channel_, &config);
     if (result == ESP_OK) result = i2s_channel_enable(channel_);
-    if (result != ESP_OK) { i2s_del_channel(channel_); channel_ = nullptr; return result; }
+    if (result != ESP_OK) {
+        ESP_LOGE(kTag, "i2s setup: %s", esp_err_to_name(result));
+        i2s_del_channel(channel_);
+        channel_ = nullptr;
+        return result;
+    }
     capacity_ = total_frames;
     enabled_ = true;
     return ESP_OK;
@@ -55,11 +79,21 @@ esp_err_t PcmOutput::stop() {
     if (!channel_) return ESP_OK;
     if (enabled_) {
         const auto result = i2s_channel_disable(channel_);
-        if (result != ESP_OK) return result;
+        // INVALID_STATE means the channel is not running any more: refusing to
+        // delete it there is what used to leak the I2S port until a reboot.
+        if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(kTag, "i2s disable: %s", esp_err_to_name(result));
+            return result;
+        }
         enabled_ = false;
     }
     const auto result = i2s_del_channel(channel_);
-    if (result == ESP_OK) { channel_ = nullptr; capacity_ = 0; }
+    if (result == ESP_OK) {
+        channel_ = nullptr;
+        capacity_ = 0;
+    } else {
+        ESP_LOGE(kTag, "i2s delete: %s", esp_err_to_name(result));
+    }
     return result;
 }
 }

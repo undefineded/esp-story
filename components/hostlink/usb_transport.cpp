@@ -115,9 +115,13 @@ esp_err_t startUsb() {
         vQueueDelete(tx_queue); tx_queue=nullptr;
         usb_serial_jtag_driver_uninstall(); return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(transmit,"usb-tx",4096,nullptr,2,&tx_task)!=pdPASS ||
+    // usb-files keeps an internal stack: it is the task that writes OTA chunks
+    // to flash, and a PSRAM stack is not reachable while the cache is off.
+    if (xTaskCreateWithCaps(transmit,"usb-tx",4096,nullptr,2,&tx_task,
+                            MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)!=pdPASS ||
         xTaskCreate(work,"usb-files",8192,nullptr,2,&worker_task)!=pdPASS ||
-        xTaskCreate(receive,"usb-rx",6144,nullptr,2,&rx_task)!=pdPASS) {
+        xTaskCreateWithCaps(receive,"usb-rx",6144,nullptr,2,&rx_task,
+                            MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)!=pdPASS) {
         if (worker_task) vTaskDelete(worker_task);
         if (tx_task) vTaskDelete(tx_task);
         vQueueDelete(command_queue); command_queue=nullptr; worker_task=nullptr;

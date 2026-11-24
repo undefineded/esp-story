@@ -38,6 +38,14 @@ CONFIG_STORYBOX_FRAM_CONFIRMED=y
 
 # BLE control channel (NimBLE peripheral, same GATT layout as the Arduino app).
 CONFIG_BT_ENABLED=y
+# NimBLE's host heap is the single largest internal-RAM consumer on this board
+# (76 KiB measured, more than display, fonts and USB together). Keeping it in
+# internal RAM left about 10 KiB free by the time the video page opened, and the
+# I2S DMA ring (12 x 1920 B, internal-only) then failed with ESP_ERR_NO_MEM.
+# The host does not need DMA-capable memory, so park it in PSRAM next to the
+# canvas and frame buffers; the controller keeps its own internal buffers.
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=n
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1

@@ -1,4 +1,5 @@
 #include "media_library.h"
+#include "catalog_extmem.h"
 #include "index_io.h"
 #include <cctype>
 namespace Media {
@@ -85,6 +86,9 @@ bool Library::loadCache(const std::string& root) {
     struct Lease { Storage::AccessGate& gate; ~Lease(){gate.release();} } lease{gate_};
     struct stat dirty{};
     if (stat((root+"/.esp-story-index.dirty").c_str(),&dirty)==0 || errno!=ENOENT) return false;
+    // The index decodes into the same pile of small strings a scan builds; keep
+    // them in PSRAM so the video pipeline keeps its internal DMA room.
+    ExtmemWindow extmem;
     for (const auto* path:{"/.esp-story-index.bin","/.esp-story-index.bin.storybox-backup","/.esp-story-index.bak"}) {
         Storage::FileStream file(gate_);
         if (!file.open(root,path,"rb")) continue;
