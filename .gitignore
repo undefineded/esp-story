@@ -30,23 +30,13 @@ Netlist_*.enet
 # 原始视频素材（大文件，不入库）
 /raw-video/
 
-# 儿歌素材与整理产物（音频大文件，不入库）；只保留 tools/ 下的脚本
-/music_sp/out/
-/music_sp/sd/
-/music_sp/library.json
-/music_sp/library.csv
-/music_sp/整理报告.md
-/music_sp/整理计划.csv
-/music_sp/分类报告.md
-/music_sp/分类计划.csv
-/music_sp/fetch-*.log
-/music_sp/retry-*.log
+# 儿歌素材与整理产物（音频大文件与整理日志，不入库）；只保留 tools/ 下的脚本
+/music_sp/
 
-/music_sp/sd/music-320/
-/music_sp/loudness.json
-/music_sp/音量报告.csv
-/music_sp/音量校验.csv
-/music_sp/normalize*.log
+# 本机工具数据与临时产物
+/build.log
+/.workbuddy/
+/suno-catcher/
 
 /tmp-compare/
 /out-fill/
