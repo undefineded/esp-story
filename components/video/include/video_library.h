@@ -25,6 +25,12 @@ bool scanLibraryChecked(const std::string& root, std::vector<Entry>& entries, st
 
 class LibraryCache {
 public:
+    // True when entries already match the current storage revision, i.e. the
+    // next refresh would only return the cache. Lets the page decide whether a
+    // scan screen is worth drawing before it blocks on the card.
+    bool fresh(Storage::AccessGate& gate) {
+        return scanned_ && gate.revision() == revision_;
+    }
     bool refresh(Storage::AccessGate& gate, const std::string& root) {
         if (!gate.acquire()) return false;
         struct Lease { Storage::AccessGate& gate; ~Lease() { gate.release(); } } lease{gate};

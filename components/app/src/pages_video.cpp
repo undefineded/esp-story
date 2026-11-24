@@ -8,6 +8,7 @@
 #include "app_services.h"
 #include "app_theme.h"
 #include "esp_timer.h"
+#include "esp_log.h"
 #include "video_player.h"
 #include "display.h"
 #include "fonts.h"
@@ -121,8 +122,18 @@ public:
     const char* id() const override { return "video-list"; }
 
     void enter() override {
-        if (!cache_.refresh(storageGate(), Storage::SdVolume::root))
+        // The list has no on-disk index: the first entry after boot (or after a
+        // USB upload bumped the storage revision) walks /video. Draw the scan
+        // screen first so the card access never looks like a frozen UI.
+        auto& gate = storageGate();
+        const bool cached = cache_.fresh(gate);
+        if (!cached) drawScanScreen();
+        const uint32_t started = nowMs();
+        if (!cache_.refresh(gate, Storage::SdVolume::root))
             notify("视频目录暂不可用，请稍后重新进入");
+        if (!cached)
+            ESP_LOGI("video", "list scan: %u entries in %lums", unsigned(entries_.size()),
+                     static_cast<unsigned long>(nowMs() - started));
         buildRows();
         invalidate();
     }
@@ -217,6 +228,20 @@ private:
         int index = -1;    // flat entry index for file rows
         bool folder = false;
     };
+
+    void drawScanScreen() {
+        auto& g = Display::canvas();
+        const auto& c = Theme::colors();
+        g.fillScreen(c.paper);
+        drawTopBar(g);
+        Theme::drawSmileFace(g, 160, 96, 16);
+        g.setFont(Fonts::title());
+        g.setTextColor(c.text, c.paper);
+        g.drawCenterString("正在读取视频", 160, 132);
+        g.setFont(Fonts::small());
+        g.drawCenterString("请勿拔出 TF 卡", 160, 160);
+        Display::present(true);
+    }
 
     void buildRows() {
         rows_.clear();
