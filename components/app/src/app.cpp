@@ -4,6 +4,9 @@
 
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <atomic>
+#include <mutex>
 
 #include "app_context.h"
 #include "app_page.h"
@@ -15,6 +18,7 @@
 #include "display.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "fonts.h"
 #include "freertos/FreeRTOS.h"
@@ -60,6 +64,17 @@ constexpr char kTag[] = "app";
 constexpr int kMaxDepth = 6;
 constexpr uint32_t kFrameIntervalMs = 20;
 
+// Internal RAM is the scarce resource: the video stack needs ~23 KB of
+// contiguous DMA memory for its I2S ring on top of the decoder scratch, while
+// the media catalog lives in internal heap. Log the delta at each boot stage so
+// a "video needs X" bug can be traced to the allocation that ate the room.
+void logHeap(const char* step) {
+    ESP_LOGI(kTag, "%s: internal=%u largest=%u psram=%u", step,
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+}
+
 Context s_context;
 Page* s_stack[kMaxDepth] = {};
 int s_depth = 0;
@@ -73,6 +88,10 @@ Media::Library g_library(g_gate);
 Audio::Playback g_playback(g_gate);
 Media::Playlist g_playlist;
 CatalogPtr s_catalog;
+// The USB worker reads the published catalog for "media" pages while the app
+// task may republish it after a rescan; hold this only while copying the
+// shared_ptr (the catalog itself is immutable).
+std::mutex s_catalog_mutex;
 
 char s_notice[96] = {};
 uint32_t s_notice_until = 0;
@@ -100,9 +119,16 @@ Storage::FileReader* s_usb_files = nullptr;
 uint32_t s_catalog_refresh_at = 0;
 #endif
 
-NativeNfc::Service* s_nfc = nullptr;
+// Written once during App::start(), read by the USB worker; an atomic keeps the
+// handoff well defined even when a host sends a command during boot.
+std::atomic<NativeNfc::Service*> s_nfc{nullptr};
 
 uint32_t randomU32() { return esp_random(); }
+
+void publishCatalog() {
+    std::lock_guard<std::mutex> lock(s_catalog_mutex);
+    s_catalog = g_library.snapshot();
+}
 
 uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
@@ -491,12 +517,14 @@ Ble::Hooks makeBleHooks() {
     return hooks;
 }
 
-// USB route for "cmd":"nfc". Only status is exposed: the native service still
-// has no raw read/write API, so those actions answer NOT_SUPPORTED.
+// USB route for "cmd":"nfc". Requests are marshalled onto the NFC owner task;
+// the raw Pn532/Nfc state is never touched from the protocol worker. Actions
+// match the Arduino firmware: status/poll/refresh/read/write_ndef/write_raw.
 #if CONFIG_STORYBOX_USB_PROTOCOL
 void addSystemStats(cJSON* data) {
     const auto state = g_playback.snapshot();
     const auto* track = g_playlist.current();
+    const auto catalog_now = catalog();
     const uint32_t seconds = state.sample_rate ? static_cast<uint32_t>(state.submitted_frames / state.sample_rate) : 0;
 
     cJSON_AddNumberToObject(data, "uptime", static_cast<double>(esp_timer_get_time() / 1000000));
@@ -572,9 +600,9 @@ void addSystemStats(cJSON* data) {
     cJSON_AddNumberToObject(storage, "free", static_cast<double>(free_bytes));
     cJSON_AddNumberToObject(storage, "used", static_cast<double>(total - free_bytes));
     cJSON_AddNumberToObject(storage, "tracks",
-                            s_catalog ? static_cast<double>(s_catalog->tracks.size()) : 0);
+                            catalog_now ? static_cast<double>(catalog_now->tracks.size()) : 0);
     cJSON_AddNumberToObject(storage, "stories",
-                            s_catalog ? static_cast<double>(s_catalog->stories.size()) : 0);
+                            catalog_now ? static_cast<double>(catalog_now->stories.size()) : 0);
 
     cJSON* settings = cJSON_AddObjectToObject(data, "settings");
     cJSON_AddNumberToObject(settings, "volume", s_context.volume);
@@ -589,6 +617,7 @@ void addSystemStats(cJSON* data) {
     cJSON_AddBoolToObject(settings, "ble", s_context.settings.ble != 0);
     cJSON_AddBoolToObject(settings, "wifi", s_context.settings.wifi != 0);
     cJSON_AddBoolToObject(settings, "ap", s_context.settings.ap != 0);
+    cJSON_AddBoolToObject(settings, "nfc", s_context.settings.nfc != 0);
     cJSON_AddBoolToObject(settings, "childLock", s_parental_ready && s_policy.childLocked());
     cJSON_AddBoolToObject(settings, "bound", parentalBound());
     cJSON_AddStringToObject(settings, "name", Ble::deviceName());
@@ -615,23 +644,158 @@ void addSystemStats(cJSON* data) {
     cJSON_AddNumberToObject(player, "volume", s_context.volume);
 }
 
-void addNfcStatus(cJSON* data) {
-    const auto state = s_nfc->snapshot();
-    cJSON_AddBoolToObject(data, "module", state.module);
-    cJSON_AddBoolToObject(data, "polling", state.polling);
-    cJSON_AddStringToObject(data, "firmware", state.firmware);
-    cJSON_AddBoolToObject(data, "card", state.card.valid);
-    if (state.card.valid) {
-        cJSON_AddStringToObject(data, "kind", Nfc::kindId(state.card.kind));
-        cJSON_AddStringToObject(data, "kindName", Nfc::kindName(state.card.kind));
-        cJSON_AddBoolToObject(data, "writable", state.card.writable);
-        cJSON_AddBoolToObject(data, "formatted", state.card.formatted);
-        cJSON_AddNumberToObject(data, "capacity", state.card.capacity);
-        char uid[32] = {};
-        for (unsigned i = 0; i < state.card.uidLen && i < 10 && (i * 2 + 2) < sizeof(uid); ++i) {
-            std::snprintf(uid + i * 2, sizeof(uid) - i * 2, "%02x", state.card.uid[i]);
+// ---- NFC status and card serialisation (same shape as the Arduino hostlink) --
+
+void hexText(const uint8_t* data, std::size_t length, char* out, std::size_t capacity) {
+    static constexpr char kDigits[] = "0123456789ABCDEF";
+    if (!out || !capacity) return;
+    std::size_t used = 0;
+    for (std::size_t i = 0; i < length && used + 2 < capacity; ++i) {
+        out[used++] = kDigits[data[i] >> 4];
+        out[used++] = kDigits[data[i] & 0x0F];
+    }
+    out[used] = '\0';
+}
+
+int hexNibble(char value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+// Accepts the same separators as the Arduino protocol (spaces, ':' and '-').
+int hexDecode(const char* text, uint8_t* out, std::size_t capacity) {
+    if (!text) return -1;
+    std::size_t used = 0;
+    int high = -1;
+    for (const char* p = text; *p; ++p) {
+        const char value = *p;
+        if (value == ' ' || value == ':' || value == '-') continue;
+        const int nibble = hexNibble(value);
+        if (nibble < 0) return -1;
+        if (high < 0) {
+            high = nibble;
+        } else {
+            if (used >= capacity) return -1;
+            out[used++] = static_cast<uint8_t>((high << 4) | nibble);
+            high = -1;
         }
-        cJSON_AddStringToObject(data, "uid", uid);
+    }
+    if (high >= 0) return -1;
+    return static_cast<int>(used);
+}
+
+void addNfcCard(cJSON* card, const Nfc::Card& state) {
+    char text[sizeof(state.user) * 2 + 1];
+    hexText(state.uid, state.uidLen, text, sizeof(text));
+    cJSON_AddStringToObject(card, "uid", text);
+    cJSON_AddNumberToObject(card, "uidLen", state.uidLen);
+    char atqa[8];
+    std::snprintf(atqa, sizeof(atqa), "%04X", static_cast<unsigned>(state.atqa));
+    cJSON_AddStringToObject(card, "atqa", atqa);
+    char sak[8];
+    std::snprintf(sak, sizeof(sak), "%02X", static_cast<unsigned>(state.sak));
+    cJSON_AddStringToObject(card, "sak", sak);
+    cJSON_AddStringToObject(card, "kind", Nfc::kindId(state.kind));
+    cJSON_AddStringToObject(card, "type", Nfc::kindName(state.kind));
+    cJSON_AddStringToObject(card, "std", Nfc::standardName(state.kind));
+    cJSON_AddBoolToObject(card, "type2", state.type2);
+    cJSON_AddBoolToObject(card, "writable", state.writable);
+    cJSON_AddBoolToObject(card, "formatted", state.formatted);
+    cJSON_AddNumberToObject(card, "cap", state.capacity);
+    cJSON_AddNumberToObject(card, "userStart", state.userStart);
+    cJSON_AddNumberToObject(card, "userPages", state.userPages);
+    cJSON_AddNumberToObject(card, "userTotal", state.userTotal);
+    cJSON_AddNumberToObject(card, "userBytes", state.userBytes);
+    hexText(state.version, state.versionOk ? state.versionLen : 0, text, sizeof(text));
+    cJSON_AddStringToObject(card, "version", text);
+    hexText(state.cc, state.ccValid ? 4 : 0, text, sizeof(text));
+    cJSON_AddStringToObject(card, "cc", text);
+    hexText(state.lock, sizeof(state.lock), text, sizeof(text));
+    cJSON_AddStringToObject(card, "lock", text);
+    hexText(state.user, state.userBytes, text, sizeof(text));
+    cJSON_AddStringToObject(card, "data", text);
+    if (state.hasBlock0) {
+        hexText(state.block0, 16, text, sizeof(text));
+        cJSON_AddStringToObject(card, "block0", text);
+    }
+}
+
+// ---- Media catalog pages for the desktop resource picker -------------------
+// The catalog is already in RAM (boot cache or the first library scan), so
+// this avoids re-walking a slow/corrupt SD directory just to list resources.
+unsigned mediaParam(const cJSON* request, const char* name, unsigned fallback) {
+    const auto* item = cJSON_GetObjectItemCaseSensitive(request, name);
+    if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > 100000) return fallback;
+    return static_cast<unsigned>(item->valuedouble);
+}
+
+void addMediaInfo(cJSON* data, const Media::Catalog& catalog, bool ready) {
+    cJSON_AddBoolToObject(data, "ready", ready);
+    cJSON_AddNumberToObject(data, "trackTotal", static_cast<double>(catalog.tracks.size()));
+    cJSON_AddNumberToObject(data, "storyTotal", static_cast<double>(catalog.stories.size()));
+    auto* categories = cJSON_AddArrayToObject(data, "categories");
+    for (const auto& name : catalog.categories) {
+        if (auto* item = cJSON_CreateString(name.c_str())) cJSON_AddItemToArray(categories, item);
+    }
+}
+
+void addMediaTracks(cJSON* data, const Media::Catalog& catalog, unsigned offset, unsigned limit) {
+    limit = std::min<unsigned>(limit ? limit : 12, 16);
+    const unsigned total = static_cast<unsigned>(catalog.tracks.size());
+    const unsigned start = std::min(offset, total);
+    const unsigned count = std::min(limit, total - start);
+    cJSON_AddNumberToObject(data, "total", static_cast<double>(total));
+    cJSON_AddNumberToObject(data, "offset", static_cast<double>(start));
+    cJSON_AddNumberToObject(data, "limit", static_cast<double>(limit));
+    auto* rows = cJSON_AddArrayToObject(data, "tracks");
+    for (unsigned i = 0; i < count; ++i) {
+        const auto& track = catalog.tracks[start + i];
+        auto* row = cJSON_CreateArray();
+        if (!row) continue;
+        cJSON_AddItemToArray(row, cJSON_CreateString(track.path.c_str()));
+        cJSON_AddItemToArray(row, cJSON_CreateString(track.name.c_str()));
+        cJSON_AddItemToArray(row, cJSON_CreateNumber(track.id));
+        cJSON_AddItemToArray(row, cJSON_CreateNumber(track.category));
+        cJSON_AddItemToArray(rows, row);
+    }
+}
+
+void addMediaStories(cJSON* data, const Media::Catalog& catalog, unsigned offset, unsigned limit) {
+    limit = std::min<unsigned>(limit ? limit : 8, 12);
+    const unsigned total = static_cast<unsigned>(catalog.stories.size());
+    const unsigned start = std::min(offset, total);
+    const unsigned count = std::min(limit, total - start);
+    cJSON_AddNumberToObject(data, "total", static_cast<double>(total));
+    cJSON_AddNumberToObject(data, "offset", static_cast<double>(start));
+    cJSON_AddNumberToObject(data, "limit", static_cast<double>(limit));
+    auto* rows = cJSON_AddArrayToObject(data, "stories");
+    for (unsigned i = 0; i < count; ++i) {
+        const auto& story = catalog.stories[start + i];
+        auto* row = cJSON_CreateArray();
+        if (!row) continue;
+        cJSON_AddItemToArray(row, cJSON_CreateString(story.audio.c_str()));
+        cJSON_AddItemToArray(row, cJSON_CreateString(story.timeline.c_str()));
+        cJSON_AddItemToArray(row, cJSON_CreateString(story.directory.c_str()));
+        cJSON_AddItemToArray(row, cJSON_CreateString(story.category.c_str()));
+        cJSON_AddItemToArray(rows, row);
+    }
+}
+
+void addNfcStatus(cJSON* object, NativeNfc::Service& service) {
+    const auto state = service.snapshot();
+    cJSON_AddBoolToObject(object, "enabled", state.enabled);
+    cJSON_AddBoolToObject(object, "present", state.module);
+    cJSON_AddStringToObject(object, "chip", "PN532");
+    cJSON_AddStringToObject(object, "fw", state.firmware);
+    cJSON_AddStringToObject(object, "i2c", "0x24");
+    cJSON_AddBoolToObject(object, "polling", state.polling);
+    cJSON_AddBoolToObject(object, "busy", state.busy);
+    cJSON_AddNumberToObject(object, "uptime", static_cast<double>(esp_timer_get_time() / 1000));
+    cJSON_AddNumberToObject(object, "heap", static_cast<double>(esp_get_free_heap_size()));
+    if (state.card.valid) {
+        addNfcCard(cJSON_AddObjectToObject(object, "card"), state.card);
     }
 }
 
@@ -674,6 +838,7 @@ bool hostRoute(void*, cJSON* request, const char* command, const char* action, c
             const cJSON* brightness = cJSON_GetObjectItemCaseSensitive(request, "brightness");
             const cJSON* eq = cJSON_GetObjectItemCaseSensitive(request, "eq");
             const cJSON* rotation = cJSON_GetObjectItemCaseSensitive(request, "rotation");
+            const cJSON* nfc = cJSON_GetObjectItemCaseSensitive(request, "nfc");
             if (cJSON_IsNumber(volume)) setVolume(static_cast<int>(volume->valuedouble));
             if (cJSON_IsNumber(brightness)) {
                 int value = static_cast<int>(brightness->valuedouble);
@@ -697,6 +862,13 @@ bool hostRoute(void*, cJSON* request, const char* command, const char* action, c
                     Display::setRotation(s_context.settings.rotation);
                     saveSettings();
                 }
+            }
+            if (cJSON_IsBool(nfc)) {
+                if (!applyNfcEnabled(cJSON_IsTrue(nfc))) {
+                    *error = "NFC_BUSY";
+                    return true;
+                }
+                saveSettings();
             }
         } else if (std::strcmp(action, "reboot") == 0) {
             // Let the response leave the USB queue before restarting.
@@ -737,24 +909,340 @@ bool hostRoute(void*, cJSON* request, const char* command, const char* action, c
         cJSON_AddNumberToObject(info, "expected", static_cast<double>(ota.expected));
         return true;
     }
+    if (std::strcmp(command, "media") == 0) {
+        cJSON_AddStringToObject(response, "cmd", "media");
+        cJSON_AddStringToObject(response, "act", action ? action : "");
+        if (!action) {
+            *error = "BAD_ACT";
+            return true;
+        }
+        const auto snapshot = catalog();
+        if (std::strcmp(action, "info") == 0) {
+            auto* data = cJSON_AddObjectToObject(response, "data");
+            if (snapshot) {
+                addMediaInfo(data, *snapshot, s_context.catalog_ready);
+            } else {
+                cJSON_AddBoolToObject(data, "ready", false);
+                cJSON_AddNumberToObject(data, "trackTotal", 0);
+                cJSON_AddNumberToObject(data, "storyTotal", 0);
+                cJSON_AddArrayToObject(data, "categories");
+            }
+            return true;
+        }
+        if (!snapshot || !s_context.catalog_ready) {
+            *error = "MEDIA_NOT_READY";
+            return true;
+        }
+        if (std::strcmp(action, "tracks") == 0) {
+            auto* data = cJSON_AddObjectToObject(response, "data");
+            addMediaTracks(data, *snapshot, mediaParam(request, "offset", 0),
+                           mediaParam(request, "limit", 24));
+            return true;
+        }
+        if (std::strcmp(action, "stories") == 0) {
+            auto* data = cJSON_AddObjectToObject(response, "data");
+            addMediaStories(data, *snapshot, mediaParam(request, "offset", 0),
+                            mediaParam(request, "limit", 12));
+            return true;
+        }
+        *error = "BAD_ACT";
+        return true;
+    }
     if (std::strcmp(command, "nfc") == 0) {
         cJSON_AddStringToObject(response, "cmd", "nfc");
         cJSON_AddStringToObject(response, "act", action ? action : "");
-        if (!s_nfc) {
+        auto* service = s_nfc.load(std::memory_order_acquire);
+        if (!service) {
             *error = "NFC_UNAVAILABLE";
             return true;
         }
-        if (!action || std::strcmp(action, "status") != 0) {
-            *error = "NOT_SUPPORTED";
+        if (!action) {
+            *error = "BAD_ACT";
             return true;
         }
-        cJSON* data = cJSON_AddObjectToObject(response, "data");
-        addNfcStatus(data);
+        // The device settings switch is a master gate: status stays readable,
+        // every other action reports the switch instead of pretending to work.
+        if (!service->enabled() && std::strcmp(action, "status") != 0) {
+            *error = "NFC_DISABLED";
+            return true;
+        }
+        if (std::strcmp(action, "status") == 0) {
+            addNfcStatus(cJSON_AddObjectToObject(response, "data"), *service);
+            return true;
+        }
+        if (std::strcmp(action, "poll") == 0 || std::strcmp(action, "start") == 0 ||
+            std::strcmp(action, "stop") == 0) {
+            // stop always disables, even if the client also sent on:true.
+            bool on = true;
+            if (std::strcmp(action, "stop") == 0) {
+                on = false;
+            } else {
+                const cJSON* requested = cJSON_GetObjectItemCaseSensitive(request, "on");
+                if (cJSON_IsBool(requested)) on = cJSON_IsTrue(requested);
+            }
+            if (!service->pollNow(on)) {
+                *error = "BUSY";
+                return true;
+            }
+            addNfcStatus(cJSON_AddObjectToObject(response, "data"), *service);
+            return true;
+        }
+        if (std::strcmp(action, "refresh") == 0) {
+            const char* failure = "";
+            if (!service->refresh(&failure)) {
+                *error = (failure && failure[0]) ? failure : "BUSY";
+                return true;
+            }
+            return true;
+        }
+        if (std::strcmp(action, "read") == 0) {
+            const cJSON* kind_item = cJSON_GetObjectItemCaseSensitive(request, "kind");
+            const char* kind = cJSON_IsString(kind_item) ? kind_item->valuestring : "page";
+            const bool block = std::strcmp(kind, "block") == 0;
+            int start = 0;
+            const cJSON* start_item = cJSON_GetObjectItemCaseSensitive(request, "start");
+            if (cJSON_IsNumber(start_item)) {
+                const double value = start_item->valuedouble;
+                if (!(value >= 0) || value > 255) {
+                    *error = "RANGE";
+                    return true;
+                }
+                start = static_cast<int>(value);
+            }
+            int count = 8;
+            const cJSON* count_item = cJSON_GetObjectItemCaseSensitive(request, "count");
+            if (cJSON_IsNumber(count_item)) {
+                const double value = count_item->valuedouble;
+                if (!(value >= 1)) count = 1;
+                else if (value >= 64) count = 64;
+                else count = static_cast<int>(value);
+            }
+            uint8_t key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+            bool has_key = false;
+            const cJSON* key_item = cJSON_GetObjectItemCaseSensitive(request, "key");
+            if (cJSON_IsString(key_item) && key_item->valuestring[0]) {
+                if (hexDecode(key_item->valuestring, key, sizeof(key)) != 6) {
+                    *error = "BAD_KEY";
+                    return true;
+                }
+                has_key = true;
+            }
+            Nfc::RawResult result;
+            if (!service->readRaw(block, static_cast<uint16_t>(start), static_cast<uint16_t>(count),
+                                  key, has_key, result)) {
+                *error = result.error[0] ? result.error : "READ";
+                return true;
+            }
+            char hex[2 * 256 + 1];
+            hexText(result.data, result.len, hex, sizeof(hex));
+            cJSON* data = cJSON_AddObjectToObject(response, "data");
+            cJSON_AddStringToObject(data, "kind", block ? "block" : "page");
+            cJSON_AddNumberToObject(data, "start", start);
+            cJSON_AddNumberToObject(data, "len", result.len);
+            cJSON_AddStringToObject(data, "hex", hex);
+            return true;
+        }
+        if (std::strcmp(action, "write_ndef") == 0) {
+            const cJSON* ndef = cJSON_GetObjectItemCaseSensitive(request, "ndef");
+            if (!cJSON_IsString(ndef)) {
+                *error = "BAD_HEX";
+                return true;
+            }
+            // One USB worker executes routes, so this staging buffer is private.
+            static uint8_t buffer[1024];
+            const int length = hexDecode(ndef->valuestring, buffer, sizeof(buffer));
+            if (length <= 0) {
+                *error = "BAD_HEX";
+                return true;
+            }
+            bool verify = true;
+            const cJSON* verify_item = cJSON_GetObjectItemCaseSensitive(request, "verify");
+            if (cJSON_IsBool(verify_item)) verify = cJSON_IsTrue(verify_item);
+            const char* failure = "";
+            if (!service->startWriteNdef(buffer, static_cast<uint16_t>(length), verify, &failure)) {
+                *error = (failure && failure[0]) ? failure : "WRITE";
+                return true;
+            }
+            cJSON_AddBoolToObject(response, "accepted", true);
+            cJSON_AddNumberToObject(response, "len", length);
+            return true;
+        }
+        if (std::strcmp(action, "write_raw") == 0) {
+            const cJSON* kind_item = cJSON_GetObjectItemCaseSensitive(request, "kind");
+            const char* kind = cJSON_IsString(kind_item) ? kind_item->valuestring : "page";
+            const bool block = std::strcmp(kind, "block") == 0;
+            int start = 0;
+            const cJSON* start_item = cJSON_GetObjectItemCaseSensitive(request, "start");
+            if (cJSON_IsNumber(start_item)) {
+                const double value = start_item->valuedouble;
+                if (!(value >= 0) || value > 255) {
+                    *error = "RANGE";
+                    return true;
+                }
+                start = static_cast<int>(value);
+            }
+            const cJSON* data_item = cJSON_GetObjectItemCaseSensitive(request, "data");
+            if (!cJSON_IsString(data_item)) {
+                *error = "BAD_HEX";
+                return true;
+            }
+            static uint8_t buffer[256];
+            const int length = hexDecode(data_item->valuestring, buffer, sizeof(buffer));
+            if (length <= 0) {
+                *error = "BAD_HEX";
+                return true;
+            }
+            uint8_t key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+            bool has_key = false;
+            const cJSON* key_item = cJSON_GetObjectItemCaseSensitive(request, "key");
+            if (cJSON_IsString(key_item) && key_item->valuestring[0]) {
+                if (hexDecode(key_item->valuestring, key, sizeof(key)) != 6) {
+                    *error = "BAD_KEY";
+                    return true;
+                }
+                has_key = true;
+            }
+            const char* failure = "";
+            if (!service->startWriteRaw(block, static_cast<uint16_t>(start), buffer,
+                                        static_cast<uint16_t>(length), key, has_key, &failure)) {
+                *error = (failure && failure[0]) ? failure : "WRITE";
+                return true;
+            }
+            cJSON_AddBoolToObject(response, "accepted", true);
+            cJSON_AddNumberToObject(response, "len", length);
+            return true;
+        }
+        *error = "BAD_ACT";
         return true;
     }
     return false;
 }
+
+#if CONFIG_STORYBOX_NFC
+const char* nfcWritePhase(Nfc::WritePhase phase) {
+    switch (phase) {
+        case Nfc::WritePhase::Start:     return "start";
+        case Nfc::WritePhase::Writing:   return "writing";
+        case Nfc::WritePhase::Verifying: return "verifying";
+        case Nfc::WritePhase::Done:      return "done";
+        case Nfc::WritePhase::Error:     return "error";
+        default:                         return "unknown";
+    }
+}
+
+// Turn one queued NFC state change into an unsolicited SBX4 "evt":"nfc" frame.
+// The application task is the only event consumer, which keeps the JSON
+// identical to the Arduino protocol so the desktop workbench is unchanged.
+void publishNfcEventToHost(const Nfc::Event& event, NativeNfc::Service& service) {
+        cJSON* doc = cJSON_CreateObject();
+        if (!doc) return;
+        cJSON_AddNumberToObject(doc, "v", 4);
+        cJSON_AddStringToObject(doc, "evt", "nfc");
+        bool publish = true;
+        switch (event.type) {
+            case Nfc::EventType::Module: {
+                // Read the module state through the mutex-protected snapshot:
+                // Pn532's firmware text belongs to the NFC task.
+                const auto state = service.snapshot();
+                cJSON_AddStringToObject(doc, "type", "module");
+                cJSON_AddBoolToObject(doc, "present", event.modulePresent);
+                cJSON_AddStringToObject(doc, "chip", Nfc::moduleName());
+                cJSON_AddStringToObject(doc, "fw", state.firmware);
+                cJSON_AddStringToObject(doc, "i2c", "0x24");
+                cJSON_AddBoolToObject(doc, "polling", state.polling);
+                break;
+            }
+            case Nfc::EventType::Card:
+                cJSON_AddStringToObject(doc, "type", "card");
+                addNfcCard(cJSON_AddObjectToObject(doc, "card"), event.card);
+                break;
+            case Nfc::EventType::Removed:
+                cJSON_AddStringToObject(doc, "type", "removed");
+                break;
+            case Nfc::EventType::Write:
+                cJSON_AddStringToObject(doc, "type", "write");
+                cJSON_AddStringToObject(doc, "phase", nfcWritePhase(event.phase));
+                cJSON_AddNumberToObject(doc, "pct", event.percent);
+                cJSON_AddNumberToObject(doc, "written", event.written);
+                cJSON_AddBoolToObject(doc, "ok", event.ok);
+                if (event.code && event.code[0]) cJSON_AddStringToObject(doc, "code", event.code);
+                if (event.message[0]) cJSON_AddStringToObject(doc, "msg", event.message);
+                break;
+            default:
+                publish = false;
+                break;
+        }
+        if (publish) {
+            char* text = cJSON_PrintUnformatted(doc);
+            if (text) {
+                Host::publishJson(text, std::strlen(text));
+                cJSON_free(text);
+            }
+        }
+        cJSON_Delete(doc);
+}
+#endif  // CONFIG_STORYBOX_NFC
 #endif  // CONFIG_STORYBOX_USB_PROTOCOL
+
+#if CONFIG_STORYBOX_NFC
+// A resource card is the only thing that starts playback by itself. A host that
+// is actively sending commands (the desktop workbench) keeps control; a
+// standalone device with only a charger sees no host traffic and plays.
+bool nfcAutoPlayAllowed() {
+#if CONFIG_STORYBOX_USB_PROTOCOL
+    if (Host::recentlyActive(10000)) return false;
+#endif
+    return !Video::active() && !Video::busy();
+}
+
+void playNfcResource(const char* path) {
+    if (!path || (std::strncmp(path, "/music/", 7) != 0 && std::strncmp(path, "/story/", 7) != 0)) {
+        return;
+    }
+    const auto snapshot = catalog();
+    if (!snapshot) return;
+
+    for (std::size_t i = 0; i < snapshot->tracks.size(); ++i) {
+        const auto& track = snapshot->tracks[i];
+        if (track.path != path) continue;
+        if (g_playlist.select(snapshot, track.category) && g_playlist.seekPath(track.path)) {
+            setNowPlaying("music", track.name.c_str());
+            playCurrent(true);
+            ESP_LOGI(kTag, "NFC play music: %s", track.path.c_str());
+        }
+        return;
+    }
+
+    for (std::size_t i = 0; i < snapshot->stories.size(); ++i) {
+        if (snapshot->stories[i].audio != path) continue;
+        openStory(i);
+        ESP_LOGI(kTag, "NFC play story: %s", path);
+        return;
+    }
+    ESP_LOGW(kTag, "NFC resource not in catalog: %s", path);
+}
+
+void handleNfcCardEvent(const Nfc::Card& card) {
+    if (!nfcAutoPlayAllowed()) return;
+    char uri[384];
+    if (!Nfc::ndefUri(card, uri, sizeof(uri))) return;
+    static constexpr char kPrefix[] = "storybox://media?path=";
+    if (std::strncmp(uri, kPrefix, sizeof(kPrefix) - 1) != 0) return;
+    playNfcResource(uri + sizeof(kPrefix) - 1);
+}
+
+void handleNfcEvents() {
+    auto* service = s_nfc.load(std::memory_order_acquire);
+    if (!service) return;
+    Nfc::Event event;
+    for (int budget = 0; budget < 6 && Nfc::takeEvent(event); ++budget) {
+#if CONFIG_STORYBOX_USB_PROTOCOL
+        publishNfcEventToHost(event, *service);
+#endif
+        if (event.type == Nfc::EventType::Card) handleNfcCardEvent(event.card);
+    }
+}
+#endif  // CONFIG_STORYBOX_NFC
 
 void handleBleCommands() {
     Ble::Command command;
@@ -879,15 +1367,20 @@ void sampleInput(Event& event) {
 }
 
 void run() {
+    logHeap("app task start");
     Display::begin();
+    logHeap("after display");
     Fonts::begin();
+    logHeap("after fonts");
     Input::begin();
     Hall::begin();
     Ble::begin("StoryBox", makeBleHooks());
+    logHeap("after ble");
     Power::begin();
     Theme::init();
     drawBoot("正在启动", "");
     Display::present(true);
+    logHeap("after boot screen");
 
     s_context.fram_confirmed =
 #if CONFIG_STORYBOX_FRAM_CONFIRMED
@@ -972,10 +1465,15 @@ void run() {
 
 #if CONFIG_STORYBOX_NFC
     static NativeNfc::Service nfc;
-    if (bus_ready && nfc.begin(bus.handle()) == ESP_OK) {
-        nfc.setPolling(true);
-        s_nfc = &nfc;
-        ESP_LOGI(kTag, "NFC polling enabled");
+    const bool nfc_enabled = s_context.settings.nfc != 0;
+    if (bus_ready && nfc.begin(bus.handle(), nfc_enabled) == ESP_OK) {
+        // The host starts polling with nfc.poll, exactly like the Arduino
+        // firmware; without a host the radio stays quiet on the shared I2C bus.
+        s_nfc.store(&nfc, std::memory_order_release);
+        // Poll from boot so a card works without a PC; an active workbench
+        // suppresses the resulting auto-play separately.
+        if (nfc_enabled) nfc.setPolling(true);
+        ESP_LOGI(kTag, "NFC service %s", nfc_enabled ? "ready" : "disabled by settings");
     } else {
         ESP_LOGW(kTag, "PN532 unavailable; NFC commands report NFC_UNAVAILABLE");
     }
@@ -999,9 +1497,9 @@ void run() {
         }
     }
 #if CONFIG_STORYBOX_NFC
-    constexpr const char* kHostFeature = "nfc";
+    constexpr const char* kHostFeature = "nfc,nfc.ndef,nfc.raw,nfc.write-verify,media";
 #else
-    constexpr const char* kHostFeature = nullptr;
+    constexpr const char* kHostFeature = "media";
 #endif
     if (!Host::attachRoutes(hostRoute, nullptr, kHostFeature)) {
         ESP_LOGW(kTag, "USB route already registered");
@@ -1014,17 +1512,23 @@ void run() {
     g_playback.setVolume(static_cast<unsigned>(s_context.volume));
     g_playback.setEq(static_cast<Audio::EqPreset>(s_context.settings.eq));
 
-    s_catalog = g_library.snapshot();
+    publishCatalog();
+    logHeap("boot: before media index");
     if (s_context.sd_mounted && g_library.loadCache(Storage::SdVolume::root)) {
-        s_catalog = g_library.snapshot();
+        publishCatalog();
         s_context.catalog_ready = true;
-        ESP_LOGI(kTag, "media index loaded");
+        const auto& loaded = *s_catalog;
+        ESP_LOGI(kTag, "media index loaded: %u tracks, %u stories",
+                 static_cast<unsigned>(loaded.tracks.size()),
+                 static_cast<unsigned>(loaded.stories.size()));
+        logHeap("after media index");
     } else if (s_context.sd_mounted) {
         ESP_LOGI(kTag, "media index missing; first library page will scan");
     }
 
     goHome();
     restoreLastSession();
+    logHeap("after session restore");
 
     uint32_t last_volume_save = nowMs();
     uint32_t last_progress_save = last_volume_save;
@@ -1111,6 +1615,11 @@ void run() {
             }
         }
 
+#if CONFIG_STORYBOX_NFC
+        // Drain NFC state changes every frame. The same consumer feeds the USB
+        // event channel (when compiled) and the standalone card auto-play.
+        handleNfcEvents();
+#endif
 #if CONFIG_STORYBOX_USB_PROTOCOL
         // A host upload bumps the storage revision. Rescan once playback is
         // idle: the maintenance window needs every file lease released.
@@ -1145,6 +1654,12 @@ void run() {
         // recent RX traffic (commands from the mini program) keeps it awake.
         power_inputs.host_active = Ble::connected() &&
                                    (now - Ble::lastActivityMs()) < 15000u;
+#if CONFIG_STORYBOX_USB_PROTOCOL
+        // The USB workbench sends a heartbeat every 5 s. Keep the device awake
+        // while it is being used; close the app and the 3-minute idle sleep can
+        // take over again.
+        power_inputs.host_active = power_inputs.host_active || Host::recentlyActive(15000);
+#endif
         Power::Config power_config{};
         power_config.screen_off_min = s_context.settings.screen_off_min;
         power_config.sleep_min = s_context.settings.sleep_min;
@@ -1214,7 +1729,23 @@ void applyEq(uint8_t preset) {
     if (s_playback) s_playback->setEq(static_cast<Audio::EqPreset>(s_context.settings.eq));
 }
 
-CatalogPtr catalog() { return s_catalog; }
+bool applyNfcEnabled(bool enabled) {
+    auto* service = s_nfc.load(std::memory_order_acquire);
+    if (!enabled && service && service->snapshot().busy) return false;
+    s_context.settings.nfc = enabled ? 1 : 0;
+    if (service) {
+        service->setEnabled(enabled);
+        // Standalone card use needs polling without a host; the host's own
+        // nfc.poll remains idempotent.
+        if (enabled) service->setPolling(true);
+    }
+    return true;
+}
+
+CatalogPtr catalog() {
+    std::lock_guard<std::mutex> lock(s_catalog_mutex);
+    return s_catalog;
+}
 Media::Playlist& playlist() { return g_playlist; }
 Audio::Playback& playback() { return g_playback; }
 Storage::AccessGate& storageGate() { return g_gate; }
@@ -1234,7 +1765,7 @@ bool refreshCatalog() {
         ESP_LOGW(kTag, "media scan failed: %d", static_cast<int>(result));
         return false;
     }
-    s_catalog = g_library.snapshot();
+    publishCatalog();
     s_context.catalog_ready = true;
     const auto saved = g_library.saveCache(Storage::SdVolume::root);
     if (saved != Storage::UploadResult::Ok) {
@@ -1598,6 +2129,10 @@ void goHome() {
 void openSettings() { pushPage(createSettingsPage()); }
 
 bool start() {
+    // The UI task keeps an internal stack: BLE init writes NVS from this task, and
+    // a PSRAM stack is unreachable while the flash cache is off (IDF asserts in
+    // spi_flash_disable_interrupts_caches_and_other_cpu). The audio, USB and video
+    // control tasks, which never touch flash, do live in PSRAM.
     const auto created = xTaskCreatePinnedToCore(
         [](void*) {
             run();
